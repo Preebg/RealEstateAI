@@ -17,7 +17,7 @@ with st.sidebar:
     monthly_rent = st.number_input("Monthly Rent ($)", value=2500)
     year_built = st.number_input("Year Built", value=1975)
 
-listing_description = st.text_area("Listing Description", placeholder="Paste Zillow text here...")
+listing_description = st.text_area("Listing Description", placeholder="Paste Description of the property here...")
 
 # 3. The "Expert" AI Function
 def get_maintenance_estimate(description, year):
