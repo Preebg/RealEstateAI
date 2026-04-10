@@ -105,7 +105,7 @@ if st.button("Analyze Property"):
 
             #Expense calculations
             monthly_taxes=((tax_rate/100)*price)/12
-            monthly_maint = (final_maint_percent / 100 * price) / 12
+            monthly_maint = (final_maint_percent / 100 * monthly_rent)
             monthly_vacancy_reserve=monthly_rent*0.05
             
             total_monthly_expenses = monthly_mortgage + monthly_taxes + monthly_insurance + monthly_HOA + monthly_maint + monthly_vacancy_reserve
@@ -116,11 +116,13 @@ if st.button("Analyze Property"):
             annual_noi = (monthly_rent*12)-(monthly_maint*12)
             if (price>0):
                 cap_rate = (annual_noi / price) * 100
-            else: 0 
+            else: 
+                cap_rate=0 
             initial_investment = price *(down_payment/100)
             if(initial_investment>0):
                 cash_on_cash=(monthly_net_cash_flow*12)/(initial_investment)*100
-            else: 0 
+            else: 
+                cash_on_cash = 0 
 
             # 6. Display Results
             st.divider()
@@ -130,6 +132,39 @@ if st.button("Analyze Property"):
             col1.metric("Monthly Take-Home", f"${monthly_net_cash_flow:,.2f}")
             col2.metric("Risk-Adjusted Cap Rate", f"{cap_rate:.2f}%")
             col3.metric("Cash On Cash", f"{cash_on_cash:.2f}%")
-            st.table()
-            st.warning(f"Note: Using a {final_maint_percent}% maintenance rate for a house built in {year_built}.")
+            
+            # 7. The Cash Flow Table (Hidden by Default)
+            with st.expander("View Detailed Monthly Breakdown"):
+                st.write("Monthly Cash Flow")
+
+                table_data={
+                    "Description": [
+                        "Gross Monthly Rent",
+                        "Mortgage Payment (P&I)",
+                        "Property Taxes",
+                        "Insurance",
+                        "HOA Fee",
+                        "Maintenance (CapEx)",
+                        "Vacancy (5%)",  
+                        "Total Expenses"             
+                                    
+                    ],
+                    "Amount": [
+                        f"${monthly_rent:,.2f}",
+                        f"-${monthly_mortgage:,.2f}",
+                        f"-${monthly_taxes:,.2f}",
+                        f"-${monthly_insurance:,.2f}",
+                        f"-${monthly_HOA:,.2f}",
+                        f"-${monthly_maint:,.2f}",
+                        f"-${monthly_vacancy_reserve:,.2f}",
+                        f"**${total_monthly_expenses:,.2f}**"
+                    ]
+                }
+                df= pd.DataFrame(table_data)
+                st.table(df)
+
+                st.info(f"Property Age: {datetime.datetime.now().year - year_built} years.")
+                st.info(f"Maintenance is calculated at {final_maint_percent}% of property value annually.")
+
+                st.caption("Disclaimer: This is an AI-powered tool for educational purposes. Always verify financial data with a professional before making investment decisions.")
 
