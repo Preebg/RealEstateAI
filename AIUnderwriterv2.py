@@ -13,15 +13,19 @@ client = genai.Client(api_key=API_KEY)
 # 3. Sidebar for Inputs (Instead of hardcoded variables)
 with st.sidebar:
     st.header("Property Stats")
-    price = st.number_input("Purchase Price ($)", value=400000)
-    monthly_rent = st.number_input("Monthly Rent ($)", value=2500)
-    year_built = st.number_input("Year Built", value=1975)
+    price = st.number_input("Purchase Price ($)", value=0)
+    monthly_rent = st.number_input("Monthly Rent ($)", value=0)
+    year_built = st.number_input("Year Built", value=2026)
+    down_payment=st.number_input("Expected Down Payment (%)", value=20)
+    loan_tenure=st.number_input("Loan Term (yrs)", value=30)
+    interest_rate=st.number_input("Your Mortgage Rate (%)", value=6)
 
 listing_description = st.text_area("Listing Description", placeholder="Paste Description of the property here...")
 
-# 3. The "Expert" AI Function
+# 3. The AI Function
+@st.cache_data
 def get_maintenance_estimate(description, year):
-    current_year = 2026
+    current_year = datetime.datetime.now().year
     age = current_year - year
     
     # We added the "Conservative Investor" rules here to fix the 1.5% issue
@@ -32,14 +36,14 @@ def get_maintenance_estimate(description, year):
 
     RULES for Annual Maintenance %:
     - New Construction (<5 years): 1-2%
-    - Mid-Age (10-25 years): 2-4%
-    - Old/Original (30+ years): 5-8% 
-    - If 'Original HVAC', 'Original Windows', or 'TLC' is mentioned, ensure the score is at least 6%.
+    - Mid-Age (10-25 years): 6-8%
+    - Old/Original (30+ years): 10-12% 
+    - If 'Original HVAC', 'Original Windows', 'TLC', or 'AS-IS' is mentioned, ensure the score is at least 8%.
     - If 'new roof' or 'new hvac' or 'updated'is mentioned, reduce the score by 1-2%.
 
-    Return ONLY the final percentage as a number (e.g. 5.5).
+    Return ONLY the final percentage as a number (ex. 5.5).
     """ 
-    response = client.models.generate_content(model="gemini-2.5-flash", contents=prompt)
+    response = client.models.generate_content(model="gemini-3.1-flash-lite", contents=prompt)
     return float(response.text.strip())
 
 # 4. The Analysis Logic
