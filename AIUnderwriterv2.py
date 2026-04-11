@@ -15,156 +15,175 @@ model_name="gemini-3.1-flash-lite-preview"
 
 # 3. Sidebar for Inputs (Instead of hardcoded variables)
 with st.sidebar:
-    st.header("Property Stats")
-    address=st.text_input("Property Address", placeholder="e.g. 123 Maple St")
-    down_payment=st.number_input("Expected Down Payment (%)", value=20)
+    st.header("Investment Parameters")
+    down_payment=st.number_input("Expected Down Payment (%)", value=25)
     loan_term=st.number_input("Loan Term (yrs)", value=30)
     interest_rate=st.number_input("Your Mortgage Rate (%)", value=6)
 
-listing_description = st.text_area("Listing Description", placeholder="Paste Description of the property here...")
+address = st.text_input("Address", placeholder="Enter the property address.")
+
 # 4. Get Property Details From The Address
 @st.cache_data
-def get_property_details(address, description):
+def get_property_details(address):
     prompt = f"""
-    Act as a landlord trying to provide a fair rent.
-    Provide accurate estimated real estate data for {address} and the {description}:
-    - Price of the home as listed
-    - Year home is built
-    - Estimated rent per month (Increase rent by $100-200 if new(0-5 years old)or newly renovated)
-    - Annual Property tax rate (as percentage, ex. 1.5)
-    - HOA fee monthly for this community
-    - Estimated monthly insurance for this area
+    Act as a Real Estate Investment Analyst. Provide data for {address}.
+    Task: 
+    1. Find core stats: Price, Year Built, Estimated Rent(monthly), Tax Rate(annually as a percentage), HOA(monthly), Insurance(monthly).
+    2. Analyze condition: If you can't find a description of the listing, estimate condition based on age looking for key renovations or original property with no changes if it's old. 
+    3. Calculate Maintenance %: Use 1-2% for new(<5 yrs), 2-4% for mid-age(10-25 yrs), 5% for old(30+ yrs)/distressed.
+        - If 'Original HVAC', 'Original Windows', 'TLC', or 'AS-IS' is mentioned, ensure the score is at least 8%.
+        - If 'new roof' or 'new hvac' or 'updated'is mentioned, reduce the score by 1-2%.
+        - Return ONLY the final percentage as a number (ex. 5.5).
 
-    Return only a JSON object: {{"price": 0,"year":0,"rent":0,"tax_rate":0, "hoa":0, "insurance":0}}
+    Return only a JSON object with these keys: "price", "year", "rent", "tax_rate", "hoa", "insurance", "summary", "maint_percent"
     """
+    
     try:
-        response = client.models.generate_content(model=model_name, contents=prompt)
-        data = json.loads(response.text.replace("```json", "").replace("```", ""))
-        return [data['price'], data['year'], data['rent'], data['tax_rate'], data['hoa'], data['insurance']]
-    except Exception:
-        return [100000, 2026, 0.0, 1.2, 0.0, 80.0] 
+        # Only returns JSON object
+        response = client.models.generate_content(
+            model=model_name, 
+            contents=prompt, 
+            config={
+                "response_mime_type": "application/json", 
+                #"tools":[{ "google_search": {} }]
+            }
+        )
+        return json.loads(response.text.strip())
+        
+    except Exception as e:
+        st.error(f"AI Fetch Error: {e}")
+        # Fallback values so the rest of the app doesn't crash
+        return {
+            "price": 0, "year": 2026, "rent": 0, "tax_rate": 1.5, 
+            "hoa": 0, "insurance": 100, "summary": "Error fetching data.", "maint_percent": 3.0
+        }
     
-# 5. The Maintenance Function
-def get_maintenance_estimate(description, year):
-    current_year = datetime.datetime.now().year
-    age = current_year - year
-    
-    # We added the "Conservative Investor" rules here to fix the 1.5% issue
-    prompt = f"""
-    Act as a Conservative Real Estate Auditor. 
-    Analyze this {age}-year-old property.
-    Description: {description}
+# 5. The Analysis Logic
+if "property_data" not in st.session_state:
+    st.session_state["property_data"] = None
 
-    RULES for Annual Maintenance %:
-    - New Construction (<5 years): 1-2%
-    - Mid-Age (10-25 years): 2-4%
-    - Old/Original (30+ years): 4-8% 
-    - If 'Original HVAC', 'Original Windows', 'TLC', or 'AS-IS' is mentioned, ensure the score is at least 8%.
-    - If 'new roof' or 'new hvac' or 'updated'is mentioned, reduce the score by 1-2%.
-
-    Return ONLY the final percentage as a number (ex. 5.5).
-    """ 
-    response = client.models.generate_content(model=model_name, contents=prompt)
-    return float(response.text.strip())
-
-# 6. The Analysis Logic
 if st.button("Analyze Property"):
-    if not listing_description:
-        st.error("Please paste a description first!")
-    else:
+    if address:
+        st.session_state.property_data = None # Clear previous data while fetching new
         with st.spinner("AI is calculating costs..."):
-            # Skim basic details from the address
-            ai_pulled_values = get_property_details(address, listing_description)
-            price=ai_pulled_values[0]
-            year_built=ai_pulled_values[1]
-            monthly_rent=ai_pulled_values[2]
-            tax_rate=ai_pulled_values[3]
-            monthly_HOA=ai_pulled_values[4]
-            monthly_insurance=ai_pulled_values[5]
+            st.session_state.property_data=get_property_details(address)
+    else:
+        st.warning("Please enter a property address.")
+if st.session_state.property_data:
+    property_info=st.session_state.property_data
+    # Skim basic details from the address
+    price=property_info["price"]
+    year_built=property_info["year"]
+    monthly_rent=property_info["rent"]
+    tax_rate=property_info["tax_rate"]
+    monthly_HOA=property_info["hoa"]
+    monthly_insurance=property_info["insurance"]
+    monthly_maint=property_info["maint_percent"]
 
-            ai_suggested_val = get_maintenance_estimate(listing_description, year_built)
-            # We put it in the sidebar so you can tweak it while looking at the results
-            st.sidebar.markdown("---")
-            st.sidebar.write("### 🛠️ Manual Override")
-            final_maint_percent = st.sidebar.slider(
-                "Adjust Maintenance %", 
-                0.0, 10.0, 
-                float(ai_suggested_val),
-                help="The AI suggested the initial value, but you can override it here."
-            )
-            
-            # 5. The Math (Using the SLIDER value, not the raw AI value)
-            #Mortage Payment
-            loan_amount=price*(1-(down_payment/100))
-            monthly_ir = (interest_rate / 100) / 12
-            total_payments = loan_term * 12
-            if monthly_ir > 0:
-                monthly_mortgage = loan_amount * (monthly_ir * (1 + monthly_ir)**total_payments) / ((1 + monthly_ir)**total_payments - 1)
-            else:
-                monthly_mortgage = loan_amount / total_payments
+    # We put it in the sidebar so you can tweak it while looking at the results
+    st.sidebar.markdown("---")
+    st.sidebar.write("### 🛠️ Manual Override")
+    final_maint_percent = st.sidebar.slider(
+        "Adjust Maintenance %", 
+        0.0, 10.0, 
+        value = float(monthly_maint),
+        step=0.1,
+        help="The AI suggested the initial value, but you can override it here."
+    )
+        
+    # 5. The Math (Using the SLIDER value, not the raw AI value)
+    #Mortage Payment
+    loan_amount=price*(1-(down_payment/100))
+    monthly_ir = (interest_rate / 100) / 12
+    total_payments = loan_term * 12
+    if monthly_ir > 0:
+        monthly_mortgage = loan_amount * (monthly_ir * (1 + monthly_ir)**total_payments) / ((1 + monthly_ir)**total_payments - 1)
+    else:
+        monthly_mortgage = loan_amount / total_payments
 
-            #Expense calculations
-            monthly_taxes=((tax_rate/100)*price)/12
-            monthly_maint = (final_maint_percent / 100 * monthly_rent)
-            monthly_vacancy_reserve=monthly_rent*0.05
-            
-            total_monthly_expenses = monthly_mortgage + monthly_taxes + monthly_insurance + monthly_HOA + monthly_maint + monthly_vacancy_reserve
-            monthly_net_cash_flow = monthly_rent - total_monthly_expenses
+    #Expense calculations
+    monthly_taxes=((tax_rate/100)*price)/12
+    monthly_maint = (final_maint_percent / 100 * monthly_rent)
+    init_vacancy_reserve=monthly_rent*0.05
+    
+    user_vacancy_reserve = st.sidebar.slider(
+    "Adjust Vacancy Reserve %", 
+    0.0, 10.0, 
+    value = float(init_vacancy_reserve/monthly_rent)*100 if monthly_rent > 0 else 5.0,
+    step=0.1,         
+    help="The AI set this at 5% of rent, but you can adjust it based on your market knowledge."
+    )
+    actual_vacancy_reserve = (user_vacancy_reserve / 100) * monthly_rent
 
-            #Metrics
+    init_management_fee=monthly_rent*0.10
+    user_management_fee = st.sidebar.slider(
+    "Adjust Management Fee %", 
+    0.0, 10.0, 
+    value = float(init_management_fee/monthly_rent)*100 if monthly_rent > 0 else 10.0,
+    step=0.1,           
+    help="The AI set this at 10% of rent, but you can adjust it based on your market knowledge."
+    )
+    actual_management_fee = (user_management_fee / 100) * monthly_rent
+    
+    total_monthly_expenses = monthly_mortgage + monthly_taxes + monthly_insurance + monthly_HOA + monthly_maint + actual_vacancy_reserve + actual_management_fee
+    monthly_net_cash_flow = monthly_rent - total_monthly_expenses
 
-            annual_noi = (monthly_rent*12)-(monthly_maint*12)
-            if (price>0):
-                cap_rate = (annual_noi / price) * 100
-            else: 
-                cap_rate=0 
-            initial_investment = price *(down_payment/100)
-            if(initial_investment>0):
-                cash_on_cash=(monthly_net_cash_flow*12)/(initial_investment)*100
-            else: 
-                cash_on_cash = 0 
+    #Metrics
+    annual_noi = (monthly_rent*12)-(monthly_maint*12)
+    if (price>0):
+        cap_rate = (annual_noi / price) * 100
+    else: 
+        cap_rate=0 
+    initial_investment = price *(down_payment/100)
+    if(initial_investment>0):
+        cash_on_cash=(monthly_net_cash_flow*12)/(initial_investment)*100
+    else: 
+        cash_on_cash = 0 
 
-            # 6. Display Results
-            st.divider()
-            col1, col2, col3 = st.columns(3)
-            
-            # Show the user-adjusted number
-            col1.metric("Monthly Take-Home", f"${monthly_net_cash_flow:,.2f}")
-            col2.metric("Risk-Adjusted Cap Rate", f"{cap_rate:.2f}%")
-            col3.metric("Cash On Cash", f"{cash_on_cash:.2f}%")
-            
-            # 7. The Cash Flow Table (Hidden by Default)
-            with st.expander("View Detailed Monthly Breakdown"):
-                st.write("Monthly Cash Flow")
+    # 6. Display Results
+    st.divider()
+    col1, col2, col3 = st.columns(3)
+    
+    # Show the user-adjusted number
+    col1.metric("Monthly Take-Home", f"${monthly_net_cash_flow:,.2f}")
+    col2.metric("Risk-Adjusted Cap Rate", f"{cap_rate:.2f}%")
+    col3.metric("Cash On Cash", f"{cash_on_cash:.2f}%")
+    
+    # 7. The Cash Flow Table (Hidden by Default)
+    with st.expander("View Detailed Monthly Breakdown"):
+        st.write("Property Listed Price: ${:,.2f}".format(price))
+        st.write("Monthly Cash Flow")
 
-                table_data={
-                    "Description": [
-                        "Gross Monthly Rent",
-                        "Mortgage Payment (P&I)",
-                        "Property Taxes",
-                        "Insurance",
-                        "HOA Fee",
-                        "Maintenance (CapEx)",
-                        "Vacancy (5%)",  
-                        "Total Expenses"             
-                                    
-                    ],
-                    "Amount": [
-                        f"${monthly_rent:,.2f}",
-                        f"-${monthly_mortgage:,.2f}",
-                        f"-${monthly_taxes:,.2f}",
-                        f"-${monthly_insurance:,.2f}",
-                        f"-${monthly_HOA:,.2f}",
-                        f"-${monthly_maint:,.2f}",
-                        f"-${monthly_vacancy_reserve:,.2f}",
-                        f"**${total_monthly_expenses:,.2f}**"
-                    ]
-                }
-                df= pd.DataFrame(table_data)
-                st.table(df)
+        table_data={
+            "Description": [
+                "Gross Monthly Rent",
+                "Mortgage Payment (P&I)",
+                "Property Taxes",
+                "Insurance",
+                "HOA Fee",
+                "Maintenance (CapEx)",
+                "Vacancy Reserve",  
+                "Management Fee",
+                "Total Expenses"             
+                            
+            ],
+            "Amount": [
+                f"${monthly_rent:,.2f}",
+                f"${monthly_mortgage:,.2f}",
+                f"${monthly_taxes:,.2f}",
+                f"${monthly_insurance:,.2f}",
+                f"${monthly_HOA:,.2f}",
+                f"${monthly_maint:,.2f}",
+                f"${actual_vacancy_reserve:,.2f}",
+                f"${actual_management_fee:,.2f}",
+                f"${total_monthly_expenses:,.2f}"
+            ]
+        }
+        df= pd.DataFrame(table_data)
+        st.table(df)
 
-                st.info(f"Property Age: {datetime.datetime.now().year - year_built} years.")
-                st.info(f"Maintenance is calculated at {final_maint_percent}% of property value annually.")
+        st.info(f"Property Age: {datetime.datetime.now().year - year_built} years.")
+        st.info(f"Maintenance is calculated at {final_maint_percent}% of rent monthly.")
 
-                st.caption("Disclaimer: This is an AI-powered tool for educational purposes. Always verify financial data with a professional before making investment decisions.")
+        st.caption("Disclaimer: This is an AI-powered tool for educational purposes. Always verify financial data with a professional before making investment decisions.")
 
