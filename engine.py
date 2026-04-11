@@ -74,31 +74,38 @@ def get_property_details(address):
         }
     sources_set = set()
     try:
-        # Use .get to safely check for metadata
-        metadata = getattr(search_response.candidates[0], 'grounding_metadata', None)
+        # 1. Access the first candidate and grounding_metadata
+        candidate = search_response.candidates[0]
+        metadata = getattr(candidate, 'grounding_metadata', None)
         
         if metadata:
-            # Try to get chunks
+            # 2. Extract Chunks (The modern SDK path)
             chunks = getattr(metadata, 'grounding_chunks', [])
             for chunk in chunks:
-                uri = getattr(getattr(chunk, 'web', {}), 'uri', None)
-                if uri and "google.com/search" not in uri.lower():
-                    sources_set.add(uri)
+                # Use a more direct check for the 'web' attribute
+                web_source = getattr(chunk, 'web', None)
+                if web_source and hasattr(web_source, 'uri'):
+                    uri = web_source.uri
+                    # Exclude the generic search page but keep the actual listings
+                    if uri and "google.com/search" not in uri.lower():
+                        sources_set.add(uri)
             
-            # If we still have nothing, check the search entry point
+            # 3. Fallback to Search Entry Point if no specific links found
             if not sources_set:
                 sep = getattr(metadata, 'search_entry_point', None)
                 if sep and hasattr(sep, 'rendered_content'):
-                    # This is a fallback to at least show SOMETHING exists
-                    sources_set.add("https://www.google.com/search?q=" + address.replace(" ", "+"))
+                    sources_set.add(f"https://www.google.com/search?q={address.replace(' ', '+')}")
 
-        # Final check: If it's STILL empty, add a manual link so the button appears
+        # 4. Final safety check: Always give the user a button to click
         if not sources_set:
-            sources_set.add(f"https://www.zillow.com/homes/{address.replace(' ', '-')}_rb/")
+            # Force a Zillow link as a last resort
+            zillow_slug = address.replace(' ', '-')
+            sources_set.add(f"https://www.zillow.com/homes/{zillow_slug}_rb/")
 
         sources = list(sources_set)
+        
     except Exception as e:
-        # Fallback so the UI doesn't hide the section
+        # If metadata is missing entirely, at least provide a search link
         sources = [f"https://www.google.com/search?q={address.replace(' ', '+')}"]
 
     raw_context = search_response.text.strip()
