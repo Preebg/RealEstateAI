@@ -10,7 +10,7 @@ def check_password():
 
     if "password_correct" not in st.session_state:
         st.text_input("Enter Password", type="password", on_change=password_entered, key="password")
-        st.info("Junior Developer Beta: Please enter password to continue.")
+        st.info("Please enter password to continue.")
         return False
     elif not st.session_state["password_correct"]:
         st.text_input("Enter Password", type="password", on_change=password_entered, key="password")
