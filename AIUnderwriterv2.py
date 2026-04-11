@@ -5,7 +5,10 @@ import pandas as pd
 from engine import get_property_details 
 import tldextract
 import urllib.parse
+from authenticate import check_password
 
+if not check_password():
+    st.stop() 
 def safe_float(value):
     """Converts a value to float, handling strings, None, or empty values."""
     if value is None:
@@ -183,7 +186,7 @@ if st.session_state.property_data:
                 "Maintenance (CapEx)",
                 "Vacancy Reserve",  
                 "Management Fee",
-                "Total Expenses"             
+                "Total Costs"             
                             
             ],
             "Amount": [
