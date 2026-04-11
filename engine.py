@@ -72,6 +72,7 @@ def get_property_details(address):
             "price": 0, "year": 2026, "rent": 0, "tax_rate": 1.5, 
             "hoa": 0, "insurance": 100, "summary": "Error fetching data.", "maint_percent": 3.0
         }
+    """
     sources_set = set()
     try:
         # 1. Access the first candidate and grounding_metadata
@@ -107,6 +108,7 @@ def get_property_details(address):
     except Exception as e:
         # If metadata is missing entirely, at least provide a search link
         sources = [f"https://www.google.com/search?q={address.replace(' ', '+')}"]
+    """
 
     raw_context = search_response.text.strip()
     if not raw_context:
@@ -142,7 +144,7 @@ def get_property_details(address):
             }
         )
         property_data = json.loads(response.text.strip())
-        property_data["sources"] = sources  # Add sources to the property data dictionary
+        #property_data["sources"] = sources  # Add sources to the property data dictionary
         return property_data
         
     except Exception as e:
