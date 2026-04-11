@@ -1,20 +1,24 @@
 from google import genai
 import streamlit as st
 import datetime 
-import json 
 import pandas as pd 
+from engine import get_property_details 
+import tldextract
+
+#Helper function to clean source names for display
+def get_clean_source_name(url):
+    if "google.com/search" in url.lower():
+        return "Google Search Results"
+    ext = tldextract.extract(url)
+    brand = ext.domain.capitalize()
+    return f"{brand}.{ext.suffix}"
+
 # 1. Setup the Web Interface
 st.set_page_config(page_title="AI Property Scout", page_icon="🏠")
 st.title("🏠 AI Property Analyzer")
 st.write("Enter details below to get an AI-calculated Risk-Adjusted ROI.")
 
-# 2. API Setup
-API_KEY = st.secrets["GEMINI_API_KEY"] 
-client = genai.Client(api_key=API_KEY)
-search_model_name="gemini-2.5-flash"
-analysis_model_name="gemini-3.1-flash-lite-preview"
-
-# 3. Sidebar for Inputs (Instead of hardcoded variables)
+# 2. Sidebar for Inputs (Instead of hardcoded variables)
 with st.sidebar:
     st.header("Investment Parameters")
     down_payment=st.number_input("Expected Down Payment (%)", value=25)
@@ -23,104 +27,18 @@ with st.sidebar:
 
 address = st.text_input("Address", placeholder="Enter the property address.")
 
-# 4. Get Property Details From The Address
-@st.cache_data(show_spinner=False)
-def get_property_details(address):
-    #Search for property details using Google search tool in Gemini Pro. 
-    search_prompt = f"""
-    Search for the current property listing of {address}.
-    CRITICAL DATA POINTS NEEDED:
-    1. The exact 'Annual Property Tax' amount (look for public records or tax history, not a mortgage estimate) then divide by 12 to get the monthly cost.
-        - Return the monthly tax amount as a number only.
-    2. The 'Rent Zestimate' or actual 'Rental Listing' prices for similar homes in this specific neighborhood.
-    3. The current listing price and year built.
-    4. Details on HOA and insurance.
-    5. Insurance: Look for any mentions of insurance costs in the monthly expenses a website might list
-        - If none are found, use local averages based on zip code and label it 'Regional Estimate'.
     
-    IMPORTANT: Do NOT provide the 'Estimated Monthly Mortgage' or 'Estimated Monthly Payment'. 
-    I need the raw building and market data, not a loan calculation.
-    Also, provide a 3-4 sentence summary of the property's condition and any key features or issues mentioned in the listing such as 'new roof', 'original hvac', 'updated kitchen', 'TLC needed', 'AS-IS' etc.
-    """
-
-    search_response = client.models.generate_content(
-        model=search_model_name, 
-        contents=search_prompt, 
-        config={ 
-            "tools":[{ "google_search": {} }]
-        }
-    )
-    sources_set=set()
-    try:
-        metadata = search_response.candidates[0].grounding_metadata
-        if metadata.search_entry_point:
-            sources_set.add("Search results from Google Search")
-        if metadata.grounding_chunks:
-            #Extract URLs from grounding chunks if available
-            for chunk in metadata.grounding_chunks:
-                if hasattr(chunk, 'web') and chunk.web:
-                    if (hasattr(chunk.web, 'uri')):
-                        link = chunk.web.uri
-                        sources_set.add(link)
-        sources = list(sources_set)
-    except Exception as e:
-        st.warning(f"Could not extract sources from search metadata: {e}")
-        sources = []
-
-    raw_context = search_response.text.strip()
-    if not raw_context:
-        raw_context = "Search returned no text."
-
-    #Use analysis model to extract structured data and insights from the raw search context.
-    analysis_prompt=f"""
-    DATA:{raw_context}
-    Task: 
-    1. Extract: Price, Year Built, Estimated Rent, Tax Rate(As a percentage), HOA, Insurance.
-        - If the DATA provides a 'Regional Estimate' for insurance, label it as such in the summary.
-        - If the DATA says $0 or is missing insurance, use $80 and label it as 'Assumed Minimum' in the summary.
-    2. Calculate Maintenance %:
-        - New (<5 yrs): 1-2%
-        - Mid (10-25 yrs): 2-4%
-        - Old (30+ yrs): 4-6%
-        - If 'Original HVAC/Windows/TLC/AS-IS': 6-10%
-        - If 'New roof/hvac': reduce by 1-2%
-
-    IMPORTANT: For all numeric fields (price, rent, taxes, hoa, insurance, maint_percent), return ONLY the number. 
-    Do not include currency symbols, commas, or descriptive text like 'estimated'.
-    Return only a JSON object with these keys: "price", "year", "rent", "tax_rate", "hoa", "insurance", "summary", "maint_percent"
-    """
-    
-    try:
-        # Only returns JSON object
-        response = client.models.generate_content(
-            model=analysis_model_name, 
-            contents=analysis_prompt, 
-            config={
-                "response_mime_type": "application/json", 
-            }
-        )
-        property_data = json.loads(response.text.strip())
-        property_data["sources"] = sources  # Add sources to the property data dictionary
-        return property_data
-        
-    except Exception as e:
-        st.error(f"AI Fetch Error: {e}")
-        # Fallback values so the rest of the app doesn't crash
-        return {
-            "price": 0, "year": 2026, "rent": 0, "tax_rate": 1.5, 
-            "hoa": 0, "insurance": 100, "summary": "Error fetching data.", "maint_percent": 3.0
-        }
-    
-# 5. The Analysis Logic
+# 3. The Analysis Logic
 if "property_data" not in st.session_state:
     st.session_state["property_data"] = None
 
 if st.button("Analyze Property"):
     if address:
         st.session_state.property_data = None # Clear previous data while fetching new
-        with st.spinner("AI is calculating costs..."):
-            result = get_property_details(address)
-            st.session_state.property_data=result
+        status = st.status("🔍 Searching Zillow and Public Records...")
+        result = get_property_details(address)
+        status.update(label="✅ Analysis Complete!", state="complete")
+        st.session_state.property_data = result
     else:
         st.warning("Please enter a property address.")
 if st.session_state.property_data:
@@ -183,18 +101,19 @@ if st.session_state.property_data:
     init_management_fee=monthly_rent*0.10
     user_management_fee = st.sidebar.slider(
     "Adjust Management Fee %", 
-    0.0, 10.0, 
+    5.0, 12.0, 
     value = float(init_management_fee/monthly_rent)*100 if monthly_rent > 0 else 10.0,
     step=0.1,           
     help="The AI set this at 10% of rent, but you can adjust it based on your market knowledge."
     )
     actual_management_fee = (user_management_fee / 100) * monthly_rent
     
-    total_monthly_expenses = monthly_mortgage + monthly_taxes + monthly_insurance + monthly_HOA + monthly_maint + actual_vacancy_reserve + actual_management_fee
+    operating_expenses = monthly_taxes + monthly_insurance + monthly_HOA + monthly_maint + actual_vacancy_reserve + actual_management_fee
+    total_monthly_expenses = monthly_mortgage + operating_expenses
     monthly_net_cash_flow = monthly_rent - total_monthly_expenses
 
     #Metrics
-    annual_noi = (monthly_rent*12)-(monthly_maint*12)
+    annual_noi = (monthly_rent-operating_expenses)*12
     if (price>0):
         cap_rate = (annual_noi / price) * 100
     else: 
@@ -205,7 +124,7 @@ if st.session_state.property_data:
     else: 
         cash_on_cash = 0 
 
-    # 6. Display Results
+    # 4. Display Results
     st.divider()
     col1, col2, col3 = st.columns(3)
     
@@ -214,18 +133,11 @@ if st.session_state.property_data:
     col2.metric("Risk-Adjusted Cap Rate", f"{cap_rate:.2f}%")
     col3.metric("Cash On Cash", f"{cash_on_cash:.2f}%")
     
-    #Display the summary and sources from the AI search
+    # Display the summary from the AI search
     st.markdown("### 📝 AI Property Summary")
     st.write(property_info.get("summary", "No summary available."))
-    sources = property_info.get("sources", [])
-    if sources:
-        st.markdown("#### 🔗 Sources:")
-        for src in sources:
-            if src.startswith("http"):
-                st.markdown(f" - [View Listing Source]({src})")
-            else:
-                st.write(f"- {src}")
-    # 7. The Cash Flow Table (Hidden by Default)
+    
+    # 5. The Cash Flow Table (Hidden by Default)
     with st.expander("View Detailed Monthly Breakdown"):
         st.write("Property Listed Price: ${:,.2f}".format(price))
         st.write("Monthly Cash Flow")
@@ -260,6 +172,17 @@ if st.session_state.property_data:
 
         st.info(f"Property Age: {datetime.datetime.now().year - year_built} years.")
         st.info(f"Maintenance is calculated at {final_maint_percent}% of rent monthly.")
-
         st.caption("Disclaimer: This is an AI-powered tool for educational purposes. Always verify financial data with a professional before making investment decisions.")
+    sources = property_info.get("sources", [])
+    with st.popover("View Data Sources 🔗"):
+        for src in set(sources):
+            if src.startswith("http"):
+                label = get_clean_source_name(src)
+                st.markdown(f" - [{label}]({src})")
+            else:
+                st.write(f"- {src}")
+        else:
+            st.write("No direct links found, but data was verified via Google Search.")
+
+
 
