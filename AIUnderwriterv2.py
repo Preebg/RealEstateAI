@@ -6,7 +6,7 @@ import pandas as pd
 # 1. Setup the Web Interface
 st.set_page_config(page_title="AI Property Scout", page_icon="🏠")
 st.title("🏠 AI Property Analyzer")
-st.write("Enter details below to get an AI-calculated Risk-Adjusted Cap Rate.")
+st.write("Enter details below to get an AI-calculated Risk-Adjusted ROI.")
 
 # 2. API Setup
 API_KEY = st.secrets["GEMINI_API_KEY"] 
@@ -24,13 +24,23 @@ with st.sidebar:
 address = st.text_input("Address", placeholder="Enter the property address.")
 
 # 4. Get Property Details From The Address
-@st.cache_data
+@st.cache_data(show_spinner=False)
 def get_property_details(address):
     #Search for property details using Google search tool in Gemini Pro. 
     search_prompt = f"""
     Search for the current property listing of {address}.
-    Provide the current price, year built, estimated monthly rent, annual tax rate (as a percentage), monthly HOA fees, and monthly insurance costs.
-    Also, provide a 2-3 sentence summary of the property's condition and any key features or issues mentioned in the listing such as 'new roof', 'original hvac', 'updated kitchen', 'TLC needed', 'AS-IS' etc.
+    CRITICAL DATA POINTS NEEDED:
+    1. The exact 'Annual Property Tax' amount (look for public records or tax history, not a mortgage estimate) then divide by 12 to get the monthly cost.
+        - Return the monthly tax amount as a number only.
+    2. The 'Rent Zestimate' or actual 'Rental Listing' prices for similar homes in this specific neighborhood.
+    3. The current listing price and year built.
+    4. Details on HOA and insurance.
+    5. Insurance: Look for any mentions of insurance costs in the monthly expenses a website might list
+        - If none are found, use local averages based on zip code and label it 'Regional Estimate'.
+    
+    IMPORTANT: Do NOT provide the 'Estimated Monthly Mortgage' or 'Estimated Monthly Payment'. 
+    I need the raw building and market data, not a loan calculation.
+    Also, provide a 3-4 sentence summary of the property's condition and any key features or issues mentioned in the listing such as 'new roof', 'original hvac', 'updated kitchen', 'TLC needed', 'AS-IS' etc.
     """
 
     search_response = client.models.generate_content(
@@ -65,16 +75,18 @@ def get_property_details(address):
     analysis_prompt=f"""
     DATA:{raw_context}
     Task: 
-    1. Extract: Price, Year Built, Estimated Rent(monthly), Tax Rate(annually as a percentage), HOA(monthly), Insurance(monthly).
+    1. Extract: Price, Year Built, Estimated Rent, Tax Rate(As a percentage), HOA, Insurance.
+        - If the DATA provides a 'Regional Estimate' for insurance, label it as such in the summary.
+        - If the DATA says $0 or is missing insurance, use $80 and label it as 'Assumed Minimum' in the summary.
     2. Calculate Maintenance %:
-           - New (<5 yrs): 1-2%
-           - Mid (10-25 yrs): 2-4%
-           - Old (30+ yrs): 4-6%
-           - If 'Original HVAC/Windows/TLC/AS-IS': 6-10%
-           - If 'New roof/hvac/updated': reduce by 1-2%
+        - New (<5 yrs): 1-2%
+        - Mid (10-25 yrs): 2-4%
+        - Old (30+ yrs): 4-6%
+        - If 'Original HVAC/Windows/TLC/AS-IS': 6-10%
+        - If 'New roof/hvac': reduce by 1-2%
 
-    IMPORTANT: Return the "maint_percent" and "tax_rate" as a single FLOAT or INTEGER. 
-    Do NOT include the '%' sign and do NOT provide a range (ex. return 3.0, not "2-4%").
+    IMPORTANT: For all numeric fields (price, rent, taxes, hoa, insurance, maint_percent), return ONLY the number. 
+    Do not include currency symbols, commas, or descriptive text like 'estimated'.
     Return only a JSON object with these keys: "price", "year", "rent", "tax_rate", "hoa", "insurance", "summary", "maint_percent"
     """
     
@@ -122,7 +134,7 @@ if st.session_state.property_data:
         tax_rate=property_info["tax_rate"]
     except:
         tax_rate=1.5 # Default to 1.5% if AI doesn't return a valid number
-        
+
     monthly_HOA=property_info["hoa"]
     monthly_insurance=property_info["insurance"]
 
@@ -233,13 +245,13 @@ if st.session_state.property_data:
             ],
             "Amount": [
                 f"${monthly_rent:,.2f}",
-                f"${monthly_mortgage:,.2f}",
-                f"${monthly_taxes:,.2f}",
-                f"${monthly_insurance:,.2f}",
-                f"${monthly_HOA:,.2f}",
-                f"${monthly_maint:,.2f}",
-                f"${actual_vacancy_reserve:,.2f}",
-                f"${actual_management_fee:,.2f}",
+                f"-${monthly_mortgage:,.2f}",
+                f"-${monthly_taxes:,.2f}",
+                f"-${monthly_insurance:,.2f}",
+                f"-${monthly_HOA:,.2f}",
+                f"-${monthly_maint:,.2f}",
+                f"-${actual_vacancy_reserve:,.2f}",
+                f"-${actual_management_fee:,.2f}",
                 f"${total_monthly_expenses:,.2f}"
             ]
         }
