@@ -7,21 +7,30 @@ import pandas as pd
 
 #Saves every input into a local JSON file as a simple knowledge base for future reference and AI learning. Each property is stored under its address as the key, with all the details in a nested dictionary.
 def get_kb_raw_data():
-    """Fetches all property data from the private Google Sheet."""
     try:
         conn = st.connection("gsheets", type="streamlit_gsheets.gsheets_connection.GSheetsConnection")
-        df = conn.read(ttl=0)
-        # Convert 'sources' column back from string to list if it exists
-        if not df.empty and "sources" in df.columns:
-            df['sources'] = df['sources'].apply(lambda x: json.loads(x) if isinstance(x, str) and x.startswith('[') else x)
+        # 1. ttl=0 forces it to ignore the cache and get LIVE data
+        df = conn.read(ttl=0) 
+        
+        if df.empty:
+            return {}
+
+        # 2. If you saved the same address twice, this keeps only the NEWEST one
+        df = df.drop_duplicates(subset=['address'], keep='last')
+
+        # 3. Clean up the 'rent' column to ensure it's a clean number
+        if 'rent' in df.columns:
+            df['rent'] = pd.to_numeric(df['rent'], errors='coerce').fillna(0)
+            
         return df.set_index("address").to_dict('index')
     except Exception as e:
-        st.error(f"Error loading database: {e}")
+        # 4. Change st.error to print so it doesn't clutter your UI if it's just a warning
+        print(f"DB Sync Note: {e}") 
         return {}
 
 def save_knowledge_base(property_data):
     """Appends new property data to the private Google Sheet."""
-    conn = st.connection("gsheets", type=GSheetsConnection)
+    conn = st.connection("gsheets", type="streamlit_gsheets.gsheets_connection.GSheetsConnection")
     
     # Read existing data
     try:
