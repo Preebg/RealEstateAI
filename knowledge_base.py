@@ -4,59 +4,53 @@ import os
 import streamlit as st
 import pandas as pd
 
-KB_FILE = "property_kb.json"
-SHEET_URL = st.secrets["GSHEET_URL"]
-#Saves every input into a local JSON file as a simple knowledge base for future reference and AI learning. Each property is stored under its address as the key, with all the details in a nested dictionary.
-def save_knowledge_base(property_data):
-    """Saves the property dictionary to a permanent JSON file."""
-    kb = {}
-    if os.path.exists(KB_FILE):
-        try: 
-            with open(KB_FILE, "r") as f:
-                kb = json.load(f)
-        except (json.JSONDecodeError, FileNotFoundError):
-            kb = {}
-    if not os .path.exists(KB_FILE):
-        return "No previous examples found. Use your best judgement for this first one!"
-    # Use address as the unique ID for the house
-    address = property_data.get("address", "Unknown Address")
-    kb[address] = property_data
 
-    with open(KB_FILE, "w") as f:
-        json.dump(kb, f, indent=4)
+#Saves every input into a local JSON file as a simple knowledge base for future reference and AI learning. Each property is stored under its address as the key, with all the details in a nested dictionary.
+def get_kb_raw_data():
+    """Fetches all property data from the private Google Sheet."""
+    try:
+        conn = st.connection("gsheets", type=GSheetsConnection)
+        df = conn.read()
+        # Convert 'sources' column back from string to list if it exists
+        if not df.empty and "sources" in df.columns:
+            df['sources'] = df['sources'].apply(lambda x: json.loads(x) if isinstance(x, str) and x.startswith('[') else x)
+        return df.set_index("address").to_dict('index')
+    except Exception as e:
+        st.error(f"Error loading database: {e}")
+        return {}
+
+def save_knowledge_base(property_data):
+    """Appends new property data to the private Google Sheet."""
+    conn = st.connection("gsheets", type=GSheetsConnection)
+    
+    # Read existing data
+    try:
+        df = conn.read()
+    except:
+        df = pd.DataFrame()
+
+    # Convert sources list to string for spreadsheet storage
+    if "sources" in property_data and isinstance(property_data["sources"], list):
+        property_data["sources"] = json.dumps(property_data["sources"])
+
+    # Add the new property
+    new_row = pd.DataFrame([property_data])
+    updated_df = pd.concat([df, new_row], ignore_index=True)
+    
+    # Save back to cloud
+    conn.update(data=updated_df)
 
 def get_kb_context():
-    """Pulls the last 3 saved properties to teach the AI your style."""
-    if not os.path.exists(KB_FILE):
-        return ""
+    """Pulls recent examples to help the AI learn style."""
     try:
-        with open(KB_FILE, "r") as f:
-            kb = json.load(f)
+        df = get_kb_raw_data()
+        if not df: return ""
         
-        if not kb:
-            return ""
-
-        # Format the last 3 examples for the AI prompt
-        examples = list(kb.values())[-3:]
+        # Get last 3 addresses
+        examples = list(df.items())[-3:]
         context = "\n--- PREVIOUS ANALYSIS EXAMPLES ---\n"
-        for ex in examples:
-            context += f"Address: {ex.get('address')}\nRent: {ex.get('rent')}\nMaint: {ex.get('maint_percent')}%\n"
+        for addr, data in examples:
+            context += f"Address: {addr}\nRent: {data.get('rent')}\nMaint: {data.get('maint_percent')}%\n"
         return context
     except:
         return ""
-    
-def get_kb_raw_data():
-    if not os.path.exists(KB_FILE):
-        return {}
-    with open(KB_FILE, "r") as f:
-        return json.load(f)
-
-def get_kb_raw_data():
-    try:
-        csv_url = SHEET_URL.replace('/edit#gid=', '/export?format=csv&gid=')
-        return pd.read_csv(csv_url)
-    except:
-        return pd.DataFrame()
-
-def save_knowledge_base(property_data):
-    st.warning("Note: Saving to Google Sheets requires an 'Action' or a Form submission. For now, let's focus on reading your data!")
