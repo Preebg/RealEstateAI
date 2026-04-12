@@ -235,6 +235,7 @@ if st.session_state.property_data:
             
             # Save to JSON
             save_knowledge_base(property_info)
+            st.cache_data.clear()  # Clear cache to ensure fresh data is pulled next time
             
             # Use success message and rerun to hide this section immediately
             st.success(f"Saved {address} to the knowledge base!")

@@ -7,6 +7,7 @@ import os
 from knowledge_base import get_kb_context, get_kb_raw_data
 import datetime
 from streamlit_gsheets import GSheetsConnection
+import time 
 
 # 2. API Setup
 API_KEY = st.secrets["GEMINI_API_KEY"] 
@@ -22,35 +23,33 @@ def run_search_with_failover(prompt):
         tools=[types.Tool(google_search=types.GoogleSearch())]
     )
     
-    try:
-        # --- ATTEMPT 1: Use 2.5-Flash (High Quality, 20 RPD) ---
-        response = client.models.generate_content(
-            model=primary_search_model_name,
-            contents=prompt,
-            config=config
-        )
-        st.sidebar.success(f"Used {primary_search_model_name}")
-        return response
+    for attempt in range(3):
+        try:
+            response = client.models.generate_content(
+                model=primary_search_model_name,
+                contents=prompt,
+                config=config
+            )
+            return response
 
-    except errors.ClientError as e:
-        # Check if the error is 429 (Resource Exhausted/Out of Credits)
-        if e.code == 429:
-            st.sidebar.warning(f"⚠️ {primary_search_model_name} quota empty. Switching to {secondary_search_model_name}...")
-            
-            # --- ATTEMPT 2: Failover to 2.5-Flash-Lite (The backup) ---
-            try:
-                response = client.models.generate_content(
+        except errors.ClientError as e:
+            # Catch both Rate Limit (429) and Overloaded (503)
+            if e.code in [429, 503]:
+                if e.code == 503:
+                    st.sidebar.warning(f"⚠️ Model overloaded (503). Retrying in {2**attempt}s...")
+                    time.sleep(2**attempt) # Wait 1, 2, then 4 seconds
+                    continue # Try the loop again
+                
+                # If it's a 429, failover to the secondary model immediately
+                st.sidebar.warning(f"⚠️ Quota empty. Switching to {secondary_search_model_name}...")
+                return client.models.generate_content(
                     model=secondary_search_model_name,
                     contents=prompt,
                     config=config
                 )
-                return response
-            except Exception as inner_e:
-                st.error(f"Secondary model failed: {inner_e}")
-        else:
-            # If it's a different error (like a bad prompt), show it
-            st.error(f"API Error: {e.message}")
-    
+            else:
+                st.error(f"API Error: {e.message}")
+                break
     return None
 
 @st.cache_data(persist="disk", show_spinner=False)
