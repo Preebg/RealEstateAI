@@ -69,7 +69,8 @@ def get_property_details(address):
     3. The current listing price and year built.
     4. Details on HOA.
     5. Insurance: Look for any mentions of insurance costs in the monthly expenses a website might list
-        - If none are found, use local averages based on zip code and label it 'Regional Estimate'.
+        - Provide insurance costs as a monthly amount. If only annual insurance is found, divide by 12 and note in the summary that it was annual data converted to monthly.
+        - If none are found, use local averages based on zip code.
     
     IMPORTANT: Do NOT provide the 'Estimated Monthly Mortgage' or 'Estimated Monthly Payment'. 
     I need the raw building and market data, not a loan calculation.
