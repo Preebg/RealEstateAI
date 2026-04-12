@@ -23,33 +23,32 @@ def run_search_with_failover(prompt):
         tools=[types.Tool(google_search=types.GoogleSearch())]
     )
     
+    # We will try 3 times before giving up
     for attempt in range(3):
         try:
-            response = client.models.generate_content(
+            return client.models.generate_content(
                 model=primary_search_model_name,
                 contents=prompt,
                 config=config
             )
-            return response
-
         except errors.ClientError as e:
-            # Catch both Rate Limit (429) and Overloaded (503)
-            if e.code in [429, 503]:
-                if e.code == 503:
-                    st.sidebar.warning(f"⚠️ Model overloaded (503). Retrying in {2**attempt}s...")
-                    time.sleep(2**attempt) # Wait 1, 2, then 4 seconds
-                    continue # Try the loop again
+            # If 503 (Overloaded) or 429 (Rate Limit)
+            if e.code in [503, 429]:
+                # If it's the last attempt, try the secondary model as a hail mary
+                if attempt == 2:
+                    return client.models.generate_content(
+                        model=secondary_search_model_name,
+                        contents=prompt,
+                        config=config
+                    )
                 
-                # If it's a 429, failover to the secondary model immediately
-                st.sidebar.warning(f"⚠️ Quota empty. Switching to {secondary_search_model_name}...")
-                return client.models.generate_content(
-                    model=secondary_search_model_name,
-                    contents=prompt,
-                    config=config
-                )
+                # Otherwise, wait and try again (1s, 2s)
+                time.sleep(attempt + 1) 
+                continue
             else:
-                st.error(f"API Error: {e.message}")
-                break
+                # If it's a different error, show a clean message
+                st.error("The search service is briefly busy. Please refresh in a moment.")
+                return None
     return None
 
 @st.cache_data(persist="disk", show_spinner=False)
