@@ -3,6 +3,9 @@ import streamlit as st
 import json 
 import pandas as pd  
 from google.genai import errors, types
+import os 
+from knowledge_base import get_kb_context, get_kb_raw_data
+import datetime
 
 # 2. API Setup
 API_KEY = st.secrets["GEMINI_API_KEY"] 
@@ -10,6 +13,8 @@ client = genai.Client(api_key=API_KEY)
 primary_search_model_name="gemini-2.5-flash"
 secondary_search_model_name="gemini-2.5-flash-lite"
 analysis_model_name="gemini-3.1-flash-lite-preview"
+
+KB_FILE = "property_kb.json"
 
 def run_search_with_failover(prompt):
     config = types.GenerateContentConfig(
@@ -47,16 +52,23 @@ def run_search_with_failover(prompt):
     
     return None
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(persist="disk", show_spinner=False)
 def get_property_details(address):
-    #Search for property details using Google search tool in Gemini Pro. 
+    kb_data = get_kb_raw_data()
+    if address in kb_data:
+        data = kb_data[address]
+        data["from_kb"] = True 
+        return data
+    
+    #Search for property details using Google search tool in Gemini. 
     search_prompt = f"""
     Search for the current property listing of {address}.
     CRITICAL DATA POINTS NEEDED:
     1. The exact 'Annual Property Tax' amount (look for public records or tax history).
     2. The 'Rent Zestimate' or actual 'Rental Listing' prices for similar homes in this specific neighborhood.
+        - Attempt to find rent estimates from 'Rentometer.com', 'Rentcast.io', 'Apartments.com', or similar rental sites. If multiple are found provide the average.
     3. The current listing price and year built.
-    4. Details on HOA and insurance.
+    4. Details on HOA.
     5. Insurance: Look for any mentions of insurance costs in the monthly expenses a website might list
         - If none are found, use local averages based on zip code and label it 'Regional Estimate'.
     
@@ -72,7 +84,7 @@ def get_property_details(address):
             "price": 0, "year": 2026, "rent": 0, "tax_rate": 1.5, 
             "hoa": 0, "insurance": 100, "summary": "Error fetching data.", "maint_percent": 3.0
         }
-    """
+
     sources_set = set()
     try:
         # 1. Access the first candidate and grounding_metadata
@@ -108,16 +120,21 @@ def get_property_details(address):
     except Exception as e:
         # If metadata is missing entirely, at least provide a search link
         sources = [f"https://www.google.com/search?q={address.replace(' ', '+')}"]
-    """
+
 
     raw_context = search_response.text.strip()
     if not raw_context:
         raw_context = "Search returned no text."
 
+    history_context = get_kb_context()
+
     #Use analysis model to extract structured data and insights from the raw search context.
     analysis_prompt=f"""
     DATA:{raw_context}
-    Task: 
+    History:{history_context}
+
+    Task:
+    Analyze the NEW Property data. Use the Previous Analysis examples (if any) to provide a better estimate for this new property. Extract the following details in a structured JSON format: 
     1. Extract: Price, Year Built, Estimated Rent, Tax Rate(calculate as: [Annual Tax / Price] * 100), HOA, Insurance.
         - If the DATA provides a 'Regional Estimate' for insurance, label it as such in the summary.
         - If the DATA says $0 or is less than $60 or is missing insurance, use $80-$100 and label it as 'Assumed Minimum' in the summary.
@@ -144,7 +161,7 @@ def get_property_details(address):
             }
         )
         property_data = json.loads(response.text.strip())
-        #property_data["sources"] = sources  # Add sources to the property data dictionary
+        property_data["sources"] = sources  # Add sources to the property data dictionary
         return property_data
         
     except Exception as e:

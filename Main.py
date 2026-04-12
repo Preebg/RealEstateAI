@@ -2,10 +2,11 @@ from google import genai
 import streamlit as st
 import datetime 
 import pandas as pd 
-from engine import get_property_details 
+from engine import get_property_details
 import tldextract
 import urllib.parse
 from authenticate import check_password
+from knowledge_base import save_knowledge_base 
 
 if not check_password():
     st.stop() 
@@ -23,7 +24,7 @@ def safe_float(value):
     
 #Helper function to clean source names for display
 
-#def get_pretty_label(url):
+def get_pretty_label(url):
     import tldextract
     try:
         # Peel back the brand name (Zillow, Redfin, etc.)
@@ -66,6 +67,7 @@ if st.button("Analyze Property"):
 if st.session_state.property_data:
     property_info=st.session_state.property_data
 
+        
     # Extract values from the dictionary 
     price=safe_float(property_info.get("price"))
     year_built=safe_float(property_info.get("year"))
@@ -143,10 +145,10 @@ if st.session_state.property_data:
     st.sidebar.caption(f"Estimated Closing Costs: ${user_closing_costs:,.2f}")
     operating_expenses = monthly_taxes + monthly_insurance + monthly_HOA + monthly_maint + actual_vacancy_reserve + actual_management_fee
     total_monthly_expenses = monthly_mortgage + operating_expenses
-    monthly_net_cash_flow = monthly_rent - total_monthly_expenses
+    monthly_net_cash_flow = final_monthly_rent - total_monthly_expenses
 
     #Metrics
-    annual_noi = (monthly_rent-operating_expenses)*12
+    annual_noi = (final_monthly_rent-operating_expenses)*12
     if (price>0):
         cap_rate = (annual_noi / price) * 100
     else: 
@@ -190,7 +192,7 @@ if st.session_state.property_data:
                             
             ],
             "Amount": [
-                f"${monthly_rent:,.2f}",
+                f"${final_monthly_rent:,.2f}",
                 f"-${monthly_mortgage:,.2f}",
                 f"-${monthly_taxes:,.2f}",
                 f"-${monthly_insurance:,.2f}",
@@ -205,27 +207,40 @@ if st.session_state.property_data:
         st.table(df)
 
         st.info(f"Property Age: {datetime.datetime.now().year - year_built} years.")
-        st.info(f"Based on total cash out of pocket: ${total_investment:,.2f})")
+        st.info(f"Total Investment: ${total_investment:,.2f}")
         st.caption("Disclaimer: This is an AI-powered tool for educational purposes. Always verify financial data with a professional before making investment decisions.")
         st.sidebar.write(f"💸 Total Cash Required: **${total_investment:,.2f}**")
-    
-    
-    
-    #
-    #sources = property_info.get("sources", [])
-    #with st.popover("View Data Sources 🔗"):
-    # Ensure 'sources' is a list of full URLs
-       # if not sources:
-       #     st.write("No sources found.")
-        #else:
-        #    for link in set(sources):
-                # Create the 'Pretty Name' for the text
-         #       pretty_name = get_pretty_label(link)
-          #      
-          #      # Format: [Text](URL) 
-                # This keeps the link functional but the text clean!
-          #      st.markdown(f"- [{pretty_name}]({link})")
-    ###
+
+    is_already_saved = property_info.get("from_kb", False)
+    if not is_already_saved:
+        sources = property_info.get("sources", [])
+        with st.popover("View Data Sources 🔗"):
+            if not sources:
+                st.write("No sources found.")
+            else:
+                for link in set(sources):
+                    pretty_name = get_pretty_label(link)
+                    st.markdown(f"- [{pretty_name}]({link})")
+        st.divider()
+        st.subheader("Improve the Algorithm")
+        st.info("This property is new to the database. Save your adjustments to help the AI learn.")
+        
+        if st.button("✅ Confirm & Save to Knowledge Base"):
+            # Update the dictionary with your manual slider overrides
+            property_info["rent"] = final_monthly_rent
+            property_info["maint_percent"] = final_maint_percent
+            property_info["address"] = address  
+            property_info["from_kb"] = True     # Mark it as saved
+            
+            # Save to JSON
+            save_knowledge_base(property_info)
+            
+            # Use success message and rerun to hide this section immediately
+            st.success(f"Saved {address} to the knowledge base!")
+            st.rerun()
+    else:
+        st.divider()
+        st.success("Verified Property: This data is being pulled from your Knowledge Base.")
 
 
 

@@ -2,3 +2,5 @@ venv/
 .venv/
 .streamlit/secrets.toml 
 __pycache__/
+property_kb.json
+.streamlit/cache/
