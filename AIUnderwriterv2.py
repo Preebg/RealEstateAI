@@ -7,6 +7,7 @@ import tldextract
 import urllib.parse
 from authenticate import check_password
 from knowledge_base import save_knowledge_base 
+from streamlit_gsheets import GSheetsConnection
 
 if not check_password():
     st.stop() 

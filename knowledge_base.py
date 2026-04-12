@@ -1,6 +1,6 @@
 # knowledge_base.py
 import json
-import os
+from streamlit_gsheets import GSheetsConnection
 import streamlit as st
 import pandas as pd
 
