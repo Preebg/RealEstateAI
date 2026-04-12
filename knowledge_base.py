@@ -1,8 +1,11 @@
 # knowledge_base.py
 import json
 import os
+import streamlit as st
+import pandas as pd
 
 KB_FILE = "property_kb.json"
+SHEET_URL = st.secrets["GSHEET_URL"]
 #Saves every input into a local JSON file as a simple knowledge base for future reference and AI learning. Each property is stored under its address as the key, with all the details in a nested dictionary.
 def save_knowledge_base(property_data):
     """Saves the property dictionary to a permanent JSON file."""
@@ -47,3 +50,13 @@ def get_kb_raw_data():
         return {}
     with open(KB_FILE, "r") as f:
         return json.load(f)
+
+def get_kb_raw_data():
+    try:
+        csv_url = SHEET_URL.replace('/edit#gid=', '/export?format=csv&gid=')
+        return pd.read_csv(csv_url)
+    except:
+        return pd.DataFrame()
+
+def save_knowledge_base(property_data):
+    st.warning("Note: Saving to Google Sheets requires an 'Action' or a Form submission. For now, let's focus on reading your data!")
