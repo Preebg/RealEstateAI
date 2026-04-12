@@ -9,8 +9,8 @@ import pandas as pd
 def get_kb_raw_data():
     """Fetches all property data from the private Google Sheet."""
     try:
-        conn = st.connection("gsheets", type=GSheetsConnection)
-        df = conn.read()
+        conn = st.connection("gsheets", type="streamlit_gsheets.gsheets_connection.GSheetsConnection")
+        df = conn.read(ttl=0)
         # Convert 'sources' column back from string to list if it exists
         if not df.empty and "sources" in df.columns:
             df['sources'] = df['sources'].apply(lambda x: json.loads(x) if isinstance(x, str) and x.startswith('[') else x)
