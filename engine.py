@@ -6,6 +6,7 @@ from google.genai import errors, types
 import os 
 from knowledge_base import get_kb_context, get_kb_raw_data
 import datetime
+from streamlit_gsheets import GSheetsConnection
 
 # 2. API Setup
 API_KEY = st.secrets["GEMINI_API_KEY"] 
