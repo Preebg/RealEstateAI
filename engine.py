@@ -135,7 +135,7 @@ def get_property_details(address):
     Task:
     Analyze the NEW Property data. Use the Previous Analysis examples (if any) to provide a better estimate for this new property. Extract the following details in a structured JSON format: 
     1. Extract: Price, Year Built, Estimated Rent, Tax Rate(calculate as: [Annual Tax / Price] * 100), HOA, Insurance..
-        - If the DATA says $0 or is less than $60 or is missing insurance, use $80-$100 and label it as 'Assumed Minimum' in the summary. If data provides insurance above $600, it is likely a annual tax amount, so divide by 12.
+        - If the DATA says $0 or is less than $60 or is missing insurance, use $80-$100 and label it as 'Assumed Minimum' in the summary. If data provides insurance above $600, it is likely a annual insurance amount not monthly insurance, so divide by 12.
     2. Calculate Maintenance %:
         - New (<5 yrs): 1-2%
         - Mid (10-25 yrs): 2-4%
