@@ -30,16 +30,19 @@ def get_kb_raw_data():
 
 def save_knowledge_base(property_data):
     """Appends new property data to the private Google Sheet."""
+    # Use the full string path for the type to ensure it loads correctly locally
     conn = st.connection("gsheets", type="streamlit_gsheets.gsheets_connection.GSheetsConnection")
     
-    # Read existing data
+    # Read existing data (ttl=0 ensures you don't save to an old version of the sheet)
     try:
-        df = conn.read()
+        df = conn.read(ttl=0)
     except:
         df = pd.DataFrame()
 
     # Convert sources list to string for spreadsheet storage
     if "sources" in property_data and isinstance(property_data["sources"], list):
+        # We use a copy to avoid modifying the original dict used by the UI
+        property_data = property_data.copy()
         property_data["sources"] = json.dumps(property_data["sources"])
 
     # Add the new property
