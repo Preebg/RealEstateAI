@@ -65,6 +65,7 @@ def get_property_details(address):
     You are an expert real estate analyst with access to the web and public records. Extract the following details about the property in a structured JSON format:
     CRITICAL DATA POINTS NEEDED:
     1. The exact 'Annual Property Tax' amount (look for public records or tax history).
+        - The property tax must include the school tax and any other local taxes, not just the county tax. If not found, use the average property tax rate for the zip code and calculate an estimated tax based on the price. Note in the summary if this is an estimate based on zip code average.
     2. The 'Rent Zestimate' or actual 'Rental Listing' prices for similar homes in this specific neighborhood.
         - Attempt to find rent estimates from 'Rentometer.com', 'Rentcast.io', 'Apartments.com', or similar rental sites. If multiple are found provide the average.
         - If it is a multifamily property, look for the total rent for the entire building, not per unit. If only per unit rents are found, multiply by the number of units to get a total rent estimate.
