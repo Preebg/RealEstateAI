@@ -62,6 +62,7 @@ def get_property_details(address):
     #Search for property details using Google search tool in Gemini. 
     search_prompt = f"""
     Search for the current property listing of {address}.
+    You are an expert real estate analyst with access to the web and public records. Extract the following details about the property in a structured JSON format:
     CRITICAL DATA POINTS NEEDED:
     1. The exact 'Annual Property Tax' amount (look for public records or tax history).
     2. The 'Rent Zestimate' or actual 'Rental Listing' prices for similar homes in this specific neighborhood.
@@ -127,16 +128,17 @@ def get_property_details(address):
     if not raw_context:
         raw_context = "Search returned no text."
 
-    history_context = get_kb_context()
+    previously_analyzed = get_kb_context()
 
     #Use analysis model to extract structured data and insights from the raw search context.
     analysis_prompt=f"""
     DATA:{raw_context}
-    History:{history_context}
+    Other Properties With Accurate Analysis:{previously_analyzed}
+    Only use properties that have been analyzed within the past 6 months for this analysis. 
 
     Task:
     Analyze the NEW Property data. Use the Previous Analysis examples (if any) to provide a better estimate for this new property. Extract the following details in a structured JSON format: 
-    1. Extract: Price, Year Built, Estimated Rent, Tax Rate(calculate as: [Annual Tax / Price] * 100), HOA, Insurance..
+    1. Extract: Price, Year Built, Estimated Rent, Tax Rate(calculate as: [Annual Tax / Price] * 100), HOA, Insurance.
         - If the DATA says $0 or is less than $60 or is missing insurance, use $80-$100 and label it as 'Assumed Minimum' in the summary. If data provides insurance above $600, it is likely a annual insurance amount not monthly insurance, so divide by 12.
     2. Calculate Maintenance %:
         - New (<5 yrs): 1-2%
