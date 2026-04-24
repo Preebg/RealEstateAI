@@ -66,6 +66,7 @@ def get_property_details(address):
     1. The exact 'Annual Property Tax' amount (look for public records or tax history).
     2. The 'Rent Zestimate' or actual 'Rental Listing' prices for similar homes in this specific neighborhood.
         - Attempt to find rent estimates from 'Rentometer.com', 'Rentcast.io', 'Apartments.com', or similar rental sites. If multiple are found provide the average.
+        - If it is a multifamily property, look for the total rent for the entire building, not per unit. If only per unit rents are found, multiply by the number of units to get a total rent estimate.
     3. The current listing price and year built.
     4. Details on HOA.
     5. Insurance: Look for any mentions of insurance costs in the monthly expenses a website might list

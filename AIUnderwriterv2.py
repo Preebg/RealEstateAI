@@ -9,6 +9,8 @@ from authenticate import check_password
 from knowledge_base import save_knowledge_base 
 from streamlit_gsheets import GSheetsConnection
 
+from pdf_generator import generate_property_pdf
+
 if not check_password():
     st.stop() 
 def safe_float(value):
@@ -189,7 +191,8 @@ if st.session_state.property_data:
                 "Maintenance (CapEx)",
                 "Vacancy Reserve",  
                 "Management Fee",
-                "Total Costs"             
+                "Total Costs",
+                "Cash Flow Monthly"             
                             
             ],
             "Amount": [
@@ -201,7 +204,9 @@ if st.session_state.property_data:
                 f"-${monthly_maint:,.2f}",
                 f"-${actual_vacancy_reserve:,.2f}",
                 f"-${actual_management_fee:,.2f}",
-                f"${total_monthly_expenses:,.2f}"
+                f"${total_monthly_expenses:,.2f}",
+                f"${monthly_net_cash_flow:,.2f}"
+
             ]
         }
         df= pd.DataFrame(table_data)
@@ -211,6 +216,30 @@ if st.session_state.property_data:
         st.info(f"Total Investment: ${total_investment:,.2f}")
         st.caption("Disclaimer: This is an AI-powered tool for educational purposes. Always verify financial data with a professional before making investment decisions.")
         st.sidebar.write(f"💸 Total Cash Required: **${total_investment:,.2f}**")
+        
+        investment_params = {
+            "Down Payment": f"{down_payment}%",
+            "Interest Rate": f"{interest_rate}%",
+            "Loan Term": f"{loan_term} Years"
+        }
+
+        pdf_metrics = {
+            "Risk-Adjusted Cap Rate": f"{cap_rate:.2f}%",
+            "Cash on Cash Return": f"{cash_on_cash:.2f}%",
+            "Monthly Net Cash Flow": f"${monthly_net_cash_flow:,.2f}",
+            "Total Cash Required": f"${total_investment:,.2f}"
+        }
+
+        # The PDF Button
+        st.write("---")
+        pdf_bytes = generate_property_pdf(address, property_info, pdf_metrics, table_data, investment_params)
+
+        st.download_button(
+            label="📩 Download Full PDF Report",
+            data=pdf_bytes,
+            file_name=f"Analysis_{address.replace(' ', '_')}.pdf",
+            mime="application/pdf"
+        )
 
     is_already_saved = property_info.get("from_kb", False)
     if not is_already_saved:
