@@ -40,7 +40,8 @@ def save_knowledge_base(property_data):
     if not df.empty and "address" in df.columns:
         df = df[df["address"] != property_data["address"]]
 
-    # 2. Prepare the new data
+    # 2. Prepare the data & Add Timestamp
+    property_data["timestamp"] = pd.Timestamp.now().isoformat()
     property_data = property_data.copy()
     if "sources" in property_data and isinstance(property_data["sources"], list):
         property_data["sources"] = json.dumps(property_data["sources"])
