@@ -28,7 +28,6 @@ def safe_float(value):
 #Helper function to clean source names for display
 
 def get_pretty_label(url):
-    import tldextract
     try:
         # Peel back the brand name (Zillow, Redfin, etc.)
         ext = tldextract.extract(url)
@@ -95,17 +94,24 @@ if st.session_state.property_data:
     # We put it in the sidebar so you can tweak it while looking at the results
     st.sidebar.markdown("---")
     st.sidebar.write("### 🛠️ Manual Override")
+    
+    # Clamp values to ensure they are within slider ranges to prevent Streamlit crashes
+    rent_min, rent_max = 800.0, 4000.0
+    clamped_rent = max(rent_min, min(rent_max, float(monthly_rent)))
     final_monthly_rent = st.sidebar.slider(
         "Adjust Monthly Rent ($)", 
-        800.0, 4000.0, 
-        value = float(monthly_rent),
+        rent_min, rent_max, 
+        value = clamped_rent,
         step=25.0,
         help="The AI suggested the initial value, but you can override it here."
     )
+    
+    maint_min, maint_max = 0.0, 15.0
+    clamped_maint = max(maint_min, min(maint_max, float(ai_maint_percent)))
     final_maint_percent = st.sidebar.slider(
         "Adjust Maintenance %", 
-        0.0, 15.0, 
-        value = float(ai_maint_percent),
+        maint_min, maint_max, 
+        value = clamped_maint,
         step=0.1,
         help="The AI suggested the initial value, but you can override it here."
     )
@@ -125,31 +131,36 @@ if st.session_state.property_data:
     calculated_monthly_maint = (final_maint_percent / 100 * final_monthly_rent)
     init_vacancy_reserve=final_monthly_rent*0.05
     
+    vac_min, vac_max = 0.0, 10.0
+    clamped_vac = max(vac_min, min(vac_max, ai_vacancy_rate))
     user_vacancy_reserve = st.sidebar.slider(
     "Adjust Vacancy Reserve %", 
-    0.0, 10.0, 
-    value = ai_vacancy_rate,
+    vac_min, vac_max, 
+    value = clamped_vac,
     step=0.1,         
     help="The AI set this at 5% of rent, but you can adjust it based on your market knowledge."
     )
     actual_vacancy_reserve = (user_vacancy_reserve / 100) * final_monthly_rent
 
     init_management_fee=final_monthly_rent*0.10
+    mgmt_min, mgmt_max = 5.0, 12.0
+    clamped_mgmt = max(mgmt_min, min(mgmt_max, ai_mgmt_fee))
     user_management_fee = st.sidebar.slider(
     "Adjust Management Fee %", 
-    5.0, 12.0, 
-    value = ai_mgmt_fee,
+    mgmt_min, mgmt_max, 
+    value = clamped_mgmt,
     step=0.1,           
     help="The AI set this at 10% of rent, but you can adjust it based on your market knowledge."
     )
     actual_management_fee = (user_management_fee / 100) * final_monthly_rent
     
     init_closing_costs_pct = 3.0
+    closing_min, closing_max = 0.0, 10.0
+    clamped_closing = max(closing_min, min(closing_max, init_closing_costs_pct))
     user_closing_costs_pct = st.sidebar.slider(
         "Adjust Closing Costs (%)",
-        min_value=0.0,
-        max_value=10.0,
-        value=init_closing_costs_pct,
+        closing_min, closing_max,
+        value=clamped_closing,
         step=0.1,
         help = "Standard closing costs are around 3-5% of the purchase price."
     )
