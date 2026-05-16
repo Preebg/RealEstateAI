@@ -10,8 +10,16 @@ def run_verification():
     at.text_input[0].set_value("123 Main St, Springfield, IL").run()
 
     print("Waiting for Gemini API...")
-    # Click the 'Analyze Property' button and run the app state
-    at.button[0].click().run()
+    print(f"Buttons found: {len(at.button)}")
+    
+    # Search for the button by its label
+    analyze_btns = at.get('button', label='Analyze Property')
+    
+    if analyze_btns:
+        analyze_btns[0].click().run()
+    else:
+        print("❌ Error: 'Analyze Property' button not found.")
+        exit(1)
 
     print("Checking Results...")
     # Verify that the results are rendered in the UI. 
