@@ -10,7 +10,7 @@ from streamlit_gsheets import GSheetsConnection
 import matplotlib.pyplot as plt
 from pdf_generator import generate_property_pdf
 from streamlit_searchbox import st_searchbox 
-from engine import search_addresses 
+from engine import get_address_suggestions 
 import tldextract
 
 if not check_password():
@@ -51,8 +51,8 @@ with st.sidebar:
     down_payment=st.number_input("Expected Down Payment (%)", value=25)
     loan_term=st.number_input("Loan Term (yrs)", value=30)
     interest_rate=st.number_input("Your Mortgage Rate (%)", value=6.000)
-st.write(f"Debug: search_addresses type is {type(search_addresses)}")
-address = st_searchbox("Property Address", search=search_addresses, key="prop_search_v3", placeholder="123 Main St, New York, NY")
+st.write(f"Debug: get_address_suggestions type is {type(get_address_suggestions)}")
+address = st_searchbox("Property Address", search=get_address_suggestions, key="prop_search_v3", placeholder="123 Main St, New York, NY")
 # 3. The Analysis Logic
 if "property_data" not in st.session_state:
     st.session_state["property_data"] = None
