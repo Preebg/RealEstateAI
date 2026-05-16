@@ -2,16 +2,16 @@ from google import genai
 import streamlit as st
 import datetime 
 import pandas as pd 
-from engine import get_initial_analysis, get_final_analysis, calculate_quantum_probability, calculate_10yr_appreciation, search_addresses as search_func
+from engine import get_property_details
 import tldextract
 import urllib.parse
 from authenticate import check_password
-from knowledge_base import save_knowledge_base, get_kb_raw_data
+from knowledge_base import save_knowledge_base 
 from streamlit_gsheets import GSheetsConnection
 import matplotlib.pyplot as plt
-from streamlit_searchbox import st_searchbox
-
 from pdf_generator import generate_property_pdf
+from streamlit_searchbox import st_searchbox 
+from engine import search_addresses as search_function
 
 if not check_password():
     st.stop() 
@@ -52,7 +52,8 @@ with st.sidebar:
     loan_term=st.number_input("Loan Term (yrs)", value=30)
     interest_rate=st.number_input("Your Mortgage Rate (%)", value=6.000)
 
-address = st_searchbox("Property Address", search=lambda x: search_func(x), key="prop_search_v3")
+address = st_searchbox("Property Address", search=lambda x: search_function(x), key="prop_search_v3", placeholder="123 Main St, New York, NY")
+# address = st.text_input("Address", placeholder="Enter the property address.")
 
     
 # 3. The Analysis Logic
@@ -61,36 +62,13 @@ if "property_data" not in st.session_state:
 
 if st.button("Analyze Property"):
     if address:
-        # Create placeholders for immediate display
-        summary_placeholder = st.empty()
-        forecast_placeholder = st.empty()
-        
-        # 1. Initial Analysis (Fast)
-        with st.status("🔍 Researching property and estimating value..."):
-            initial_data, from_kb = get_initial_analysis(address)
-        
-        # 2. Immediate Display of Summary and Forecast
-        with summary_placeholder.container():
-            st.markdown("### 📝 AI Property Summary")
-            st.write(initial_data.get("summary", "No summary available."))
-        
-        with forecast_placeholder.container():
-            loc_score = safe_float(initial_data.get("location_score"))
-            pred_val = safe_float(initial_data.get("predicted_value"))
-            forecast = calculate_10yr_appreciation(pred_val, loc_score)
-            st.subheader("📈 10-Year Appreciation Forecast")
-            st.write(f"**Estimated Value in 2034:** ${forecast['future_value']:,.2f}")
-            st.write(f"**Projected Annual Growth:** {forecast['annual_rate']:.2f}%")
-        
-        # 3. Final Analysis (Detailed)
-        with st.status("✅ Verifying data and calculating ROI..."):
-            final_result = get_final_analysis(initial_data, address)
-            st.session_state.property_data = final_result
-            
-        st.rerun()
+        st.session_state.property_data = None # Clear previous data while fetching new
+        status = st.status("🔍 Searching Zillow and Public Records...")
+        result = get_property_details(address)
+        status.update(label="✅ Analysis Complete!", state="complete")
+        st.session_state.property_data = result
     else:
         st.warning("Please enter a property address.")
-
 if st.session_state.property_data:
     property_info=st.session_state.property_data
 
@@ -209,13 +187,6 @@ if st.session_state.property_data:
     else: 
         cash_on_cash = 0 
 
-    # Quantum Probability Calculation
-    quantum_prob = calculate_quantum_probability(
-        monthly_net_cash_flow, 
-        forecast_rate, 
-        location_score
-    )
-
     if cash_on_cash > 10 and location_score <= 7:
         branding_label = "Cash-flower"
     elif location_score > 7 and cash_on_cash <= 10:
@@ -224,17 +195,6 @@ if st.session_state.property_data:
         branding_label = "Balanced"
 
     # 4. Display Results
-    st.markdown("### 📝 AI Property Summary")
-    st.write(property_info.get("summary", "No summary available."))
-
-    st.subheader("📈 10-Year Appreciation Forecast")
-    st.write(f"**Estimated Value in 2034:** ${appreciation_forecast:,.2f}")
-    st.write(f"**Projected Annual Growth:** {forecast_rate:.2f}%")
-    st.info(f"**Logic:** The forecast uses a compound growth formula. The rate is dynamically adjusted based on the Location Score ({location_score}/10).")
-    st.markdown("**Methodology:** This app utilizes a Compound Growth Model to project future value based on historical neighborhood trends and location-weighted growth rates.")
-
-    st.info(f"⚛️ **Quantum Success Probability:** {quantum_prob:.1f}%")
-
     st.divider()
     tab1 = st.tabs(["📊 Overview"])[0]
 
@@ -247,7 +207,17 @@ if st.session_state.property_data:
         st.subheader(f"🏷️ Property Label: {branding_label}")
         st.subheader("🎯 AI Valuation")
         st.info(f"**Predicted Market Value:** ${predicted_value:,.2f}\n\n**Reasoning:** {prediction_reasoning}")
+        
+        with st.expander("📈 10-Year Appreciation Forecast"):
+            st.write(f"**Estimated Value in 2036:** ${appreciation_forecast:,.2f}")
+            st.write(f"**Projected Annual Growth:** {forecast_rate:.2f}%")
+            st.info(f"**Logic:** The forecast uses a compound growth formula. The rate is dynamically adjusted based on the Location Score ({location_score}/10).")
+            st.markdown("**Methodology:** This app utilizes a Compound Growth Model to project future value based on historical neighborhood trends and location-weighted growth rates.")
 
+    # Display the summary from the AI search
+    st.markdown("### 📝 AI Property Summary")
+    st.write(property_info.get("summary", "No summary available."))
+    
     # 5. The Cash Flow Table (Hidden by Default)
     with st.expander("View Detailed Monthly Breakdown"):
         st.write("Property Listed Price: ${:,.2f}".format(price))
@@ -299,13 +269,12 @@ if st.session_state.property_data:
             "Risk-Adjusted Cap Rate": f"{cap_rate:.2f}%",
             "Cash on Cash Return": f"{cash_on_cash:.2f}%",
             "Monthly Net Cash Flow": f"${monthly_net_cash_flow:,.2f}",
-            "Total Cash Required": f"${total_investment:,.2f}",
-            "Quantum Success Probability": f"{quantum_prob:.1f}%"
+            "Total Cash Required": f"${total_investment:,.2f}"
         }
 
         # The PDF Button
         st.write("---")
-        pdf_bytes = generate_property_pdf(address, property_info, pdf_metrics, table_data, investment_params, location_score)
+        pdf_bytes = generate_property_pdf(address, property_info, pdf_metrics, table_data, investment_params)
 
         st.download_button(
             label="📩 Download Full PDF Report",
