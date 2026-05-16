@@ -51,22 +51,6 @@ def run_search_with_failover(prompt):
                 return None
     return None
 
-def estimate_operating_metrics(address):
-    config = types.GenerateContentConfig(
-        tools=[types.Tool(google_search=types.GoogleSearch())],
-        response_mime_type="application/json"
-    )
-    prompt = f"""
-    Analyze the rental market and property management landscape for {address}. 
-    Predict a realistic annual 'vacancy_rate' and a standard 'management_fee' percentage based on local neighborhood norms.
-    Return a JSON object with keys: "vacancy_rate" (number), "management_fee" (number).
-    """
-    try:
-        response = client.models.generate_content(model=analysis_model_name, contents=prompt, config=config)
-        return json.loads(response.text.strip())
-    except Exception:
-        return {"vacancy_rate": 5.0, "management_fee": 10.0}
-
 def calculate_10yr_appreciation(current_value, location_score):
     if current_value <= 0:
         return {"future_value": 0, "annual_rate": 0, "total_growth": 0}
@@ -80,37 +64,6 @@ def calculate_10yr_appreciation(current_value, location_score):
         "annual_rate": annual_rate * 100,
         "total_growth": ((future_value - current_value) / current_value) * 100
     }
-
-def predict_property_value(address):
-    """
-    Uses Gemini 3.1 Flash Lite with grounding to predict the fair market value of a home.
-    """
-    config = types.GenerateContentConfig(
-        tools=[types.Tool(google_search=types.GoogleSearch()), types.Tool(google_maps=types.GoogleMaps())],
-    )
-    
-    prompt = f"""
-    Search for recent comparable sales (comps) and current market trends for the property at {address}. 
-    Analyze the property's features, size, and neighborhood to predict its current fair market value.
-    Additionally, evaluate the neighborhood's transit accessibility and school quality to assign a 'location_score' from 0 to 10.
-    Return a JSON object with these keys: 
-    "predicted_value": (the numeric predicted price), 
-    "reasoning": (a brief 1-2 sentence explanation of the valuation based on the comps found),
-    "location_score": (a number from 0-10).
-    """
-    
-    try:
-        response = client.models.generate_content(
-            model=primary_search_model_name,
-            contents=prompt,
-            config=config
-        )
-        # Remove markdown code blocks if the AI includes them
-        clean_text = response.text.strip().replace('```json', '').replace('```', '').strip()
-        return json.loads(clean_text)
-    except Exception as e:
-        st.error(f"Prediction Error: {e}")
-        return {"predicted_value": 0, "reasoning": "Error predicting value.", "location_score": 0}
 
 @st.cache_data(persist="disk", show_spinner=False)
 def get_property_details(address):
@@ -193,54 +146,69 @@ def get_property_details(address):
 
     previously_analyzed = get_kb_context()
 
-    #Use analysis model to extract structured data and insights from the raw search context.
-    analysis_prompt=f"""
-    DATA:{raw_context}
-    Other Properties With Accurate Analysis:{previously_analyzed}
+    # Consolidated Master Prompt
+    analysis_prompt = f"""
+    DATA: {raw_context}
+    Other Properties With Accurate Analysis: {previously_analyzed}
     Only use properties that have been analyzed within the past 6 months for this analysis. 
 
     Task:
-    Analyze the NEW Property data. Use the Previous Analysis examples (if any) to provide a better estimate for this new property. Extract the following details in a structured JSON format: 
-    1. Extract: Price, Year Built, Estimated Rent, Tax Rate(calculate as: [Annual Tax / Price] * 100), HOA, Insurance.
-        - If the DATA says $0 or is less than $60 or is missing insurance, use $80-$100 and label it as 'Assumed Minimum' in the summary. If data provides insurance above $600, it is likely a annual insurance amount not monthly insurance, so divide by 12.
-    2. Calculate Maintenance %:
-        - New (<5 yrs): 1-2%
-        - Mid (10-25 yrs): 2-4%
-        - Old (30+ yrs): 4-6%
-        - If 'Original HVAC/Windows/TLC/AS-IS': 6-10%
-        - If 'New roof/hvac': reduce by 1-2%
+    Analyze the property at {address}. Use the provided DATA and your search tools to extract and predict the following in a single structured JSON object:
 
-    IMPORTANT: For all numeric fields (price, rent, taxes, hoa, insurance, maint_percent), return ONLY the number. 
-    Do not include currency symbols, commas, or descriptive text like 'estimated'.
-    Return only a JSON object with these keys: "price", "year", "rent", "tax_rate", "hoa", "insurance", "summary", "maint_percent"
+    1. PROPERTY DETAILS:
+       - price: Current listing price (number only).
+       - year: Year built (number only).
+       - rent: Estimated monthly rent (number only).
+       - tax_rate: Annual Property Tax / Price * 100 (number only).
+       - hoa: Monthly HOA fee (number only).
+       - insurance: Monthly insurance cost (number only). If annual, divide by 12.
+       - summary: 3-4 sentence summary of condition and key features.
+       - maint_percent: Maintenance % based on age (New <5yr: 1-2%, Mid 10-25yr: 2-4%, Old 30+yr: 4-6%). Adjust for 'TLC/AS-IS' (up to 10%) or 'New Roof/HVAC' (reduce 1-2%).
+
+    2. VALUATION & LOCATION:
+       - predicted_value: Fair market value based on recent comps (number only).
+       - prediction_reasoning: 1-2 sentence explanation of the valuation.
+       - location_score: Neighborhood score from 0-10 based on transit and schools.
+
+    3. OPERATING METRICS:
+       - vacancy_rate: Realistic annual vacancy % for this neighborhood.
+       - management_fee: Standard local property management fee %.
+
+    IMPORTANT: Return ONLY a JSON object. Do not include currency symbols, commas, or markdown prose outside the JSON.
     """
     
     try:
-        # Only returns JSON object
+        # Consolidated call with Tools enabled (No mime_type allowed with tools)
         response = client.models.generate_content(
             model=analysis_model_name, 
             contents=analysis_prompt, 
-            config={
-                "response_mime_type": "application/json",
-                "thinking_config": {"include_thoughts": False} 
-            }
+            config=types.GenerateContentConfig(
+                tools=[types.Tool(google_search=types.GoogleSearch()), types.Tool(google_maps=types.GoogleMaps())]
+            )
         )
-        property_data = json.loads(response.text.strip())
-        property_data["sources"] = sources  # Add sources to the property data dictionary
         
-        # Predict the fair market value and add it to the property data
-        prediction = predict_property_value(address)
-        property_data["predicted_value"] = prediction.get("predicted_value", 0)
-        property_data["prediction_reasoning"] = prediction.get("reasoning", "")
-        property_data["location_score"] = prediction.get("location_score", 0)
+        if not response.text:
+            raise ValueError("AI returned an empty response")
+
+        # Robust JSON extraction to prevent "Expecting value" error
+        text = response.text.strip()
+        if "```json" in text:
+            text = text.split("```json")[1].split("```")[0].strip()
+        elif "```" in text:
+            text = text.split("```")[1].split("```")[0].strip()
+            
+        property_data = json.loads(text)
+        property_data["sources"] = sources 
         
-        # Estimate Operating Metrics
-        op_metrics = estimate_operating_metrics(address)
-        property_data["ai_vacancy_rate"] = op_metrics.get("vacancy_rate", 5.0)
-        property_data["ai_management_fee"] = op_metrics.get("management_fee", 10.0)
+        # Map consolidated keys to the expected app format
+        property_data["ai_vacancy_rate"] = property_data.get("vacancy_rate", 5.0)
+        property_data["ai_management_fee"] = property_data.get("management_fee", 10.0)
         
-        # Calculate 10-Year Forecast
-        forecast = calculate_10yr_appreciation(property_data["predicted_value"], property_data["location_score"])
+        # Calculate 10-Year Forecast (Local math, no API call)
+        forecast = calculate_10yr_appreciation(
+            property_data.get("predicted_value", 0), 
+            property_data.get("location_score", 0)
+        )
         property_data["appreciation_forecast"] = forecast["future_value"]
         property_data["forecast_rate"] = forecast["annual_rate"]
         property_data["forecast_growth"] = forecast["total_growth"]
@@ -248,7 +216,7 @@ def get_property_details(address):
         return property_data
         
     except Exception as e:
-        st.error(f"AI Fetch Error: {e}")
+        st.error(f"AI Analysis Error: {e}")
         # Fallback values so the rest of the app doesn't crash
         return {
             "price": 0, "year": 2026, "rent": 0, "tax_rate": 1.5, 
