@@ -80,16 +80,36 @@ def get_property_details(address):
     IMPORTANT: No currency symbols, no commas, no markdown prose outside the JSON.
     """
     
+    # Failover model list: Try primary analysis model, then fallback to secondary search model
+    models_to_try = [analysis_model_name, secondary_search_model_name]
+    response = None
+    last_exception = None
+
     try:
-        # Single consolidated call with Tools
-        response = client.models.generate_content(
-            model=analysis_model_name, 
-            contents=master_prompt, 
-            config=types.GenerateContentConfig(
-                tools=[types.Tool(google_search=types.GoogleSearch()), types.Tool(google_maps=types.GoogleMaps())]
-            )
-        )
+        for model_name in models_to_try:
+            try:
+                # Single consolidated call with Tools
+                response = client.models.generate_content(
+                    model=model_name, 
+                    contents=master_prompt, 
+                    config=types.GenerateContentConfig(
+                        tools=[types.Tool(google_search=types.GoogleSearch()), types.Tool(google_maps=types.GoogleMaps())]
+                    )
+                )
+                # If we reach here, the call succeeded
+                break
+            except errors.ClientError as e:
+                last_exception = e
+                if e.code == 429:
+                    # Resource exhausted: try the next model in the list
+                    continue
+                else:
+                    # Other API error: stop and raise
+                    raise e
         
+        if not response:
+            raise ValueError("AI Analysis failed after trying all available models.")
+
         if not response.text:
             raise ValueError("AI returned an empty response")
 
@@ -139,7 +159,7 @@ def get_property_details(address):
     except Exception as e:
         st.error(f"AI Analysis Error: {e}")
         return {
-            "price": 0, "year": 2026, "rent": 0, "tax_rate": 1.5, 
+            "price": 0, "year": datetime.datetime.now().year, "rent": 0, "tax_rate": 1.5, 
             "hoa": 0, "insurance": 100, "summary": "Error fetching data.", "maint_percent": 3.0,
             "predicted_value": 0, "prediction_reasoning": "Error predicting value.", "location_score": 0,
             "ai_vacancy_rate": 5.0, "ai_management_fee": 10.0, "appreciation_forecast": 0, "forecast_rate": 0, "forecast_growth": 0,
