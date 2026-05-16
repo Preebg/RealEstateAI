@@ -15,7 +15,7 @@ client = genai.Client(api_key=API_KEY)
 primary_search_model_name="gemma-4-31b-it"
 secondary_search_model_name="gemma-4-31b-it"
 analysis_model_name="gemma-4-31b-it"
-prediction_model_name="gemini-2.5-flash"
+prediction_model_name="gemini-3.1-flash-lite-preview"
 
 KB_FILE = "property_kb.json"
 
