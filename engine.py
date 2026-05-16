@@ -15,7 +15,7 @@ import math
 API_KEY = st.secrets["GEMINI_API_KEY"] 
 client = genai.Client(api_key=API_KEY)
 primary_search_model_name="gemma-4-31b-it"
-secondary_search_model_name="gemma-4-31b-it"
+secondary_search_model_name="gemma-4-26b-a4b-it"
 analysis_model_name="gemma-4-31b-it"
 prediction_model_name="gemini-3.1-flash-lite-preview"
 
@@ -26,7 +26,7 @@ def run_search_with_failover(prompt):
         tools=[types.Tool(google_search=types.GoogleSearch())]
     )
     
-    # We will try 3 times before giving up
+    # Attempt the primary model 3 times with exponential backoff
     for attempt in range(3):
         try:
             return client.models.generate_content(
@@ -35,24 +35,27 @@ def run_search_with_failover(prompt):
                 config=config
             )
         except errors.ClientError as e:
-            # If 503 (Overloaded) or 429 (Rate Limit)
-            if e.code in [503, 429]:
-                # If it's the last attempt, try the secondary model as a hail mary
-                if attempt == 2:
-                    return client.models.generate_content(
-                        model=secondary_search_model_name,
-                        contents=prompt,
-                        config=config
-                    )
-                
-                # Otherwise, wait and try again (1s, 2s)
-                time.sleep(attempt + 1) 
-                continue
+            # Include 500 (Internal Server Error) along with 503 and 429
+            if e.code in [500, 503, 429]:
+                if attempt < 2:  # Only sleep if we have attempts remaining
+                    # Exponential backoff: 1s, 2s, 4s...
+                    time.sleep(2 ** attempt)
+                    continue
             else:
-                # If it's a different error, show a clean message
-                st.error("The search service is briefly busy. Please refresh in a moment.")
+                # For non-retryable errors, notify user and stop
+                st.error(f"Search service error: {e}")
                 return None
-    return None
+
+    # If primary model fails 3 times, fallback to the secondary model
+    try:
+        return client.models.generate_content(
+            model=secondary_search_model_name,
+            contents=prompt,
+            config=config
+        )
+    except Exception as e:
+        st.error(f"Critical failure: Both primary and fallback models failed. {e}")
+        return None
 
 def estimate_operating_metrics(address):
     config = types.GenerateContentConfig(
