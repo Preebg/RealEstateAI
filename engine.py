@@ -8,6 +8,8 @@ from knowledge_base import get_kb_context, get_kb_raw_data
 import datetime
 from streamlit_gsheets import GSheetsConnection
 import time 
+import numpy as np
+import math
 
 # 2. API Setup
 API_KEY = st.secrets["GEMINI_API_KEY"] 
@@ -110,6 +112,31 @@ def predict_property_value(address):
     except Exception as e:
         st.error(f"Prediction Error: {e}")
         return {"predicted_value": 0, "reasoning": "Error predicting value.", "location_score": 0}
+
+def run_monte_carlo(current_value, forecast_rate, vacancy_rate):
+    """Simulates 1,000 scenarios for property value over 10 years."""
+    simulations = 1000
+    years = 10
+    # Convert percentages to decimals
+    mean_appreciation = forecast_rate / 100
+    
+    # Generate 1,000 random annual rates based on a normal distribution (std dev of 1.5%)
+    # We use numpy for vectorization to maintain fast latency
+    annual_rates = np.random.normal(mean_appreciation, 0.015, (simulations, years))
+    
+    # Calculate compound growth for each simulation: Value * Product(1 + rate_i)
+    final_values = current_value * np.prod(1 + annual_rates, axis=1)
+    return final_values.tolist()
+
+def calculate_quantum_probability(location_score):
+    """Calculates a confidence score using a quantum state vector metaphor."""
+    # Map location_score (0-10) to an angle theta (0 to pi/2)
+    theta = (location_score / 10) * (math.pi / 2)
+    # Probability amplitude of 'Success State' |1> is sin(theta)
+    amplitude = math.sin(theta)
+    # Probability is the square of the amplitude
+    probability = (amplitude ** 2) * 100
+    return probability
 
 @st.cache_data(persist="disk", show_spinner=False)
 def get_property_details(address):
@@ -243,6 +270,16 @@ def get_property_details(address):
         property_data["appreciation_forecast"] = forecast["future_value"]
         property_data["forecast_rate"] = forecast["annual_rate"]
         property_data["forecast_growth"] = forecast["total_growth"]
+        
+        # Quantum Risk Engine Calculations
+        property_data["monte_carlo_results"] = run_monte_carlo(
+            property_data["predicted_value"], 
+            property_data["forecast_rate"], 
+            property_data["ai_vacancy_rate"]
+        )
+        property_data["quantum_confidence_score"] = calculate_quantum_probability(
+            property_data["location_score"]
+        )
         
         return property_data
         

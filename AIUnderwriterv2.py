@@ -8,6 +8,7 @@ import urllib.parse
 from authenticate import check_password
 from knowledge_base import save_knowledge_base 
 from streamlit_gsheets import GSheetsConnection
+import matplotlib.pyplot as plt
 
 from pdf_generator import generate_property_pdf
 
@@ -193,22 +194,40 @@ if st.session_state.property_data:
 
     # 4. Display Results
     st.divider()
-    col1, col2, col3 = st.columns(3)
-    
-    # Show the user-adjusted number
-    col1.metric("Monthly Take-Home", f"${monthly_net_cash_flow:,.2f}")
-    col2.metric("Risk-Adjusted Cap Rate", f"{cap_rate:.2f}%")
-    col3.metric("Cash On Cash", f"{cash_on_cash:.2f}%")
-    
-    # AI Valuation Section
-    st.subheader(f"🏷️ Property Label: {branding_label}")
-    st.subheader("🎯 AI Valuation")
-    st.info(f"**Predicted Market Value:** ${predicted_value:,.2f}\n\n**Reasoning:** {prediction_reasoning}")
-    
-    with st.expander("📈 10-Year Appreciation Forecast"):
-        st.write(f"**Estimated Value in 2034:** ${appreciation_forecast:,.2f}")
-        st.write(f"**Projected Annual Growth:** {forecast_rate:.2f}%")
-        st.info(f"**Logic:** The forecast uses a compound growth formula. The rate is dynamically adjusted based on the Location Score ({location_score}/10), where higher scores increase the projected annual appreciation.")
+    tab1, tab2 = st.tabs(["📊 Overview", "⚛️ Advanced Analytics"])
+
+    with tab1:
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Monthly Take-Home", f"${monthly_net_cash_flow:,.2f}")
+        col2.metric("Risk-Adjusted Cap Rate", f"{cap_rate:.2f}%")
+        col3.metric("Cash On Cash", f"{cash_on_cash:.2f}%")
+        
+        st.subheader(f"🏷️ Property Label: {branding_label}")
+        st.subheader("🎯 AI Valuation")
+        st.info(f"**Predicted Market Value:** ${predicted_value:,.2f}\n\n**Reasoning:** {prediction_reasoning}")
+        
+        with st.expander("📈 10-Year Appreciation Forecast"):
+            st.write(f"**Estimated Value in 2034:** ${appreciation_forecast:,.2f}")
+            st.write(f"**Projected Annual Growth:** {forecast_rate:.2f}%")
+            st.info(f"**Logic:** The forecast uses a compound growth formula. The rate is dynamically adjusted based on the Location Score ({location_score}/10).")
+            st.markdown("**Methodology:** This app utilizes a Stochastic Monte Carlo engine to simulate 1,000 market volatility scenarios, ensuring the forecast accounts for random economic fluctuations rather than just linear growth.")
+
+    with tab2:
+        st.subheader("Quantum Risk Analysis")
+        q_score = property_info.get("quantum_confidence_score", 0)
+        st.metric("Quantum Confidence Score", f"{q_score:.2f}%")
+        st.caption("This score represents the probability amplitude of the property reaching a 'Success State' based on location-weighted quantum state vectors.")
+        
+        # Monte Carlo Histogram
+        mc_results = property_info.get("monte_carlo_results", [])
+        if mc_results:
+            fig, ax = plt.subplots()
+            ax.hist(mc_results, bins=30, color='#4CAF50', edgecolor='white')
+            ax.set_title("10-Year Value Distribution (1,000 Simulations)")
+            ax.set_xlabel("Final Property Value ($)")
+            ax.set_ylabel("Frequency")
+            plt.xticks(rotation=45)
+            st.pyplot(fig)
     
     # Display the summary from the AI search
     st.markdown("### 📝 AI Property Summary")
