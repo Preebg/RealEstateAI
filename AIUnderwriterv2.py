@@ -2,8 +2,7 @@ from google import genai
 import streamlit as st
 import datetime 
 import pandas as pd 
-from engine import get_property_details
-import tldextract
+from engine import get_initial_analysis, get_final_analysis, calculate_10yr_appreciation
 import urllib.parse
 from authenticate import check_password
 from knowledge_base import save_knowledge_base 
@@ -12,6 +11,7 @@ import matplotlib.pyplot as plt
 from pdf_generator import generate_property_pdf
 from streamlit_searchbox import st_searchbox 
 from engine import search_addresses as search_function
+import tldextract
 
 if not check_password():
     st.stop() 
@@ -62,11 +62,31 @@ if "property_data" not in st.session_state:
 
 if st.button("Analyze Property"):
     if address:
-        st.session_state.property_data = None # Clear previous data while fetching new
-        status = st.status("🔍 Searching Zillow and Public Records...")
-        result = get_property_details(address)
-        status.update(label="✅ Analysis Complete!", state="complete")
-        st.session_state.property_data = result
+        st.session_state.property_data = None
+
+        # Stage 1: Fast Analysis
+        with st.status("🔍 Researching property and estimating value...") as status:
+            initial_data, from_kb = get_initial_analysis(address)
+
+            # Immediate Display of Summary and Forecast
+            st.markdown("### 📝 AI Property Summary")
+            st.write(initial_data.get("summary", "No summary available."))
+
+            loc_score = safe_float(initial_data.get("location_score"))
+            pred_val = safe_float(initial_data.get("predicted_value"))
+            forecast = calculate_10yr_appreciation(pred_val, loc_score)
+
+            st.subheader("📈 10-Year Appreciation Forecast")
+            st.write(f"**Estimated Value in 2034:** ${forecast['future_value']:,.2f}")
+            st.write(f"**Projected Annual Growth:** {forecast['annual_rate']:.2f}%")
+
+            # Stage 2: Detailed Analysis
+            status.update(label="✅ Verifying data and calculating ROI...", state="running")
+            final_result = get_final_analysis(initial_data, address)
+            st.session_state.property_data = final_result
+            status.update(label="✅ Analysis Complete!", state="complete")
+
+        st.rerun()
     else:
         st.warning("Please enter a property address.")
 if st.session_state.property_data:
