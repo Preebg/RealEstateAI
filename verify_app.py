@@ -27,8 +27,8 @@ def run_verification():
     
     if analyze_btns:
         # The analysis process involves multiple API calls and search grounding.
-        # We increase the timeout significantly (e.g., 120 seconds) to allow the AI to finish.
-        analyze_btns[0].click().run(timeout=120)
+        # We increase the timeout significantly (e.g., 300 seconds) to allow the AI to finish.
+        analyze_btns[0].click().run(timeout=300)
     else:
         print("❌ Error: 'Analyze Property' button not found.")
         exit(1)
