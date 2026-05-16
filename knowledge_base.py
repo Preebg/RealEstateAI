@@ -63,7 +63,7 @@ def get_kb_context():
         examples = list(df.items())[-3:]
         context = "\n--- PREVIOUS ANALYSIS EXAMPLES ---\n"
         for addr, data in examples:
-            context += f"Address: {addr}\nRent: {data.get('rent')}\nMaint: {data.get('maint_percent')}%\n"
+            context += f"Address: {addr}\nRent: {data.get('rent')}\nMaint: {data.get('maint_percent')}%\nValue: {data.get('predicted_value')}\n"
         return context
     except:
         return ""

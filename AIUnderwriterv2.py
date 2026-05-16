@@ -80,6 +80,10 @@ if st.session_state.property_data:
     monthly_insurance=safe_float(property_info.get("insurance")) 
     ai_maint_percent=safe_float(property_info.get("maint_percent"))
     
+    # New Predicted Value Fields
+    predicted_value = safe_float(property_info.get("predicted_value"))
+    prediction_reasoning = property_info.get("prediction_reasoning", "No reasoning provided.")
+    
     sources=property_info.get("sources", [])
 
     # We put it in the sidebar so you can tweak it while looking at the results
@@ -171,6 +175,10 @@ if st.session_state.property_data:
     col1.metric("Monthly Take-Home", f"${monthly_net_cash_flow:,.2f}")
     col2.metric("Risk-Adjusted Cap Rate", f"{cap_rate:.2f}%")
     col3.metric("Cash On Cash", f"{cash_on_cash:.2f}%")
+    
+    # AI Valuation Section
+    st.subheader("🎯 AI Valuation")
+    st.info(f"**Predicted Market Value:** ${predicted_value:,.2f}\n\n**Reasoning:** {prediction_reasoning}")
     
     # Display the summary from the AI search
     st.markdown("### 📝 AI Property Summary")

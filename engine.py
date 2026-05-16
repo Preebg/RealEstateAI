@@ -51,6 +51,34 @@ def run_search_with_failover(prompt):
                 return None
     return None
 
+def predict_property_value(address):
+    """
+    Uses Gemini 3.1 Flash Lite with grounding to predict the fair market value of a home.
+    """
+    config = types.GenerateContentConfig(
+        tools=[types.Tool(google_search=types.GoogleSearch())],
+        response_mime_type="application/json"
+    )
+    
+    prompt = f"""
+    Search for recent comparable sales (comps) and current market trends for the property at {address}. 
+    Analyze the property's features, size, and neighborhood to predict its current fair market value.
+    Return a JSON object with these keys: 
+    "predicted_value": (the numeric predicted price), 
+    "reasoning": (a brief 1-2 sentence explanation of the valuation based on the comps found).
+    """
+    
+    try:
+        response = client.models.generate_content(
+            model=analysis_model_name,
+            contents=prompt,
+            config=config
+        )
+        return json.loads(response.text.strip())
+    except Exception as e:
+        st.error(f"Prediction Error: {e}")
+        return {"predicted_value": 0, "reasoning": "Error predicting value."}
+
 @st.cache_data(persist="disk", show_spinner=False)
 def get_property_details(address):
     kb_data = get_kb_raw_data()
@@ -165,6 +193,12 @@ def get_property_details(address):
         )
         property_data = json.loads(response.text.strip())
         property_data["sources"] = sources  # Add sources to the property data dictionary
+        
+        # Predict the fair market value and add it to the property data
+        prediction = predict_property_value(address)
+        property_data["predicted_value"] = prediction.get("predicted_value", 0)
+        property_data["prediction_reasoning"] = prediction.get("reasoning", "")
+        
         return property_data
         
     except Exception as e:
@@ -172,5 +206,6 @@ def get_property_details(address):
         # Fallback values so the rest of the app doesn't crash
         return {
             "price": 0, "year": 2026, "rent": 0, "tax_rate": 1.5, 
-            "hoa": 0, "insurance": 100, "summary": "Error fetching data.", "maint_percent": 3.0
+            "hoa": 0, "insurance": 100, "summary": "Error fetching data.", "maint_percent": 3.0,
+            "predicted_value": 0, "prediction_reasoning": "Error predicting value."
         }
