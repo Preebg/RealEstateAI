@@ -12,9 +12,9 @@ import time
 # 2. API Setup
 API_KEY = st.secrets["GEMINI_API_KEY"] 
 client = genai.Client(api_key=API_KEY)
-primary_search_model_name="gemini-2.5-flash"
-secondary_search_model_name="gemini-2.5-flash-lite"
-analysis_model_name="gemini-3.1-flash-lite-preview"
+primary_search_model_name="gemma-4-31b-it"
+secondary_search_model_name="gemma-4-31b-it"
+analysis_model_name="gemma-4-31b-it"
 
 KB_FILE = "property_kb.json"
 
@@ -56,16 +56,18 @@ def predict_property_value(address):
     Uses Gemini 3.1 Flash Lite with grounding to predict the fair market value of a home.
     """
     config = types.GenerateContentConfig(
-        tools=[types.Tool(google_search=types.GoogleSearch())],
+        tools=[types.Tool(google_search=types.GoogleSearch()), types.Tool(google_maps=types.GoogleMaps())],
         response_mime_type="application/json"
     )
     
     prompt = f"""
     Search for recent comparable sales (comps) and current market trends for the property at {address}. 
     Analyze the property's features, size, and neighborhood to predict its current fair market value.
+    Additionally, evaluate the neighborhood's transit accessibility and school quality to assign a 'location_score' from 0 to 10.
     Return a JSON object with these keys: 
     "predicted_value": (the numeric predicted price), 
-    "reasoning": (a brief 1-2 sentence explanation of the valuation based on the comps found).
+    "reasoning": (a brief 1-2 sentence explanation of the valuation based on the comps found),
+    "location_score": (a number from 0-10).
     """
     
     try:
@@ -77,7 +79,7 @@ def predict_property_value(address):
         return json.loads(response.text.strip())
     except Exception as e:
         st.error(f"Prediction Error: {e}")
-        return {"predicted_value": 0, "reasoning": "Error predicting value."}
+        return {"predicted_value": 0, "reasoning": "Error predicting value.", "location_score": 0}
 
 @st.cache_data(persist="disk", show_spinner=False)
 def get_property_details(address):
@@ -198,6 +200,7 @@ def get_property_details(address):
         prediction = predict_property_value(address)
         property_data["predicted_value"] = prediction.get("predicted_value", 0)
         property_data["prediction_reasoning"] = prediction.get("reasoning", "")
+        property_data["location_score"] = prediction.get("location_score", 0)
         
         return property_data
         
@@ -207,5 +210,5 @@ def get_property_details(address):
         return {
             "price": 0, "year": 2026, "rent": 0, "tax_rate": 1.5, 
             "hoa": 0, "insurance": 100, "summary": "Error fetching data.", "maint_percent": 3.0,
-            "predicted_value": 0, "prediction_reasoning": "Error predicting value."
+            "predicted_value": 0, "prediction_reasoning": "Error predicting value.", "location_score": 0
         }

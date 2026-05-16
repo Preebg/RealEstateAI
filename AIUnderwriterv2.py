@@ -83,6 +83,7 @@ if st.session_state.property_data:
     # New Predicted Value Fields
     predicted_value = safe_float(property_info.get("predicted_value"))
     prediction_reasoning = property_info.get("prediction_reasoning", "No reasoning provided.")
+    location_score = safe_float(property_info.get("location_score"))
     
     sources=property_info.get("sources", [])
 
@@ -167,6 +168,13 @@ if st.session_state.property_data:
     else: 
         cash_on_cash = 0 
 
+    if cash_on_cash > 10 and location_score <= 7:
+        branding_label = "Cash-flower"
+    elif location_score > 7 and cash_on_cash <= 10:
+        branding_label = "Appreciation Machine"
+    else:
+        branding_label = "Balanced"
+
     # 4. Display Results
     st.divider()
     col1, col2, col3 = st.columns(3)
@@ -177,6 +185,7 @@ if st.session_state.property_data:
     col3.metric("Cash On Cash", f"{cash_on_cash:.2f}%")
     
     # AI Valuation Section
+    st.subheader(f"🏷️ Property Label: {branding_label}")
     st.subheader("🎯 AI Valuation")
     st.info(f"**Predicted Market Value:** ${predicted_value:,.2f}\n\n**Reasoning:** {prediction_reasoning}")
     
