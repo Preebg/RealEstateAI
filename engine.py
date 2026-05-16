@@ -32,24 +32,47 @@ def _extract_json(text):
     return json.loads(text)
 
 def search_addresses(search_term: str):
-    """Provides autocomplete suggestions from KB and Google Places API."""
-    # 1. Start with Knowledge Base matches
+    """Provides autocomplete suggestions from KB and Photon API (OpenStreetMap)."""
+    if not search_term:
+        return []
+
+    # 1. Start with Knowledge Base matches (Fastest)
     kb_data = get_kb_raw_data()
     suggestions = [addr for addr in kb_data.keys() if search_term.lower() in addr.lower()]
     
-    # 2. Supplement with Google Places API (Requires GOOGLE_MAPS_API_KEY in st.secrets)
-    api_key = st.secrets.get("GOOGLE_MAPS_API_KEY")
-    if api_key and len(search_term) > 3:
-        try:
-            url = f"https://maps.googleapis.com/maps/api/place/autocomplete/json?input={urllib.parse.quote(search_term)}&key={api_key}"
-            response = requests.get(url).json()
-            if response.get("status") == "OK":
-                api_suggestions = [p["description"] for p in response.get("predictions", [])]
-                suggestions.extend(api_suggestions)
-        except Exception as e:
-            print(f"Autocomplete Error: {e}")
+    # 2. Supplement with Photon API for nationwide USA addresses
+    try:
+        # Photon API endpoint
+        url = f"https://photon.komoot.io/api/?q={urllib.parse.quote(search_term)}&limit=10"
+        response = requests.get(url, timeout=3)
+        
+        if response.status_code == 200:
+            data = response.json()
+            # Photon returns a list of features. We extract the formatted address.
+            # We prioritize results in the United States.
+            api_suggestions = []
+            for feature in data:
+                props = feature.get("properties", {})
+                country = props.get("country", "")
+                
+                if country == "United States":
+                    # Construct a readable address string
+                    name = props.get("name", "")
+                    city = props.get("city", "")
+                    state = props.get("state", "")
+                    
+                    # Build the address string based on available data
+                    addr_parts = [name, city, state]
+                    full_addr = ", ".join([p for p in addr_parts if p])
+                    if full_addr:
+                        api_suggestions.append(full_addr)
             
-    return list(set(suggestions)) # Remove duplicates
+            suggestions.extend(api_suggestions)
+    except Exception as e:
+        print(f"Photon Autocomplete Error: {e}")
+            
+    # Remove duplicates while preserving order
+    return list(dict.fromkeys(suggestions))
 
 def calculate_10yr_appreciation(current_value, location_score):
     if current_value <= 0:
