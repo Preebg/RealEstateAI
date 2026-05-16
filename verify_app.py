@@ -13,7 +13,7 @@ def run_verification():
     print(f"Buttons found: {len(at.button)}")
     
     # Search for the button by its label
-    analyze_btns = at.get('button', label='Analyze Property')
+    analyze_btns = [btn for btn in at.button if btn.label == 'Analyze Property']
     
     if analyze_btns:
         analyze_btns[0].click().run()
