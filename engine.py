@@ -8,29 +8,23 @@ from knowledge_base import get_kb_context, get_kb_raw_data
 import datetime
 from streamlit_gsheets import GSheetsConnection
 import time 
-import numpy as np
-import math
 
 # 2. API Setup
 API_KEY = st.secrets["GEMINI_API_KEY"] 
 client = genai.Client(api_key=API_KEY)
-primary_search_model_name="gemma-4-31b-it"
-secondary_search_model_name="gemma-4-26b-a4b-it"
-analysis_model_name="gemma-4-31b-it"
-prediction_model_name="gemini-3.1-flash-lite-preview"
+primary_search_model_name="gemini-2.5-flash-lite"
+secondary_search_model_name="gemini-2.5-flash"
+analysis_model_name="gemini-3.1-flash-lite-preview"
 
 KB_FILE = "property_kb.json"
 
 def run_search_with_failover(prompt):
-    start_time = time.time()
     config = types.GenerateContentConfig(
         tools=[types.Tool(google_search=types.GoogleSearch())]
     )
     
-    # Attempt the primary model 3 times with exponential backoff
+    # We will try 3 times before giving up
     for attempt in range(3):
-        if time.time() - start_time > 60:
-            raise TimeoutError("Search timed out after 60 seconds")
         try:
             return client.models.generate_content(
                 model=primary_search_model_name,
@@ -38,29 +32,24 @@ def run_search_with_failover(prompt):
                 config=config
             )
         except errors.ClientError as e:
-            # Include 500 (Internal Server Error) along with 503 and 429
-            if e.code in [500, 503, 429]:
-                if attempt < 2:  # Only sleep if we have attempts remaining
-                    # Exponential backoff: 1s, 2s, 4s...
-                    time.sleep(2 ** attempt)
-                    continue
+            # If 503 (Overloaded) or 429 (Rate Limit)
+            if e.code in [503, 429]:
+                # If it's the last attempt, try the secondary model as a hail mary
+                if attempt == 2:
+                    return client.models.generate_content(
+                        model=secondary_search_model_name,
+                        contents=prompt,
+                        config=config
+                    )
+                
+                # Otherwise, wait and try again (1s, 2s)
+                time.sleep(attempt + 1) 
+                continue
             else:
-                # For non-retryable errors, notify user and stop
-                st.error(f"Search service error: {e}")
+                # If it's a different error, show a clean message
+                st.error("The search service is briefly busy. Please refresh in a moment.")
                 return None
-
-    # If primary model fails 3 times, fallback to the secondary model
-    if time.time() - start_time > 60:
-        raise TimeoutError("Search timed out after 60 seconds")
-    try:
-        return client.models.generate_content(
-            model=secondary_search_model_name,
-            contents=prompt,
-            config=config
-        )
-    except Exception as e:
-        st.error(f"Critical failure: Both primary and fallback models failed. {e}")
-        return None
+    return None
 
 def estimate_operating_metrics(address):
     config = types.GenerateContentConfig(
@@ -79,8 +68,6 @@ def estimate_operating_metrics(address):
         return {"vacancy_rate": 5.0, "management_fee": 10.0}
 
 def calculate_10yr_appreciation(current_value, location_score):
-    if current_value <= 0:
-        return {"future_value": 0, "annual_rate": 0, "total_growth": 0}
     # Dynamic rate: Base 3% + (location_score - 5) * 0.5%
     # Result: Score 10 = 5.5%, Score 5 = 3%, Score 0 = 0.5%
     annual_rate = 0.03 + ((location_score - 5) * 0.005)
@@ -96,7 +83,7 @@ def predict_property_value(address):
     Uses Gemini 3.1 Flash Lite with grounding to predict the fair market value of a home.
     """
     config = types.GenerateContentConfig(
-        tools=[types.Tool(google_search=types.GoogleSearch())],
+        tools=[types.Tool(google_search=types.GoogleSearch()), types.Tool(google_maps=types.GoogleMaps())],
         response_mime_type="application/json"
     )
     
@@ -112,7 +99,7 @@ def predict_property_value(address):
     
     try:
         response = client.models.generate_content(
-            model=prediction_model_name,
+            model=primary_search_model_name,
             contents=prompt,
             config=config
         )
@@ -120,31 +107,6 @@ def predict_property_value(address):
     except Exception as e:
         st.error(f"Prediction Error: {e}")
         return {"predicted_value": 0, "reasoning": "Error predicting value.", "location_score": 0}
-
-def run_monte_carlo(current_value, forecast_rate, vacancy_rate):
-    """Simulates 1,000 scenarios for property value over 10 years."""
-    simulations = 1000
-    years = 10
-    # Convert percentages to decimals
-    mean_appreciation = forecast_rate / 100
-    
-    # Generate 1,000 random annual rates based on a normal distribution (std dev of 1.5%)
-    # We use numpy for vectorization to maintain fast latency
-    annual_rates = np.random.normal(mean_appreciation, 0.015, (simulations, years))
-    
-    # Calculate compound growth for each simulation: Value * Product(1 + rate_i)
-    final_values = current_value * np.prod(1 + annual_rates, axis=1)
-    return final_values.tolist()
-
-def calculate_quantum_probability(location_score):
-    """Calculates a confidence score using a quantum state vector metaphor."""
-    # Map location_score (0-10) to an angle theta (0 to pi/2)
-    theta = (location_score / 10) * (math.pi / 2)
-    # Probability amplitude of 'Success State' |1> is sin(theta)
-    amplitude = math.sin(theta)
-    # Probability is the square of the amplitude
-    probability = (amplitude ** 2) * 100
-    return probability
 
 @st.cache_data(persist="disk", show_spinner=False)
 def get_property_details(address):
@@ -278,16 +240,6 @@ def get_property_details(address):
         property_data["appreciation_forecast"] = forecast["future_value"]
         property_data["forecast_rate"] = forecast["annual_rate"]
         property_data["forecast_growth"] = forecast["total_growth"]
-        
-        # Quantum Risk Engine Calculations
-        property_data["monte_carlo_results"] = run_monte_carlo(
-            property_data["predicted_value"], 
-            property_data["forecast_rate"], 
-            property_data["ai_vacancy_rate"]
-        )
-        property_data["quantum_confidence_score"] = calculate_quantum_probability(
-            property_data["location_score"]
-        )
         
         return property_data
         
