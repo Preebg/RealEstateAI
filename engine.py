@@ -15,6 +15,7 @@ client = genai.Client(api_key=API_KEY)
 primary_search_model_name="gemma-4-31b-it"
 secondary_search_model_name="gemma-4-31b-it"
 analysis_model_name="gemma-4-31b-it"
+prediction_model_name="gemini-3.1-flash-lite-preview"
 
 KB_FILE = "property_kb.json"
 
@@ -68,6 +69,8 @@ def estimate_operating_metrics(address):
         return {"vacancy_rate": 5.0, "management_fee": 10.0}
 
 def calculate_10yr_appreciation(current_value, location_score):
+    if current_value <= 0:
+        return {"future_value": 0, "annual_rate": 0, "total_growth": 0}
     # Dynamic rate: Base 3% + (location_score - 5) * 0.5%
     # Result: Score 10 = 5.5%, Score 5 = 3%, Score 0 = 0.5%
     annual_rate = 0.03 + ((location_score - 5) * 0.005)
@@ -83,7 +86,7 @@ def predict_property_value(address):
     Uses Gemini 3.1 Flash Lite with grounding to predict the fair market value of a home.
     """
     config = types.GenerateContentConfig(
-        tools=[types.Tool(google_search=types.GoogleSearch()), types.Tool(google_maps=types.GoogleMaps())],
+        tools=[types.Tool(google_search=types.GoogleSearch())],
         response_mime_type="application/json"
     )
     
@@ -99,7 +102,7 @@ def predict_property_value(address):
     
     try:
         response = client.models.generate_content(
-            model=analysis_model_name,
+            model=prediction_model_name,
             contents=prompt,
             config=config
         )
