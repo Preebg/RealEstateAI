@@ -29,8 +29,8 @@ def run_search_with_failover(prompt):
     
     # Attempt the primary model 3 times with exponential backoff
     for attempt in range(3):
-        if time.time() - start_time > 30:
-            raise TimeoutError("Search timed out after 30 seconds")
+        if time.time() - start_time > 60:
+            raise TimeoutError("Search timed out after 60 seconds")
         try:
             return client.models.generate_content(
                 model=primary_search_model_name,
@@ -50,8 +50,8 @@ def run_search_with_failover(prompt):
                 return None
 
     # If primary model fails 3 times, fallback to the secondary model
-    if time.time() - start_time > 30:
-        raise TimeoutError("Search timed out after 30 seconds")
+    if time.time() - start_time > 60:
+        raise TimeoutError("Search timed out after 60 seconds")
     try:
         return client.models.generate_content(
             model=secondary_search_model_name,
