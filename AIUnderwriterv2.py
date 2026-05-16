@@ -6,7 +6,7 @@ from engine import get_property_details, calculate_quantum_probability
 import tldextract
 import urllib.parse
 from authenticate import check_password
-from knowledge_base import save_knowledge_base 
+from knowledge_base import save_knowledge_base, get_kb_raw_data
 from streamlit_gsheets import GSheetsConnection
 import matplotlib.pyplot as plt
 
@@ -51,7 +51,13 @@ with st.sidebar:
     loan_term=st.number_input("Loan Term (yrs)", value=30)
     interest_rate=st.number_input("Your Mortgage Rate (%)", value=6.000)
 
-address = st.text_input("Address", placeholder="Enter the property address.")
+kb_addresses = list(get_kb_raw_data().keys())
+address_option = st.selectbox("Property Address", options=["Enter New Address..."] + kb_addresses)
+
+if address_option == "Enter New Address...":
+    address = st.text_input("Enter the property address.")
+else:
+    address = address_option
 
     
 # 3. The Analysis Logic
@@ -200,6 +206,17 @@ if st.session_state.property_data:
         branding_label = "Balanced"
 
     # 4. Display Results
+    st.markdown("### 📝 AI Property Summary")
+    st.write(property_info.get("summary", "No summary available."))
+
+    st.subheader("📈 10-Year Appreciation Forecast")
+    st.write(f"**Estimated Value in 2034:** ${appreciation_forecast:,.2f}")
+    st.write(f"**Projected Annual Growth:** {forecast_rate:.2f}%")
+    st.info(f"**Logic:** The forecast uses a compound growth formula. The rate is dynamically adjusted based on the Location Score ({location_score}/10).")
+    st.markdown("**Methodology:** This app utilizes a Compound Growth Model to project future value based on historical neighborhood trends and location-weighted growth rates.")
+
+    st.info(f"⚛️ **Quantum Success Probability:** {quantum_prob:.1f}%")
+
     st.divider()
     tab1 = st.tabs(["📊 Overview"])[0]
 
@@ -209,23 +226,10 @@ if st.session_state.property_data:
         col2.metric("Risk-Adjusted Cap Rate", f"{cap_rate:.2f}%")
         col3.metric("Cash On Cash", f"{cash_on_cash:.2f}%")
         
-        # Enhanced Quantum Probability Display
-        st.info(f"⚛️ **Quantum Success Probability:** {quantum_prob:.1f}%")
-        
         st.subheader(f"🏷️ Property Label: {branding_label}")
         st.subheader("🎯 AI Valuation")
         st.info(f"**Predicted Market Value:** ${predicted_value:,.2f}\n\n**Reasoning:** {prediction_reasoning}")
-        
-        with st.expander("📈 10-Year Appreciation Forecast"):
-            st.write(f"**Estimated Value in 2034:** ${appreciation_forecast:,.2f}")
-            st.write(f"**Projected Annual Growth:** {forecast_rate:.2f}%")
-            st.info(f"**Logic:** The forecast uses a compound growth formula. The rate is dynamically adjusted based on the Location Score ({location_score}/10).")
-            st.markdown("**Methodology:** This app utilizes a Compound Growth Model to project future value based on historical neighborhood trends and location-weighted growth rates.")
 
-    # Display the summary from the AI search
-    st.markdown("### 📝 AI Property Summary")
-    st.write(property_info.get("summary", "No summary available."))
-    
     # 5. The Cash Flow Table (Hidden by Default)
     with st.expander("View Detailed Monthly Breakdown"):
         st.write("Property Listed Price: ${:,.2f}".format(price))
