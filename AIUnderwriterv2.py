@@ -2,7 +2,7 @@ from google import genai
 import streamlit as st
 import datetime 
 import pandas as pd 
-from engine import get_initial_analysis, get_final_analysis, calculate_quantum_probability, calculate_10yr_appreciation, search_addresses
+from engine import get_initial_analysis, get_final_analysis, calculate_quantum_probability, calculate_10yr_appreciation, search_addresses as search_func
 import tldextract
 import urllib.parse
 from authenticate import check_password
@@ -52,7 +52,7 @@ with st.sidebar:
     loan_term=st.number_input("Loan Term (yrs)", value=30)
     interest_rate=st.number_input("Your Mortgage Rate (%)", value=6.000)
 
-address = st_searchbox("Property Address", search=search_addresses, key="prop_search")
+address = st_searchbox("Property Address", search=search_func, key="prop_search_v2")
 
     
 # 3. The Analysis Logic
