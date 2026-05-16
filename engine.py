@@ -68,6 +68,9 @@ def estimate_operating_metrics(address):
         return {"vacancy_rate": 5.0, "management_fee": 10.0}
 
 def calculate_10yr_appreciation(current_value, location_score):
+    if current_value <= 0:
+        return {"future_value": 0, "annual_rate": 0, "total_growth": 0}
+        
     # Dynamic rate: Base 3% + (location_score - 5) * 0.5%
     # Result: Score 10 = 5.5%, Score 5 = 3%, Score 0 = 0.5%
     annual_rate = 0.03 + ((location_score - 5) * 0.005)
@@ -84,7 +87,6 @@ def predict_property_value(address):
     """
     config = types.GenerateContentConfig(
         tools=[types.Tool(google_search=types.GoogleSearch()), types.Tool(google_maps=types.GoogleMaps())],
-        response_mime_type="application/json"
     )
     
     prompt = f"""
@@ -103,7 +105,9 @@ def predict_property_value(address):
             contents=prompt,
             config=config
         )
-        return json.loads(response.text.strip())
+        # Remove markdown code blocks if the AI includes them
+        clean_text = response.text.strip().replace('```json', '').replace('```', '').strip()
+        return json.loads(clean_text)
     except Exception as e:
         st.error(f"Prediction Error: {e}")
         return {"predicted_value": 0, "reasoning": "Error predicting value.", "location_score": 0}
