@@ -15,6 +15,7 @@ client = genai.Client(api_key=API_KEY)
 primary_search_model_name="gemma-4-31b-it"
 secondary_search_model_name="gemma-4-31b-it"
 analysis_model_name="gemma-4-31b-it"
+prediction_model_name="gemini-2.5-flash"
 
 KB_FILE = "property_kb.json"
 
@@ -72,7 +73,7 @@ def predict_property_value(address):
     
     try:
         response = client.models.generate_content(
-            model=analysis_model_name,
+            model=prediction_model_name,
             contents=prompt,
             config=config
         )
