@@ -78,7 +78,7 @@ if st.session_state.property_data:
     tax_rate=safe_float(property_info.get("tax_rate"))
     monthly_HOA=safe_float(property_info.get("hoa"))
     monthly_insurance=safe_float(property_info.get("insurance")) 
-    monthly_maint=safe_float(property_info.get("maint_percent"))
+    ai_maint_percent=safe_float(property_info.get("maint_percent"))
     
     sources=property_info.get("sources", [])
 
@@ -95,7 +95,7 @@ if st.session_state.property_data:
     final_maint_percent = st.sidebar.slider(
         "Adjust Maintenance %", 
         0.0, 15.0, 
-        value = float(monthly_maint),
+        value = float(ai_maint_percent),
         step=0.1,
         help="The AI suggested the initial value, but you can override it here."
     )
@@ -112,7 +112,7 @@ if st.session_state.property_data:
 
     #Expense calculations
     monthly_taxes=((tax_rate/100)*price)/12
-    monthly_maint = (final_maint_percent / 100 * final_monthly_rent)
+    calculated_monthly_maint = (final_maint_percent / 100 * final_monthly_rent)
     init_vacancy_reserve=final_monthly_rent*0.05
     
     user_vacancy_reserve = st.sidebar.slider(
@@ -134,19 +134,19 @@ if st.session_state.property_data:
     )
     actual_management_fee = (user_management_fee / 100) * final_monthly_rent
     
-    init_closing_costs = price * 0.03
-    user_closing_costs = st.sidebar.slider(
-        "Adjust Closing Costs ($)",
+    init_closing_costs_pct = 3.0
+    user_closing_costs_pct = st.sidebar.slider(
+        "Adjust Closing Costs (%)",
         min_value=0.0,
         max_value=10.0,
-        value=3.0,
+        value=init_closing_costs_pct,
         step=0.1,
-        help = "Standard ckosing costs are around 3-5% of the purchase price."
+        help = "Standard closing costs are around 3-5% of the purchase price."
     )
 
-    user_closing_costs=(price * (user_closing_costs / 100))
-    st.sidebar.caption(f"Estimated Closing Costs: ${user_closing_costs:,.2f}")
-    operating_expenses = monthly_taxes + monthly_insurance + monthly_HOA + monthly_maint + actual_vacancy_reserve + actual_management_fee
+    user_closing_costs_total=(price * (user_closing_costs_pct / 100))
+    st.sidebar.caption(f"Estimated Closing Costs: ${user_closing_costs_total:,.2f}")
+    operating_expenses = monthly_taxes + monthly_insurance + monthly_HOA + calculated_monthly_maint + actual_vacancy_reserve + actual_management_fee
     total_monthly_expenses = monthly_mortgage + operating_expenses
     monthly_net_cash_flow = final_monthly_rent - total_monthly_expenses
 
@@ -157,7 +157,7 @@ if st.session_state.property_data:
     else: 
         cap_rate=0 
 
-    total_investment = (price * (down_payment / 100)) + user_closing_costs    
+    total_investment = (price * (down_payment / 100)) + user_closing_costs_total    
     if(total_investment>0):
         cash_on_cash=(monthly_net_cash_flow*12)/(total_investment)*100
     else: 
@@ -201,7 +201,7 @@ if st.session_state.property_data:
                 f"-${monthly_taxes:,.2f}",
                 f"-${monthly_insurance:,.2f}",
                 f"-${monthly_HOA:,.2f}",
-                f"-${monthly_maint:,.2f}",
+                f"-${calculated_monthly_maint:,.2f}",
                 f"-${actual_vacancy_reserve:,.2f}",
                 f"-${actual_management_fee:,.2f}",
                 f"${total_monthly_expenses:,.2f}",
@@ -272,6 +272,3 @@ if st.session_state.property_data:
     else:
         st.divider()
         st.success("Verified Property: This data is being pulled from your Knowledge Base.")
-
-
-
