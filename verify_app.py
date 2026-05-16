@@ -5,6 +5,15 @@ def run_verification():
     # Initialize the AppTest with the main entry point
     at = AppTest.from_file("AIUnderwriterv2.py").run()
 
+    print("Authenticating...")
+    # Set the password in the first text input and run to trigger authentication
+    at.text_input[0].set_value("betaINVESTOR12110").run()
+    
+    # Attempt to click a submit/login button if one exists to finalize authentication
+    login_btns = [btn for btn in at.button if btn.label in ["Submit", "Login", "Enter"]]
+    if login_btns:
+        login_btns[0].click().run()
+
     print("Inputting Address...")
     # Set the address in the first text input and run the app state
     at.text_input[0].set_value("123 Main St, Springfield, IL").run()
