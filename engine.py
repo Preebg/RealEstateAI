@@ -22,12 +22,15 @@ prediction_model_name="gemini-3.1-flash-lite-preview"
 KB_FILE = "property_kb.json"
 
 def run_search_with_failover(prompt):
+    start_time = time.time()
     config = types.GenerateContentConfig(
         tools=[types.Tool(google_search=types.GoogleSearch())]
     )
     
     # Attempt the primary model 3 times with exponential backoff
     for attempt in range(3):
+        if time.time() - start_time > 30:
+            raise TimeoutError("Search timed out after 30 seconds")
         try:
             return client.models.generate_content(
                 model=primary_search_model_name,
@@ -47,6 +50,8 @@ def run_search_with_failover(prompt):
                 return None
 
     # If primary model fails 3 times, fallback to the secondary model
+    if time.time() - start_time > 30:
+        raise TimeoutError("Search timed out after 30 seconds")
     try:
         return client.models.generate_content(
             model=secondary_search_model_name,
