@@ -2,7 +2,7 @@ from google import genai
 import streamlit as st
 import datetime 
 import pandas as pd 
-from engine import get_property_details
+from engine import get_property_details, calculate_quantum_probability
 import tldextract
 import urllib.parse
 from authenticate import check_password
@@ -185,6 +185,13 @@ if st.session_state.property_data:
     else: 
         cash_on_cash = 0 
 
+    # Quantum Probability Calculation
+    quantum_prob = calculate_quantum_probability(
+        monthly_net_cash_flow, 
+        forecast_rate, 
+        location_score
+    )
+
     if cash_on_cash > 10 and location_score <= 7:
         branding_label = "Cash-flower"
     elif location_score > 7 and cash_on_cash <= 10:
@@ -201,6 +208,7 @@ if st.session_state.property_data:
         col1.metric("Monthly Take-Home", f"${monthly_net_cash_flow:,.2f}")
         col2.metric("Risk-Adjusted Cap Rate", f"{cap_rate:.2f}%")
         col3.metric("Cash On Cash", f"{cash_on_cash:.2f}%")
+        st.metric("Quantum Success Probability", f"{quantum_prob:.1f}%")
         
         st.subheader(f"🏷️ Property Label: {branding_label}")
         st.subheader("🎯 AI Valuation")
@@ -272,7 +280,7 @@ if st.session_state.property_data:
 
         # The PDF Button
         st.write("---")
-        pdf_bytes = generate_property_pdf(address, property_info, pdf_metrics, table_data, investment_params)
+        pdf_bytes = generate_property_pdf(address, property_info, pdf_metrics, table_data, investment_params, location_score)
 
         st.download_button(
             label="📩 Download Full PDF Report",

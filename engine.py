@@ -8,6 +8,8 @@ from knowledge_base import get_kb_context, get_kb_raw_data
 import datetime
 from streamlit_gsheets import GSheetsConnection
 import time 
+from qiskit import QuantumCircuit, transpile
+from qiskit_aer import AerSimulator
 
 # 2. API Setup
 API_KEY = st.secrets["GEMINI_API_KEY"] 
@@ -165,3 +167,28 @@ def get_property_details(address):
             "ai_vacancy_rate": 5.0, "ai_management_fee": 10.0, "appreciation_forecast": 0, "forecast_rate": 0, "forecast_growth": 0,
             "sources": []
         }
+
+def calculate_quantum_probability(cash_flow, forecast_rate, location_score):
+    """
+    Simulates the probability of investment success using a quantum circuit.
+    Maps financial metrics to qubit rotations.
+    """
+    # Normalize inputs to 0-1 range for rotation (pi/2)
+    cf_norm = min(max(cash_flow / 1000, 0), 1) 
+    rate_norm = min(max(forecast_rate / 10, 0), 1)
+    loc_norm = location_score / 10
+
+    qc = QuantumCircuit(1)
+    # Apply rotations based on the three variables to shift state toward |1>
+    qc.ry(cf_norm * 3.14159, 0)
+    qc.ry(rate_norm * 3.14159, 0)
+    qc.ry(loc_norm * 3.14159, 0)
+    qc.measure_all()
+
+    simulator = AerSimulator()
+    compiled_circuit = transpile(qc, simulator)
+    job = simulator.run(compiled_circuit, shots=1024)
+    result = job.result().get_counts()
+    
+    success_count = result.get('1', 0)
+    return (success_count / 1024) * 100
