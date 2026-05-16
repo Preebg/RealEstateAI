@@ -31,7 +31,7 @@ def _extract_json(text):
         text = text.split("```")[1].split("```")[0].strip()
     return json.loads(text)
 
-def search_addresses(search_term: str):
+def search_addresses(search_term, **kwargs):
     """Provides autocomplete suggestions from KB and Photon API (OpenStreetMap)."""
     if not search_term:
         return []

@@ -52,7 +52,7 @@ with st.sidebar:
     loan_term=st.number_input("Loan Term (yrs)", value=30)
     interest_rate=st.number_input("Your Mortgage Rate (%)", value=6.000)
 
-address = st_searchbox("Property Address", search=lambda x: search_function(x), key="prop_search_v3", placeholder="123 Main St, New York, NY")
+address = st_searchbox("Property Address", search=search_function, key="prop_search_v3", placeholder="123 Main St, New York, NY")
 # address = st.text_input("Address", placeholder="Enter the property address.")
 
     
