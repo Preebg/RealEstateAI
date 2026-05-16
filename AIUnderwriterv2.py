@@ -85,6 +85,11 @@ if st.session_state.property_data:
     prediction_reasoning = property_info.get("prediction_reasoning", "No reasoning provided.")
     location_score = safe_float(property_info.get("location_score"))
     
+    ai_vacancy_rate = safe_float(property_info.get("ai_vacancy_rate"))
+    ai_mgmt_fee = safe_float(property_info.get("ai_management_fee"))
+    appreciation_forecast = safe_float(property_info.get("appreciation_forecast"))
+    forecast_rate = safe_float(property_info.get("forecast_rate"))
+    
     sources=property_info.get("sources", [])
 
     # We put it in the sidebar so you can tweak it while looking at the results
@@ -123,7 +128,7 @@ if st.session_state.property_data:
     user_vacancy_reserve = st.sidebar.slider(
     "Adjust Vacancy Reserve %", 
     0.0, 10.0, 
-    value = float(init_vacancy_reserve/final_monthly_rent)*100 if final_monthly_rent > 0 else 5.0,
+    value = ai_vacancy_rate,
     step=0.1,         
     help="The AI set this at 5% of rent, but you can adjust it based on your market knowledge."
     )
@@ -133,7 +138,7 @@ if st.session_state.property_data:
     user_management_fee = st.sidebar.slider(
     "Adjust Management Fee %", 
     5.0, 12.0, 
-    value = float(init_management_fee/final_monthly_rent)*100 if final_monthly_rent > 0 else 10.0,
+    value = ai_mgmt_fee,
     step=0.1,           
     help="The AI set this at 10% of rent, but you can adjust it based on your market knowledge."
     )
@@ -188,6 +193,11 @@ if st.session_state.property_data:
     st.subheader(f"🏷️ Property Label: {branding_label}")
     st.subheader("🎯 AI Valuation")
     st.info(f"**Predicted Market Value:** ${predicted_value:,.2f}\n\n**Reasoning:** {prediction_reasoning}")
+    
+    with st.expander("📈 10-Year Appreciation Forecast"):
+        st.write(f"**Estimated Value in 2034:** ${appreciation_forecast:,.2f}")
+        st.write(f"**Projected Annual Growth:** {forecast_rate:.2f}%")
+        st.info(f"**Logic:** The forecast uses a compound growth formula. The rate is dynamically adjusted based on the Location Score ({location_score}/10), where higher scores increase the projected annual appreciation.")
     
     # Display the summary from the AI search
     st.markdown("### 📝 AI Property Summary")
@@ -278,6 +288,10 @@ if st.session_state.property_data:
             property_info["maint_percent"] = final_maint_percent
             property_info["address"] = address  
             property_info["from_kb"] = True     # Mark it as saved
+            
+            property_info["location_score"] = location_score
+            property_info["appreciation_forecast"] = appreciation_forecast
+            property_info["property_category"] = branding_label
             
             # Save to JSON
             save_knowledge_base(property_info)

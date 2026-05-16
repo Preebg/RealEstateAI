@@ -15,7 +15,6 @@ client = genai.Client(api_key=API_KEY)
 primary_search_model_name="gemma-4-31b-it"
 secondary_search_model_name="gemma-4-31b-it"
 analysis_model_name="gemma-4-31b-it"
-prediction_model_name="gemini-3.1-flash-lite-preview"
 
 KB_FILE = "property_kb.json"
 
@@ -52,6 +51,33 @@ def run_search_with_failover(prompt):
                 return None
     return None
 
+def estimate_operating_metrics(address):
+    config = types.GenerateContentConfig(
+        tools=[types.Tool(google_search=types.GoogleSearch())],
+        response_mime_type="application/json"
+    )
+    prompt = f"""
+    Analyze the rental market and property management landscape for {address}. 
+    Predict a realistic annual 'vacancy_rate' and a standard 'management_fee' percentage based on local neighborhood norms.
+    Return a JSON object with keys: "vacancy_rate" (number), "management_fee" (number).
+    """
+    try:
+        response = client.models.generate_content(model=analysis_model_name, contents=prompt, config=config)
+        return json.loads(response.text.strip())
+    except Exception:
+        return {"vacancy_rate": 5.0, "management_fee": 10.0}
+
+def calculate_10yr_appreciation(current_value, location_score):
+    # Dynamic rate: Base 3% + (location_score - 5) * 0.5%
+    # Result: Score 10 = 5.5%, Score 5 = 3%, Score 0 = 0.5%
+    annual_rate = 0.03 + ((location_score - 5) * 0.005)
+    future_value = current_value * ((1 + annual_rate) ** 10)
+    return {
+        "future_value": future_value,
+        "annual_rate": annual_rate * 100,
+        "total_growth": ((future_value - current_value) / current_value) * 100
+    }
+
 def predict_property_value(address):
     """
     Uses Gemini 3.1 Flash Lite with grounding to predict the fair market value of a home.
@@ -73,7 +99,7 @@ def predict_property_value(address):
     
     try:
         response = client.models.generate_content(
-            model=prediction_model_name,
+            model=analysis_model_name,
             contents=prompt,
             config=config
         )
@@ -116,7 +142,8 @@ def get_property_details(address):
         st.error("Both primary and secondary search models failed. Please try again later.")
         return {
             "price": 0, "year": 2026, "rent": 0, "tax_rate": 1.5, 
-            "hoa": 0, "insurance": 100, "summary": "Error fetching data.", "maint_percent": 3.0
+            "hoa": 0, "insurance": 100, "summary": "Error fetching data.", "maint_percent": 3.0,
+            "ai_vacancy_rate": 5.0, "ai_management_fee": 10.0, "appreciation_forecast": 0, "forecast_rate": 0, "forecast_growth": 0
         }
 
     sources_set = set()
@@ -203,6 +230,17 @@ def get_property_details(address):
         property_data["prediction_reasoning"] = prediction.get("reasoning", "")
         property_data["location_score"] = prediction.get("location_score", 0)
         
+        # Estimate Operating Metrics
+        op_metrics = estimate_operating_metrics(address)
+        property_data["ai_vacancy_rate"] = op_metrics.get("vacancy_rate", 5.0)
+        property_data["ai_management_fee"] = op_metrics.get("management_fee", 10.0)
+        
+        # Calculate 10-Year Forecast
+        forecast = calculate_10yr_appreciation(property_data["predicted_value"], property_data["location_score"])
+        property_data["appreciation_forecast"] = forecast["future_value"]
+        property_data["forecast_rate"] = forecast["annual_rate"]
+        property_data["forecast_growth"] = forecast["total_growth"]
+        
         return property_data
         
     except Exception as e:
@@ -211,5 +249,6 @@ def get_property_details(address):
         return {
             "price": 0, "year": 2026, "rent": 0, "tax_rate": 1.5, 
             "hoa": 0, "insurance": 100, "summary": "Error fetching data.", "maint_percent": 3.0,
-            "predicted_value": 0, "prediction_reasoning": "Error predicting value.", "location_score": 0
+            "predicted_value": 0, "prediction_reasoning": "Error predicting value.", "location_score": 0,
+            "ai_vacancy_rate": 5.0, "ai_management_fee": 10.0, "appreciation_forecast": 0, "forecast_rate": 0, "forecast_growth": 0
         }
