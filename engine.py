@@ -10,6 +10,8 @@ from streamlit_gsheets import GSheetsConnection
 import time 
 from qiskit import QuantumCircuit, transpile
 from qiskit_aer import AerSimulator
+import requests
+import urllib.parse
 
 # 2. API Setup
 API_KEY = st.secrets["GEMINI_API_KEY"] 
@@ -19,6 +21,35 @@ secondary_search_model_name="gemini-2.5-flash"
 analysis_model_name="gemini-3.1-flash-lite-preview"
 
 KB_FILE = "property_kb.json"
+
+def _extract_json(text):
+    """Helper to extract JSON from LLM responses."""
+    text = text.strip()
+    if "```json" in text:
+        text = text.split("```json")[1].split("```")[0].strip()
+    elif "```" in text:
+        text = text.split("```")[1].split("```")[0].strip()
+    return json.loads(text)
+
+def search_addresses(search_term: str):
+    """Provides autocomplete suggestions from KB and Google Places API."""
+    # 1. Start with Knowledge Base matches
+    kb_data = get_kb_raw_data()
+    suggestions = [addr for addr in kb_data.keys() if search_term.lower() in addr.lower()]
+    
+    # 2. Supplement with Google Places API (Requires GOOGLE_MAPS_API_KEY in st.secrets)
+    api_key = st.secrets.get("GOOGLE_MAPS_API_KEY")
+    if api_key and len(search_term) > 3:
+        try:
+            url = f"https://maps.googleapis.com/maps/api/place/autocomplete/json?input={urllib.parse.quote(search_term)}&key={api_key}"
+            response = requests.get(url).json()
+            if response.get("status") == "OK":
+                api_suggestions = [p["description"] for p in response.get("predictions", [])]
+                suggestions.extend(api_suggestions)
+        except Exception as e:
+            print(f"Autocomplete Error: {e}")
+            
+    return list(set(suggestions)) # Remove duplicates
 
 def calculate_10yr_appreciation(current_value, location_score):
     if current_value <= 0:
@@ -94,70 +125,38 @@ def checker_agent(analysis_json, listing_price, model):
     response = client.models.generate_content(model=model, contents=prompt)
     return response.text
 
-@st.cache_data(persist="disk", show_spinner=False)
-def get_property_details(address):
+def get_initial_analysis(address):
+    """Stage 1: Fast research and basic analysis for immediate display."""
     kb_data = get_kb_raw_data()
     if address in kb_data:
-        data = kb_data[address]
-        data["from_kb"] = True 
-        return data
+        return kb_data[address], True
     
-    previously_analyzed = get_kb_context()
+    # Researcher -> Analyzer
+    research_results = researcher_agent(address, primary_search_model_name)
+    analysis_results = analyzer_agent(address, research_results, analysis_model_name)
+    return _extract_json(analysis_results), False
+
+def get_final_analysis(initial_data, address):
+    """Stage 2: Verification, detailed mapping, and forecasting."""
+    # Checker
+    listing_price = initial_data.get("price", 0)
+    final_json_text = checker_agent(json.dumps(initial_data), listing_price, primary_search_model_name)
+    property_data = _extract_json(final_json_text)
     
-    try:
-        # Agentic Workflow to lower latency by using specialized models
-        # 1. Researcher (Fast search model)
-        research_results = researcher_agent(address, primary_search_model_name)
-        
-        # 2. Analyzer (High-reasoning model)
-        analysis_results = analyzer_agent(address, research_results, analysis_model_name)
-        
-        # 3. Checker (Fast validation model)
-        # Extract listing price from analysis for the checker
-        try:
-            temp_data = json.loads(analysis_results.split("```json")[1].split("```")[0].strip() if "```json" in analysis_results else analysis_results)
-            listing_price = temp_data.get("price", 0)
-        except:
-            listing_price = 0
-            
-        final_json_text = checker_agent(analysis_results, listing_price, primary_search_model_name)
-        
-        # Robust JSON extraction
-        text = final_json_text.strip()
-        if "```json" in text:
-            text = text.split("```json")[1].split("```")[0].strip()
-        elif "```" in text:
-            text = text.split("```")[1].split("```")[0].strip()
-            
-        property_data = json.loads(text)
-        
-        # Source extraction (from the researcher's original response)
-        # Note: In a full agentic flow, we'd pass the response object, but for brevity:
-        property_data["sources"] = [f"https://www.google.com/search?q={address.replace(' ', '+')}"]
-        
-        # Map keys and calculate forecast (Keep existing logic)
-        property_data["ai_vacancy_rate"] = property_data.get("vacancy_rate", 5.0)
-        property_data["ai_management_fee"] = property_data.get("management_fee", 10.0)
-        
-        forecast = calculate_10yr_appreciation(
-            property_data.get("predicted_value", 0), 
-            property_data.get("location_score", 0)
-        )
-        property_data["appreciation_forecast"] = forecast["future_value"]
-        property_data["forecast_rate"] = forecast["annual_rate"]
-        property_data["forecast_growth"] = forecast["total_growth"]
-        
-        return property_data
-        
-    except Exception as e:
-        st.error(f"Agentic Analysis Error: {e}")
-        return {
-            "price": 0, "year": datetime.datetime.now().year, "rent": 0, "tax_rate": 1.5, 
-            "hoa": 0, "insurance": 100, "summary": "Error fetching data.", "maint_percent": 3.0,
-            "predicted_value": 0, "prediction_reasoning": "Error predicting value.", "location_score": 0,
-            "ai_vacancy_rate": 5.0, "ai_management_fee": 10.0, "appreciation_forecast": 0, "forecast_rate": 0, "forecast_growth": 0,
-            "sources": []
-        }
+    # Mapping and Forecast
+    property_data["sources"] = [f"https://www.google.com/search?q={address.replace(' ', '+')}"]
+    property_data["ai_vacancy_rate"] = property_data.get("vacancy_rate", 5.0)
+    property_data["ai_management_fee"] = property_data.get("management_fee", 10.0)
+    
+    forecast = calculate_10yr_appreciation(
+        property_data.get("predicted_value", 0), 
+        property_data.get("location_score", 0)
+    )
+    property_data["appreciation_forecast"] = forecast["future_value"]
+    property_data["forecast_rate"] = forecast["annual_rate"]
+    property_data["forecast_growth"] = forecast["total_growth"]
+    
+    return property_data
 
 def calculate_quantum_probability(cash_flow, forecast_rate, location_score):
     """
