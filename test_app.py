@@ -22,8 +22,7 @@ class TestAIUnderwriterEngine(unittest.TestCase):
         after the primary model returns a 500 error.
         """
         # Setup: First 3 calls raise a 500 ClientError, 4th call (fallback) succeeds
-        mock_error = errors.ClientError()
-        mock_error.code = 500
+        mock_error = errors.ClientError(code=500, response_json={})
         
         mock_success = MagicMock()
         mock_success.text = "Success from fallback"
