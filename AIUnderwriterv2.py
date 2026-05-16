@@ -52,7 +52,7 @@ with st.sidebar:
     loan_term=st.number_input("Loan Term (yrs)", value=30)
     interest_rate=st.number_input("Your Mortgage Rate (%)", value=6.000)
 
-address = st_searchbox("Property Address", search=search_func, key="prop_search_v2")
+address = st_searchbox("Property Address", search=lambda x: search_func(x), key="prop_search_v3")
 
     
 # 3. The Analysis Logic
