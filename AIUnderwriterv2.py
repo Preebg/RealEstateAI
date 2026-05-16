@@ -208,7 +208,9 @@ if st.session_state.property_data:
         col1.metric("Monthly Take-Home", f"${monthly_net_cash_flow:,.2f}")
         col2.metric("Risk-Adjusted Cap Rate", f"{cap_rate:.2f}%")
         col3.metric("Cash On Cash", f"{cash_on_cash:.2f}%")
-        st.metric("Quantum Success Probability", f"{quantum_prob:.1f}%")
+        
+        # Enhanced Quantum Probability Display
+        st.info(f"⚛️ **Quantum Success Probability:** {quantum_prob:.1f}%")
         
         st.subheader(f"🏷️ Property Label: {branding_label}")
         st.subheader("🎯 AI Valuation")
@@ -275,7 +277,8 @@ if st.session_state.property_data:
             "Risk-Adjusted Cap Rate": f"{cap_rate:.2f}%",
             "Cash on Cash Return": f"{cash_on_cash:.2f}%",
             "Monthly Net Cash Flow": f"${monthly_net_cash_flow:,.2f}",
-            "Total Cash Required": f"${total_investment:,.2f}"
+            "Total Cash Required": f"${total_investment:,.2f}",
+            "Quantum Success Probability": f"{quantum_prob:.1f}%"
         }
 
         # The PDF Button
