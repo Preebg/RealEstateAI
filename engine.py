@@ -45,14 +45,14 @@ def calculate_10yr_appreciation(current_value, location_score):
 
 def researcher_agent(address, model):
     prompt = f"""Research the property at {address}. 
-    CRITICAL: You must cross-reference at least 3 different real estate sources (e.g., Zillow, Redfin, Realtor.com, local MLS) to find the most accurate current value. Prioritize the active listing price; if the property is not currently listed, use the most recent sale price or a reliable market estimate (e.g., Zestimate).
+    CRITICAL: You must cross-reference at least 3 different real estate sources (e.g., Zillow, Redfin, Realtor.com, local MLS) to find the currrent listed price of the home. If the property is not currently listed, insert 9999999 as the price of the home.
     
-    Find and synthesize:
+    Find the following details:
     1. PROPERTY BASICS: Current listing price (or estimated market value), year built, and HOA fees.
     2. TAXES: Total Annual Property Tax (including school and local taxes).
     3. RENT: Rent Zestimate or actual rental listings for similar homes in this specific neighborhood.
     4. INSURANCE: Monthly insurance costs or local zip code averages.
-    5. VALUATION: Recent comparable sales (comps) in the immediate area.
+    5. VALUATION: Recent comparable sales (comps) in the immediate area. Provide the names of the properties you used to determine the comps, their sale prices, and how they compare to the target property.
     6. MARKET METRICS: Average vacancy rate and standard property management fees for this neighborhood.
     
     Return the raw findings and explicitly list every URL you visited for verification."""
@@ -75,7 +75,7 @@ def analyzer_agent(address, research_data, model, kb_context):
 
     RESEARCH DATA:
     {research_data}
-
+    If the price given is 9999999, it means the property is not currently listed and you must use the comps and market data to estimate a realistic listing price. Do not leave the price as 9999999 in your final JSON output.
     OUTPUT FORMAT:
     Return ONLY a JSON object with these keys:
     {{
@@ -84,11 +84,11 @@ def analyzer_agent(address, research_data, model, kb_context):
         "rent": number,
         "tax_rate": number, (Annual Tax / Price * 100)
         "hoa": number,
-        "insurance": number, (Monthly cost - if research provides annual, divide by 12),
+        "insurance": number, (Monthly cost - if research provides annual, divide by 12 (it's likely annual amount if the value is above $400))),
         "summary": "3-4 sentence summary of condition, features, and any 'TLC' or 'Updated' notes",
         "maint_percent": number, (New <5yr: 1-2%, Mid 10-25yr: 2-4%, Old 30+yr: 4-6%. Adjust for condition),
         "predicted_value": number,
-        "prediction_reasoning": "1-2 sentence explanation based on the comps found",
+        "prediction_reasoning": "1-2 sentence explanation based on the comps found and list the name of the properties you used as comps",
         "location_score": number, (0-10 based on transit/schools),
         "vacancy_rate": number,
         "management_fee": number,
