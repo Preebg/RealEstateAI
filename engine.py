@@ -14,9 +14,9 @@ from qiskit_aer import AerSimulator
 # 2. API Setup
 API_KEY = st.secrets["GEMINI_API_KEY"] 
 client = genai.Client(api_key=API_KEY)
-primary_search_model_name="gemma-4-31b-it"
+primary_search_model_name="gemini-2.0-flash"
 secondary_search_model_name="gemma-4-26b-it"
-analysis_model_name="gemma-4-31b-it"
+analysis_model_name="gemma-4-26b-it"
 
 KB_FILE = "property_kb.json"
 
@@ -103,28 +103,28 @@ def analyzer_agent(address, research_data, model, kb_context):
     response = client.models.generate_content(model=model, contents=prompt)
     return response.text
 
-def checker_agent(analysis_json, listing_price, research_data, model):
-    prompt = f"""You are a verification agent. Compare the following Analysis JSON against the Raw Research Data.
-    
-    Analysis JSON:
-    {analysis_json}
-    
-    Raw Research Data:
-    {research_data}
-    
-    Rules:
-    1. The 'price' in the JSON must match the listing price or the best available market estimate found in the research data. If the AI previously guessed, correct it to the actual listing price.
-    2. The 'predicted_value' MUST NOT be equal to the listing price ({listing_price}). It must be a reasoned estimate based on the comps found in the research.
-    3. The 'insurance' value MUST be a monthly amount. If the research data shows an annual figure (e.g., $1,200/yr), you must divide it by 12 (e.g., $100/mo).
-    4. Sanity Check: Ensure all numbers are reasonable. (e.g., Insurance should not be $1,000+/mo for a standard home; tax_rate should be a percentage, not a total dollar amount).
-    5. Ensure all required keys are present.
-    6. Verify Reasoning: Ensure the 'prediction_reasoning' is supported by actual data found in the Raw Research Data. If the reasoning is generic or unsupported, rewrite it using the provided evidence.
-    7. Source Preservation: Ensure all URLs found in the research data that contributed to the analysis are included in the 'sources' list in the JSON.
-    
-    If the JSON is incorrect, fix it based on the research data. Return the corrected JSON object ONLY."""
-    
-    response = client.models.generate_content(model=model, contents=prompt)
-    return response.text
+# def checker_agent(analysis_json, listing_price, research_data, model):
+#     prompt = f"""You are a verification agent. Compare the following Analysis JSON against the Raw Research Data.
+#     
+#     Analysis JSON:
+#     {analysis_json}
+#     
+#     Raw Research Data:
+#     {research_data}
+#     
+#     Rules:
+#     1. The 'price' in the JSON must match the listing price or the best available market estimate found in the research data. If the AI previously guessed, correct it to the actual listing price.
+#     2. The 'predicted_value' MUST NOT be equal to the listing price ({listing_price}). It must be a reasoned estimate based on the comps found in the research.
+#     3. The 'insurance' value MUST be a monthly amount. If the research data shows an annual figure (e.g., $1,200/yr), you must divide it by 12 (e.g., $100/mo).
+#     4. Sanity Check: Ensure all numbers are reasonable. (e.g., Insurance should not be $1,000+/mo for a standard home; tax_rate should be a percentage, not a total dollar amount).
+#     5. Ensure all required keys are present.
+#     6. Verify Reasoning: Ensure the 'prediction_reasoning' is supported by actual data found in the Raw Research Data. If the reasoning is generic or unsupported, rewrite it using the provided evidence.
+#     7. Source Preservation: Ensure all URLs found in the research data that contributed to the analysis are included in the 'sources' list in the JSON.
+#     
+#     If the JSON is incorrect, fix it based on the research data. Return the corrected JSON object ONLY."""
+#     
+#     response = client.models.generate_content(model=model, contents=prompt)
+#     return response.text
 
 def get_initial_analysis(address):
     """Stage 1: Fast research and basic analysis for immediate display."""
@@ -147,16 +147,17 @@ def get_initial_analysis(address):
 def get_final_analysis(initial_data, address, research_results=None):
     """Stage 2: Verification, detailed mapping, and forecasting."""
     # Checker - Only run if we have research data (not from KB)
-    if research_results:
-        listing_price = initial_data.get("price", 0)
-        final_json_text = checker_agent(json.dumps(initial_data), listing_price, research_results, analysis_model_name)
-        property_data = _extract_json(final_json_text)
-        
-        # Fallback: If the checker agent fails to return valid JSON, use the initial analysis
-        if property_data is None:
-            property_data = initial_data
-    else:
-        property_data = initial_data
+    # if research_results:
+    #     listing_price = initial_data.get("price", 0)
+    #     final_json_text = checker_agent(json.dumps(initial_data), listing_price, research_results, analysis_model_name)
+    #     property_data = _extract_json(final_json_text)
+    #     
+    #     # Fallback: If the checker agent fails to return valid JSON, use the initial analysis
+    #     if property_data is None:
+    #         property_data = initial_data
+    # else:
+    #     property_data = initial_data
+    property_data = initial_data
     
     # Mapping and Forecast
     property_data["sources"] = property_data.get("sources", [])
