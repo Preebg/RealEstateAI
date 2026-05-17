@@ -22,12 +22,15 @@ KB_FILE = "property_kb.json"
 
 def _extract_json(text):
     """Helper to extract JSON from LLM responses."""
-    text = text.strip()
-    if "```json" in text:
-        text = text.split("```json")[1].split("```")[0].strip()
-    elif "```" in text:
-        text = text.split("```")[1].split("```")[0].strip()
-    return json.loads(text)
+    try:
+        text = text.strip()
+        if "```json" in text:
+            text = text.split("```json")[1].split("```")[0].strip()
+        elif "```" in text:
+            text = text.split("```")[1].split("```")[0].strip()
+        return json.loads(text)
+    except (json.JSONDecodeError, IndexError, AttributeError):
+        return None
 
 def calculate_10yr_appreciation(current_value, location_score):
     if current_value <= 0:
@@ -130,7 +133,13 @@ def get_initial_analysis(address):
     research_results = researcher_agent(address, primary_search_model_name)
     kb_context = get_kb_context()
     analysis_results = analyzer_agent(address, research_results, analysis_model_name, kb_context)
-    return _extract_json(analysis_results), False, research_results
+    
+    extracted = _extract_json(analysis_results)
+    if extracted is None:
+        # Fallback if the analyzer fails to return JSON
+        return {"price": 0, "summary": "AI failed to generate a valid analysis. Please try again.", "location_score": 0, "predicted_value": 0}, False, research_results
+        
+    return extracted, False, research_results
 
 def get_final_analysis(initial_data, address, research_results=None):
     """Stage 2: Verification, detailed mapping, and forecasting."""
@@ -139,6 +148,10 @@ def get_final_analysis(initial_data, address, research_results=None):
         listing_price = initial_data.get("price", 0)
         final_json_text = checker_agent(json.dumps(initial_data), listing_price, research_results, primary_search_model_name)
         property_data = _extract_json(final_json_text)
+        
+        # Fallback: If the checker agent fails to return valid JSON, use the initial analysis
+        if property_data is None:
+            property_data = initial_data
     else:
         property_data = initial_data
     
