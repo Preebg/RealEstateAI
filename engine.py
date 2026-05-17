@@ -15,8 +15,8 @@ from qiskit_aer import AerSimulator
 API_KEY = st.secrets["GEMINI_API_KEY"] 
 client = genai.Client(api_key=API_KEY)
 primary_search_model_name="gemma-4-31b-it"
-secondary_search_model_name="gemma-4-26b-it"
-analysis_model_name="gemini-3-flash-lite"
+secondary_search_model_name="gemini-2.5-flash"
+analysis_model_name="gemini-3-flash-lite-preview"
 
 KB_FILE = "property_kb.json"
 
@@ -57,6 +57,7 @@ def researcher_agent(address, model):
     4. INSURANCE: Monthly insurance costs or local zip code averages.
     5. VALUATION: Recent comparable sales (comps) in the immediate area. Provide the names of the properties you used to determine the comps, their sale prices, and how they compare to the target property.
     6. MARKET METRICS: Average vacancy rate and standard property management fees for this neighborhood.
+    7. Local news or factors that could impact the property's value (e.g., new developments, school ratings, crime rates).
     
     Return the raw findings and explicitly list every URL you visited for verification."""
     
@@ -160,7 +161,7 @@ def get_final_analysis(initial_data, address, research_results=None):
     property_data = initial_data
     
     # Mapping and Forecast
-    property_data["sources"] = property_data.get("sources", [])
+    property_data["sources"] = [f"https://www.google.com/search?q={address.replace(' ', '+')}"]
     property_data["ai_vacancy_rate"] = property_data.get("vacancy_rate", 5.0)
     property_data["ai_management_fee"] = property_data.get("management_fee", 10.0)
     
