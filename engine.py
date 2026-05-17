@@ -14,8 +14,8 @@ from qiskit_aer import AerSimulator
 # 2. API Setup
 API_KEY = st.secrets["GEMINI_API_KEY"] 
 client = genai.Client(api_key=API_KEY)
-primary_search_model_name="gemini-2.5-flash-lite"
-secondary_search_model_name="gemini-2.5-flash"
+primary_search_model_name="gemini-2.5-flash"
+secondary_search_model_name="gemini-2.5-flash-lite"
 analysis_model_name="gemini-3.1-flash-lite-preview"
 
 KB_FILE = "property_kb.json"
@@ -146,7 +146,7 @@ def get_final_analysis(initial_data, address, research_results=None):
     # Checker - Only run if we have research data (not from KB)
     if research_results:
         listing_price = initial_data.get("price", 0)
-        final_json_text = checker_agent(json.dumps(initial_data), listing_price, research_results, primary_search_model_name)
+        final_json_text = checker_agent(json.dumps(initial_data), listing_price, research_results, analysis_model_name)
         property_data = _extract_json(final_json_text)
         
         # Fallback: If the checker agent fails to return valid JSON, use the initial analysis
