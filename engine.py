@@ -45,10 +45,10 @@ def calculate_10yr_appreciation(current_value, location_score):
 
 def researcher_agent(address, model):
     prompt = f"""Research the property at {address}. 
-    CRITICAL: You must cross-reference at least 3 different real estate sources (e.g., Zillow, Redfin, Realtor.com, local MLS) to find the most accurate, current active listing price.
+    CRITICAL: You must cross-reference at least 3 different real estate sources (e.g., Zillow, Redfin, Realtor.com, local MLS) to find the most accurate current value. Prioritize the active listing price; if the property is not currently listed, use the most recent sale price or a reliable market estimate (e.g., Zestimate).
     
     Find and synthesize:
-    1. PROPERTY BASICS: Current listing price, year built, and HOA fees.
+    1. PROPERTY BASICS: Current listing price (or estimated market value), year built, and HOA fees.
     2. TAXES: Total Annual Property Tax (including school and local taxes).
     3. RENT: Rent Zestimate or actual rental listings for similar homes in this specific neighborhood.
     4. INSURANCE: Monthly insurance costs or local zip code averages.
@@ -94,7 +94,7 @@ def analyzer_agent(address, research_data, model, kb_context):
         "management_fee": number,
         "property_label": "A dynamic label (e.g., 'Cash-flower', 'Appreciation Machine', 'Value-Add Play', 'High-Risk Speculation') based on the financial metrics"
     }}
-    IMPORTANT: No currency symbols, no commas, no markdown prose outside the JSON. The 'price' must be the exact active listing price found in the research."""
+    IMPORTANT: No currency symbols, no commas, no markdown prose outside the JSON. The 'price' should be the active listing price; if unavailable, use the most recent sale price or a reliable market estimate found in the research."""
     
     response = client.models.generate_content(model=model, contents=prompt)
     return response.text
@@ -109,7 +109,7 @@ def checker_agent(analysis_json, listing_price, research_data, model):
     {research_data}
     
     Rules:
-    1. The 'price' in the JSON must exactly match the active listing price found in the research data.
+    1. The 'price' in the JSON must match the listing price or the best available market estimate found in the research data.
     2. The 'predicted_value' MUST NOT be equal to the listing price ({listing_price}). It must be a reasoned estimate based on the comps found in the research.
     3. Ensure all required keys are present.
     
