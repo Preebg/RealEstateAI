@@ -7,7 +7,6 @@ from finance import calculate_10yr_appreciation, calculate_mortgage, calculate_o
 import urllib.parse
 from authenticate import check_password
 from knowledge_base import save_knowledge_base 
-from streamlit_gsheets import GSheetsConnection
 import matplotlib.pyplot as plt
 from pdf_generator import generate_property_pdf
 import tldextract
@@ -317,6 +316,7 @@ if st.session_state.property_data:
             property_info["property_category"] = branding_label
             
             # Save to JSON
+            print(f"DEBUG: Saving address: {address}")
             save_knowledge_base(property_info)
             st.cache_data.clear()  # Clear cache to ensure fresh data is pulled next time
             

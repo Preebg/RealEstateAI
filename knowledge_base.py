@@ -4,22 +4,22 @@ from supabase import create_client, Client
 import pandas as pd
 import json
 
-# Initialize Supabase
-url: str = st.secrets["SUPABASE_URL"]
-key: str = st.secrets["SUPABASE_API_KEY"]
-supabase: Client = create_client(url, key)
+def get_client():
+    """Returns a Supabase client, ensuring it is properly defined."""
+    url: str = st.secrets["SUPABASE_URL"]
+    key: str = st.secrets["SUPABASE_KEY"]
+    return create_client(url, key)
 
 def get_kb_raw_data():
-    """Fetches all properties from Supabase and returns a dictionary."""
+    """Fetches all properties from Supabase."""
     try:
-        # We query the 'properties' table you just created
+        supabase = get_client() # This defines 'supabase' inside the method scope
         response = supabase.table("properties").select("*").execute()
         data = response.data
         
         if not data:
             return {}
             
-        # Your engine expects a dictionary keyed by address
         return {item['address']: item for item in data}
     except Exception as e:
         print(f"Supabase Fetch Error: {e}")
@@ -28,17 +28,19 @@ def get_kb_raw_data():
 def save_knowledge_base(property_data):
     """Saves or Updates a property in Supabase."""
     try:
-        # Create a copy to avoid mutating the original dict
+        supabase = get_client() # This defines 'supabase' inside the method scope
         payload = property_data.copy()
         
-        # 1. Clean up data types (Supabase/Postgres is stricter than GSheets)
-        # Convert lists to JSON strings if they aren't already
-        if "sources" in payload and isinstance(payload["sources"], list):
-            # No need to json.dumps, the supabase-py lib handles lists for JSONB columns!
-            pass 
-            
-        # 2. Match your SQL column names exactly
-        # If your dictionary has extra keys from the LLM, we filter for only what's in SQL
+        # Ensure numbers are cleaned for PostgreSQL NUMERIC types
+        for key in ["price", "rent", "tax_rate", "location_score", "predicted_value"]:
+            if key in payload:
+                # Use your existing safe_float logic or clean here
+                val = str(payload[key]).replace('$', '').replace(',', '').strip()
+                try:
+                    payload[key] = float(val)
+                except:
+                    payload[key] = 0.0
+
         allowed_columns = [
             "address", "price", "year_built", "rent", "tax_rate", 
             "hoa", "insurance", "summary", "maint_percent", 
@@ -48,17 +50,19 @@ def save_knowledge_base(property_data):
         
         filtered_payload = {k: v for k, v in payload.items() if k in allowed_columns}
 
-        # 3. The 'Upsert' (Update or Insert)
-        # This tells Supabase: "If this address exists, update it. If not, make a new row."
-        supabase.table("properties").upsert(filtered_payload, on_conflict="address").execute()
+        # The 'Upsert'
+        response = supabase.table("properties").upsert(filtered_payload, on_conflict="address").execute()
         
-        st.success(f"Successfully synced {payload['address']} to Supabase.")
+        print(f"DEBUG: Success! Row added: {response.data}")
+        return response
     except Exception as e:
+        print(f"Full Error Detail: {e}")
         st.error(f"Failed to save to Supabase: {e}")
 
 def get_kb_context():
     """Pulls recent examples for the LLM."""
     try:
+        supabase = get_client()
         response = supabase.table("properties").select("address, rent, predicted_value").limit(3).execute()
         if not response.data: return ""
         

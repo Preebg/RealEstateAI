@@ -7,7 +7,6 @@ from google.genai import errors, types
 import os 
 from knowledge_base import get_kb_context, get_kb_raw_data
 import datetime
-from streamlit_gsheets import GSheetsConnection
 import time 
 from qiskit import QuantumCircuit, transpile
 from qiskit_aer import AerSimulator
@@ -105,7 +104,7 @@ def analyzer_agent(address, research_data, model, kb_context):
         "location_score": number, (0-10 based on transit/schools),
         "vacancy_rate": number,
         "management_fee": number,
-        "property_label": "A dynamic label (e.g., 'Cash-flower', 'Appreciation Machine', 'Value-Add Play', 'High-Risk Speculation') based on the financial metrics",
+        "property_label": "A dynamic label describing the property (e.g., 'Cash-flower' - if cashflow above 8%, 'Appreciation Machine' if greater than 4%, 'Value-Add Play' if description says TLC or somethng like that, 'High-Risk Speculation' if cashflow below 4% and appreciation is below 2%) based on the financial metrics",
         "sources": ["list of URLs used"]
     }}
     IMPORTANT: No currency symbols, no commas, no markdown prose outside the JSON. The 'price' should be the active listing price; if unavailable, use the most recent sale price or a reliable market estimate found in the research."""
