@@ -1,3 +1,4 @@
+from click import prompt
 from google import genai
 import streamlit as st
 import json 
@@ -16,9 +17,7 @@ API_KEY = st.secrets["GEMINI_API_KEY"]
 client = genai.Client(api_key=API_KEY)
 primary_search_model_name="gemma-4-31b-it"
 secondary_search_model_name="gemini-2.5-flash"
-analysis_model_name="gemini-3-flash-lite-preview"
-
-KB_FILE = "property_kb.json"
+analysis_model_name="gemini-3.1-flash-lite-preview"
 
 def _extract_json(text):
     """Helper to extract JSON from LLM responses."""
@@ -47,28 +46,51 @@ def calculate_10yr_appreciation(current_value, location_score):
     }
 
 def researcher_agent(address, model):
-    prompt = f"""Research the property at {address}. 
-    CRITICAL: You must cross-reference at least 3 different real estate sources (e.g., Zillow, Redfin, Realtor.com, local MLS) to find the currrent listed price of the home. If the property is not currently listed, insert 9999999 as the price of the home.
-    
-    Find the following details:
-    1. PROPERTY BASICS: Current listing price (or estimated market value), year built, and HOA fees.
-    2. TAXES: Total Annual Property Tax (including school and local taxes).
-    3. RENT: Rent Zestimate or actual rental listings for similar homes in this specific neighborhood.
-    4. INSURANCE: Monthly insurance costs or local zip code averages.
-    5. VALUATION: Recent comparable sales (comps) in the immediate area. Provide the names of the properties you used to determine the comps, their sale prices, and how they compare to the target property.
-    6. MARKET METRICS: Average vacancy rate and standard property management fees for this neighborhood.
-    7. Local news or factors that could impact the property's value (e.g., new developments, school ratings, crime rates).
-    
-    Return the raw findings and explicitly list every URL you visited for verification."""
-    
-    response = client.models.generate_content(
-        model=model, 
-        contents=prompt, 
-        config=types.GenerateContentConfig(
-            tools=[types.Tool(google_search=types.GoogleSearch())]
-        )
-    )
-    return response.text
+        prompt = f"""Research the property at {address}.
+          CRITICAL: You must cross-reference at least 3 different real estate sources (e.g., Zillow, Redfin, Realtor.com, local MLS) to find the currrent
+      listed price of the home. If the property is not currently listed, insert 9999999 as the price of the home.
+
+          Find the following details:
+          1. PROPERTY BASICS: Current listing price (or estimated market value), year built, and HOA fees.
+          2. TAXES: Total Annual Property Tax (including school and local taxes).
+          3. RENT: Rent Zestimate or actual rental listings for similar homes in this specific neighborhood.
+          4. INSURANCE: Monthly insurance costs or local zip code averages.
+          5. VALUATION: Recent comparable sales (comps) in the immediate area; preferably 3 properties. Comps must be properties with similar characteristics (size, age, location). Provide the names of the properties you used to determine the comps, their
+      sale prices, and how they compare to the target property.
+          6. MARKET METRICS: Average vacancy rate and standard property management fees for this neighborhood.
+          7. Local news or factors that could impact the property's value (e.g., new developments, school ratings, crime rates).
+
+          Return the raw findings and explicitly list every URL you visited for verification."""
+
+        for attempt in range(3):
+            try:
+                response = client.models.generate_content(
+                    model=model,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        tools=[types.Tool(google_search=types.GoogleSearch())]
+                    )
+                )
+                return response.text
+
+            except (errors.ServerError, errors.APIError) as e:
+                # If it's the last attempt or a specific fatal error, try the secondary model
+                if attempt == 2:
+                    print(f"Primary model failed 3 times. Switching to {secondary_search_model_name}...")
+                    try:
+                        response = client.models.generate_content(
+                            model=secondary_search_model_name,
+                            contents=prompt,
+                            config=types.GenerateContentConfig(
+                                tools=[types.Tool(google_search=types.GoogleSearch())]
+                            )
+                        )
+                        return response.text
+                    except Exception as final_e:
+                        raise final_e
+                
+                print(f"Attempt {attempt + 1} failed with {e.code}. Retrying...")
+                continue
 
 def analyzer_agent(address, research_data, model, kb_context):
     prompt = f"""You are an expert real estate analyst. Your goal is to provide a comprehensive underwrite for the property at {address}.
@@ -91,7 +113,7 @@ def analyzer_agent(address, research_data, model, kb_context):
         "insurance": number, (Monthly cost - if research provides annual, divide by 12 (it's likely annual amount if the value is above $400))),
         "summary": "3-4 sentence summary of condition, features, and any 'TLC' or 'Updated' notes",
         "maint_percent": number, (New <5yr: 1-2%, Mid 10-25yr: 2-4%, Old 30+yr: 4-6%. Adjust for condition),
-        "predicted_value": number,
+        "predicted_value": number, If the property listed price is much below the comps, use the comps to predict a more accurate value. If the property is listed at or above comps, provide a predicted value based on the listing price and justify it with the research data. Do not simply repeat the listing price as the predicted value if it is not supported by the comps and market data.
         "prediction_reasoning": "1-2 sentence explanation based on the comps found. You MUST cite specific data points and property names from the research data to justify the valuation.",
         "location_score": number, (0-10 based on transit/schools),
         "vacancy_rate": number,
