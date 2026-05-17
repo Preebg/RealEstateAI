@@ -122,7 +122,7 @@ if st.session_state.property_data:
         help="The AI suggested the initial value, but you can override it here."
     )
     
-    maint_min, maint_max = 0.0, 15.0
+    maint_min, maint_max = 1.0, 15.0
     clamped_maint = max(maint_min, min(maint_max, float(ai_maint_percent)))
     final_maint_percent = st.sidebar.slider(
         "Adjust Maintenance %", 
@@ -147,7 +147,7 @@ if st.session_state.property_data:
     calculated_monthly_maint = (final_maint_percent / 100 * final_monthly_rent)
     init_vacancy_reserve=final_monthly_rent*0.05
     
-    vac_min, vac_max = 0.0, 10.0
+    vac_min, vac_max = 1.0, 10.0
     clamped_vac = max(vac_min, min(vac_max, ai_vacancy_rate))
     user_vacancy_reserve = st.sidebar.slider(
     "Adjust Vacancy Reserve %", 
@@ -159,8 +159,8 @@ if st.session_state.property_data:
     actual_vacancy_reserve = (user_vacancy_reserve / 100) * final_monthly_rent
 
     init_management_fee=final_monthly_rent*0.10
-    mgmt_min, mgmt_max = 5.0, 12.0
-    clamped_mgmt = max(mgmt_min, min(mgmt_max, ai_mgmt_fee))
+    mgmt_min, mgmt_max = 8.0, 12.0
+    clamped_mgmt = max(mgmt_min, min(mgmt_max, float(ai_mgmt_fee)))
     user_management_fee = st.sidebar.slider(
     "Adjust Management Fee %", 
     mgmt_min, mgmt_max, 

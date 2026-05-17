@@ -44,8 +44,11 @@ def calculate_10yr_appreciation(current_value, location_score):
     }
 
 def researcher_agent(address, model):
-    prompt = f"""Research the property at {address}. Find:
-    1. Listing price, year built, HOA fees.
+    prompt = f"""Research the property at {address}. 
+    CRITICAL: Find the current, active listing price. Cross-reference multiple sources (e.g., Zillow, Redfin, Realtor.com) to ensure the price is accurate and up-to-date.
+    
+    Find:
+    1. Exact current listing price, year built, HOA fees.
     2. Annual Property Tax.
     3. Rent Zestimate/comparable rentals.
     4. Monthly insurance costs.
@@ -70,7 +73,9 @@ def analyzer_agent(address, research_data, model):
     IMPORTANT: The 'predicted_value' must be an independent estimate based on the comps found. 
     It must NEVER be identical to the listing price.
     
-    Return ONLY a JSON object. Ensure 'rent', 'hoa', and 'insurance' are provided as MONTHLY values:
+    Return ONLY a JSON object. 
+    CRITICAL: The 'price' field must be the exact current listing price found in the research. Do not average or estimate this value.
+    Ensure 'rent', 'hoa', and 'insurance' are provided as MONTHLY values:
     {{
         "price": number,
         "year": number,
