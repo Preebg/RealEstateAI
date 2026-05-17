@@ -59,7 +59,12 @@ if st.button("Analyze Property"):
 
         # Stage 1: Fast Analysis
         with st.status("🔍 Researching property and estimating value...") as status:
-            initial_data, from_kb = get_initial_analysis(address)
+            initial_data, from_kb, research_results = get_initial_analysis(address)
+
+            # Exception Case: Price is 0
+            if not from_kb and safe_float(initial_data.get("price")) == 0:
+                st.error("Error Fetching Property Data... The AI could not find a valid listing price. Please verify the address and try again.")
+                st.stop()
 
             # Immediate Display of Summary and Forecast
             st.markdown("### 📝 AI Property Summary")
@@ -75,7 +80,7 @@ if st.button("Analyze Property"):
 
             # Stage 2: Detailed Analysis
             status.update(label="✅ Verifying data and calculating ROI...", state="running")
-            final_result = get_final_analysis(initial_data, address)
+            final_result = get_final_analysis(initial_data, address, research_results)
             st.session_state.property_data = final_result
             status.update(label="✅ Analysis Complete!", state="complete")
 
@@ -226,6 +231,22 @@ if st.session_state.property_data:
             st.write(f"**Projected Annual Growth:** {forecast_rate:.2f}%")
             st.info(f"**Logic:** The forecast uses a compound growth formula. The rate is dynamically adjusted based on the Location Score ({location_score}/10).")
             st.markdown("**Methodology:** This app utilizes a Compound Growth Model to project future value based on historical neighborhood trends and location-weighted growth rates.")
+            
+            # Appreciation Graph
+            start_year = datetime.datetime.now().year
+            years = list(range(start_year, start_year + 11))
+            # Calculate value for each year: Value * (1 + rate)^year
+            values = [predicted_value * ((1 + forecast_rate/100)**i) for i in range(11)]
+            
+            fig, ax = plt.subplots(figsize=(8, 4))
+            ax.plot(years, values, marker='o', color='#2ecc71', linewidth=2)
+            ax.set_title("Projected Property Value Growth", fontsize=14)
+            ax.set_xlabel("Year")
+            ax.set_ylabel("Estimated Value ($)")
+            ax.grid(True, linestyle='--', alpha=0.6)
+            ax.ticklabel_format(style='plain', axis='y')
+            
+            st.pyplot(fig)
 
     # Display the summary from the AI search
     st.markdown("### 📝 AI Property Summary")

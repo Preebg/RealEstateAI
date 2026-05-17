@@ -95,15 +95,21 @@ def analyzer_agent(address, research_data, model):
     response = client.models.generate_content(model=model, contents=prompt)
     return response.text
 
-def checker_agent(analysis_json, listing_price, model):
-    prompt = f"""Verify this real estate analysis JSON:
+def checker_agent(analysis_json, listing_price, research_data, model):
+    prompt = f"""You are a verification agent. Compare the following Analysis JSON against the Raw Research Data.
+    
+    Analysis JSON:
     {analysis_json}
     
+    Raw Research Data:
+    {research_data}
+    
     Rules:
-    1. Ensure all required keys are present.
-    2. The 'predicted_value' MUST NOT be equal to the listing price ({listing_price}).
-    If it is equal, adjust the predicted_value slightly based on market logic.
-    Return the corrected JSON object ONLY."""
+    1. The 'price' in the JSON must exactly match the active listing price found in the research data.
+    2. The 'predicted_value' MUST NOT be equal to the listing price ({listing_price}). It must be a reasoned estimate based on the comps found in the research.
+    3. Ensure all required keys are present.
+    
+    If the JSON is incorrect, fix it based on the research data. Return the corrected JSON object ONLY."""
     
     response = client.models.generate_content(model=model, contents=prompt)
     return response.text
@@ -112,19 +118,22 @@ def get_initial_analysis(address):
     """Stage 1: Fast research and basic analysis for immediate display."""
     kb_data = get_kb_raw_data()
     if address in kb_data:
-        return kb_data[address], True
+        return kb_data[address], True, None
     
     # Researcher -> Analyzer
     research_results = researcher_agent(address, primary_search_model_name)
     analysis_results = analyzer_agent(address, research_results, analysis_model_name)
-    return _extract_json(analysis_results), False
+    return _extract_json(analysis_results), False, research_results
 
-def get_final_analysis(initial_data, address):
+def get_final_analysis(initial_data, address, research_results=None):
     """Stage 2: Verification, detailed mapping, and forecasting."""
-    # Checker
-    listing_price = initial_data.get("price", 0)
-    final_json_text = checker_agent(json.dumps(initial_data), listing_price, primary_search_model_name)
-    property_data = _extract_json(final_json_text)
+    # Checker - Only run if we have research data (not from KB)
+    if research_results:
+        listing_price = initial_data.get("price", 0)
+        final_json_text = checker_agent(json.dumps(initial_data), listing_price, research_results, primary_search_model_name)
+        property_data = _extract_json(final_json_text)
+    else:
+        property_data = initial_data
     
     # Mapping and Forecast
     property_data["sources"] = [f"https://www.google.com/search?q={address.replace(' ', '+')}"]
