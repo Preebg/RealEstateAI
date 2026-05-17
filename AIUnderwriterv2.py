@@ -84,7 +84,6 @@ if st.button("Analyze Property"):
             st.session_state.property_data = final_result
             status.update(label="✅ Analysis Complete!", state="complete")
 
-        st.rerun()
     else:
         st.warning("Please enter a property address.")
 if st.session_state.property_data:

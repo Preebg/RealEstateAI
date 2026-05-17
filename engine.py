@@ -14,9 +14,9 @@ from qiskit_aer import AerSimulator
 # 2. API Setup
 API_KEY = st.secrets["GEMINI_API_KEY"] 
 client = genai.Client(api_key=API_KEY)
-primary_search_model_name="gemini-2.0-flash"
+primary_search_model_name="gemma-4-31b-it"
 secondary_search_model_name="gemma-4-26b-it"
-analysis_model_name="gemma-4-26b-it"
+analysis_model_name="gemini-3-flash-lite"
 
 KB_FILE = "property_kb.json"
 

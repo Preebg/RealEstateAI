@@ -1,23 +1,23 @@
+from turtle import st
 from streamlit.testing.v1 import AppTest
-
+APP_PASSWORD = st.secrets["APP_PASSWORD"]
 def run_verification():
     print("Starting App...")
     # Initialize the AppTest with the main entry point
-    # Increased timeout for initial load
-    at = AppTest.from_file("AIUnderwriterv2.py").run(timeout=10)
+    at = AppTest.from_file("AIUnderwriterv2.py").run()
 
     print("Authenticating...")
     # Set the password in the first text input and run to trigger authentication
-    at.text_input[0].set_value("betaINVESTOR12110").run(timeout=10)
+    at.text_input[0].set_value("APP_PASSWORD").run()
     
     # Attempt to click a submit/login button if one exists to finalize authentication
     login_btns = [btn for btn in at.button if btn.label in ["Submit", "Login", "Enter"]]
     if login_btns:
-        login_btns[0].click().run(timeout=10)
+        login_btns[0].click().run()
 
     print("Inputting Address...")
     # Set the address in the first text input and run the app state
-    at.text_input[0].set_value("123 Main St, Springfield, IL").run(timeout=10)
+    at.text_input[0].set_value("123 Main St, Springfield, IL").run()
 
     print("Waiting for Gemini API...")
     print(f"Buttons found: {len(at.button)}")
@@ -26,9 +26,7 @@ def run_verification():
     analyze_btns = [btn for btn in at.button if btn.label == 'Analyze Property']
     
     if analyze_btns:
-        # The analysis process involves multiple API calls and search grounding.
-        # We increase the timeout significantly (e.g., 300 seconds) to allow the AI to finish.
-        analyze_btns[0].click().run(timeout=300)
+        analyze_btns[0].click().run()
     else:
         print("❌ Error: 'Analyze Property' button not found.")
         exit(1)
