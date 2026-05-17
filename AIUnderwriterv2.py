@@ -2,7 +2,7 @@ from google import genai
 import streamlit as st
 import datetime 
 import pandas as pd 
-from engine import get_initial_analysis, get_final_analysis
+from engine import calculate_quantum_probability, get_initial_analysis, get_final_analysis
 from finance import calculate_10yr_appreciation, calculate_mortgage, calculate_operating_expenses, calculate_investment_metrics
 import urllib.parse
 from authenticate import check_password
@@ -185,9 +185,29 @@ if st.session_state.property_data:
 
     branding_label = property_info.get("property_label", "Balanced")
 
+    with st.spinner("⚛️ Running Quantum Simulation..."):
+        quantum_score = calculate_quantum_probability(
+            monthly_net_cash_flow, 
+            forecast_rate, 
+            location_score
+        )
+        # Save to the main dictionary for Supabase later
+        property_info["quantum_risk_score"] = quantum_score
+
     # 4. Display Results
     st.divider()
-    tab1 = st.tabs(["📊 Overview"])[0]
+    header_col1, header_col2 = st.columns([2, 1])
+    with header_col1:
+        st.subheader("📊 Analysis Overview")
+
+    with header_col2:
+        st.metric(
+            label="⚛️ Quantum Success Prob.", 
+            value=f"{quantum_score:.1f}%",
+            help="Calculated via Qiskit Ry-Gate rotations modeling non-linear market volatility."
+        )
+
+    tab1 = st.tabs(["📋 Detailed Metrics"])[0]
 
     with tab1:
         col1, col2, col3 = st.columns(3)
@@ -195,7 +215,7 @@ if st.session_state.property_data:
         col2.metric("Risk-Adjusted Cap Rate", f"{cap_rate:.2f}%")
         col3.metric("Cash On Cash", f"{cash_on_cash:.2f}%")
         
-        st.subheader(f"🏷️ Property Label: {branding_label}")
+        st.markdown(f"**Strategy Status:** :blue[{branding_label}]")
         st.subheader("🎯 AI Valuation")
         st.info(f"**Predicted Market Value:** ${predicted_value:,.2f}\n\n**Reasoning:** {prediction_reasoning}")
         
@@ -326,3 +346,5 @@ if st.session_state.property_data:
     else:
         st.divider()
         st.success("Verified Property: This data is being pulled from your Knowledge Base.")
+    
+   
