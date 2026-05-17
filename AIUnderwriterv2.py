@@ -205,12 +205,7 @@ if st.session_state.property_data:
     else: 
         cash_on_cash = 0 
 
-    if cash_on_cash > 10 and location_score <= 7:
-        branding_label = "Cash-flower"
-    elif location_score > 7 and cash_on_cash <= 10:
-        branding_label = "Appreciation Machine"
-    else:
-        branding_label = "Balanced"
+    branding_label = property_info.get("property_label", "Balanced")
 
     # 4. Display Results
     st.divider()

@@ -45,16 +45,17 @@ def calculate_10yr_appreciation(current_value, location_score):
 
 def researcher_agent(address, model):
     prompt = f"""Research the property at {address}. 
-    CRITICAL: Find the current, active listing price. Cross-reference multiple sources (e.g., Zillow, Redfin, Realtor.com) to ensure the price is accurate and up-to-date.
+    CRITICAL: You must cross-reference at least 3 different real estate sources (e.g., Zillow, Redfin, Realtor.com, local MLS) to find the most accurate, current active listing price.
     
-    Find:
-    1. Exact current listing price, year built, HOA fees.
-    2. Annual Property Tax.
-    3. Rent Zestimate/comparable rentals.
-    4. Monthly insurance costs.
-    5. Recent comparable sales (comps) in the immediate area.
-    6. Average vacancy rate and management fees for the neighborhood.
-    Return the raw findings clearly."""
+    Find and synthesize:
+    1. PROPERTY BASICS: Current listing price, year built, and HOA fees.
+    2. TAXES: Total Annual Property Tax (including school and local taxes).
+    3. RENT: Rent Zestimate or actual rental listings for similar homes in this specific neighborhood.
+    4. INSURANCE: Monthly insurance costs or local zip code averages.
+    5. VALUATION: Recent comparable sales (comps) in the immediate area.
+    6. MARKET METRICS: Average vacancy rate and standard property management fees for this neighborhood.
+    
+    Return the raw findings and explicitly list every URL you visited for verification."""
     
     response = client.models.generate_content(
         model=model, 
@@ -65,32 +66,35 @@ def researcher_agent(address, model):
     )
     return response.text
 
-def analyzer_agent(address, research_data, model):
-    prompt = f"""You are an expert real estate analyst. Based on this research:
+def analyzer_agent(address, research_data, model, kb_context):
+    prompt = f"""You are an expert real estate analyst. Your goal is to provide a comprehensive underwrite for the property at {address}.
+    
+    CONTEXT FROM DATABASE:
+    {kb_context}
+    (Only use properties analyzed within the past 6 months for comparison).
+
+    RESEARCH DATA:
     {research_data}
-    
-    Provide a comprehensive underwrite for {address}.
-    IMPORTANT: The 'predicted_value' must be an independent estimate based on the comps found. 
-    It must NEVER be identical to the listing price.
-    
-    Return ONLY a JSON object. 
-    CRITICAL: The 'price' field must be the exact current listing price found in the research. Do not average or estimate this value.
-    Ensure 'rent', 'hoa', and 'insurance' are provided as MONTHLY values:
+
+    OUTPUT FORMAT:
+    Return ONLY a JSON object with these keys:
     {{
         "price": number,
         "year": number,
         "rent": number,
-        "tax_rate": number,
+        "tax_rate": number, (Annual Tax / Price * 100)
         "hoa": number,
-        "insurance": number, // Monthly insurance cost
-        "summary": "3-4 sentence summary",
-        "maint_percent": number,
+        "insurance": number,
+        "summary": "3-4 sentence summary of condition, features, and any 'TLC' or 'Updated' notes",
+        "maint_percent": number, (New <5yr: 1-2%, Mid 10-25yr: 2-4%, Old 30+yr: 4-6%. Adjust for condition),
         "predicted_value": number,
-        "prediction_reasoning": "1-2 sentence explanation",
-        "location_score": number,
+        "prediction_reasoning": "1-2 sentence explanation based on the comps found",
+        "location_score": number, (0-10 based on transit/schools),
         "vacancy_rate": number,
-        "management_fee": number
-    }}"""
+        "management_fee": number,
+        "property_label": "A dynamic label (e.g., 'Cash-flower', 'Appreciation Machine', 'Value-Add Play', 'High-Risk Speculation') based on the financial metrics"
+    }}
+    IMPORTANT: No currency symbols, no commas, no markdown prose outside the JSON. The 'price' must be the exact active listing price found in the research."""
     
     response = client.models.generate_content(model=model, contents=prompt)
     return response.text
@@ -122,7 +126,8 @@ def get_initial_analysis(address):
     
     # Researcher -> Analyzer
     research_results = researcher_agent(address, primary_search_model_name)
-    analysis_results = analyzer_agent(address, research_results, analysis_model_name)
+    kb_context = get_kb_context()
+    analysis_results = analyzer_agent(address, research_results, analysis_model_name, kb_context)
     return _extract_json(analysis_results), False, research_results
 
 def get_final_analysis(initial_data, address, research_results=None):
