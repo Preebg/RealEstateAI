@@ -14,9 +14,9 @@ from qiskit_aer import AerSimulator
 # 2. API Setup
 API_KEY = st.secrets["GEMINI_API_KEY"] 
 client = genai.Client(api_key=API_KEY)
-primary_search_model_name="gemini-2.5-flash"
-secondary_search_model_name="gemini-2.5-flash-lite"
-analysis_model_name="gemini-3.1-flash-lite-preview"
+primary_search_model_name="gemma-4-31b-it"
+secondary_search_model_name="gemma-4-26b-it"
+analysis_model_name="gemma-4-31b-it"
 
 KB_FILE = "property_kb.json"
 
@@ -64,7 +64,7 @@ def researcher_agent(address, model):
         model=model, 
         contents=prompt, 
         config=types.GenerateContentConfig(
-            tools=[types.Tool(google_search=types.GoogleSearch()), types.Tool(google_maps=types.GoogleMaps())]
+            tools=[types.Tool(google_search=types.GoogleSearch())]
         )
     )
     return response.text
@@ -91,11 +91,12 @@ def analyzer_agent(address, research_data, model, kb_context):
         "summary": "3-4 sentence summary of condition, features, and any 'TLC' or 'Updated' notes",
         "maint_percent": number, (New <5yr: 1-2%, Mid 10-25yr: 2-4%, Old 30+yr: 4-6%. Adjust for condition),
         "predicted_value": number,
-        "prediction_reasoning": "1-2 sentence explanation based on the comps found and list the name of the properties you used as comps",
+        "prediction_reasoning": "1-2 sentence explanation based on the comps found. You MUST cite specific data points and property names from the research data to justify the valuation.",
         "location_score": number, (0-10 based on transit/schools),
         "vacancy_rate": number,
         "management_fee": number,
-        "property_label": "A dynamic label (e.g., 'Cash-flower', 'Appreciation Machine', 'Value-Add Play', 'High-Risk Speculation') based on the financial metrics"
+        "property_label": "A dynamic label (e.g., 'Cash-flower', 'Appreciation Machine', 'Value-Add Play', 'High-Risk Speculation') based on the financial metrics",
+        "sources": ["list of URLs used"]
     }}
     IMPORTANT: No currency symbols, no commas, no markdown prose outside the JSON. The 'price' should be the active listing price; if unavailable, use the most recent sale price or a reliable market estimate found in the research."""
     
@@ -117,6 +118,8 @@ def checker_agent(analysis_json, listing_price, research_data, model):
     3. The 'insurance' value MUST be a monthly amount. If the research data shows an annual figure (e.g., $1,200/yr), you must divide it by 12 (e.g., $100/mo).
     4. Sanity Check: Ensure all numbers are reasonable. (e.g., Insurance should not be $1,000+/mo for a standard home; tax_rate should be a percentage, not a total dollar amount).
     5. Ensure all required keys are present.
+    6. Verify Reasoning: Ensure the 'prediction_reasoning' is supported by actual data found in the Raw Research Data. If the reasoning is generic or unsupported, rewrite it using the provided evidence.
+    7. Source Preservation: Ensure all URLs found in the research data that contributed to the analysis are included in the 'sources' list in the JSON.
     
     If the JSON is incorrect, fix it based on the research data. Return the corrected JSON object ONLY."""
     
@@ -156,7 +159,7 @@ def get_final_analysis(initial_data, address, research_results=None):
         property_data = initial_data
     
     # Mapping and Forecast
-    property_data["sources"] = [f"https://www.google.com/search?q={address.replace(' ', '+')}"]
+    property_data["sources"] = property_data.get("sources", [])
     property_data["ai_vacancy_rate"] = property_data.get("vacancy_rate", 5.0)
     property_data["ai_management_fee"] = property_data.get("management_fee", 10.0)
     
