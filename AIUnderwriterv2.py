@@ -287,7 +287,7 @@ if st.session_state.property_data:
 
         # The PDF Button
         st.write("---")
-        pdf_bytes = generate_property_pdf(address, property_info, pdf_metrics, table_data, investment_params)
+        pdf_bytes = generate_property_pdf(address, property_info, pdf_metrics, table_data, investment_params, location_score)
 
         st.download_button(
             label="📩 Download Full PDF Report",

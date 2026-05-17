@@ -70,14 +70,14 @@ def analyzer_agent(address, research_data, model):
     IMPORTANT: The 'predicted_value' must be an independent estimate based on the comps found. 
     It must NEVER be identical to the listing price.
     
-    Return ONLY a JSON object:
+    Return ONLY a JSON object. Ensure 'rent', 'hoa', and 'insurance' are provided as MONTHLY values:
     {{
         "price": number,
         "year": number,
         "rent": number,
         "tax_rate": number,
         "hoa": number,
-        "insurance": number,
+        "insurance": number, // Monthly insurance cost
         "summary": "3-4 sentence summary",
         "maint_percent": number,
         "predicted_value": number,
