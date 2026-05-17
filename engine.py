@@ -84,7 +84,7 @@ def analyzer_agent(address, research_data, model, kb_context):
         "rent": number,
         "tax_rate": number, (Annual Tax / Price * 100)
         "hoa": number,
-        "insurance": number,
+        "insurance": number, (Monthly cost - if research provides annual, divide by 12),
         "summary": "3-4 sentence summary of condition, features, and any 'TLC' or 'Updated' notes",
         "maint_percent": number, (New <5yr: 1-2%, Mid 10-25yr: 2-4%, Old 30+yr: 4-6%. Adjust for condition),
         "predicted_value": number,
@@ -109,9 +109,11 @@ def checker_agent(analysis_json, listing_price, research_data, model):
     {research_data}
     
     Rules:
-    1. The 'price' in the JSON must match the listing price or the best available market estimate found in the research data.
+    1. The 'price' in the JSON must match the listing price or the best available market estimate found in the research data. If the AI previously guessed, correct it to the actual listing price.
     2. The 'predicted_value' MUST NOT be equal to the listing price ({listing_price}). It must be a reasoned estimate based on the comps found in the research.
-    3. Ensure all required keys are present.
+    3. The 'insurance' value MUST be a monthly amount. If the research data shows an annual figure (e.g., $1,200/yr), you must divide it by 12 (e.g., $100/mo).
+    4. Sanity Check: Ensure all numbers are reasonable. (e.g., Insurance should not be $1,000+/mo for a standard home; tax_rate should be a percentage, not a total dollar amount).
+    5. Ensure all required keys are present.
     
     If the JSON is incorrect, fix it based on the research data. Return the corrected JSON object ONLY."""
     
