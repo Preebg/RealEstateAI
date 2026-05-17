@@ -11,6 +11,7 @@ from streamlit_gsheets import GSheetsConnection
 import time 
 from qiskit import QuantumCircuit, transpile
 from qiskit_aer import AerSimulator
+from finance import calculate_10yr_appreciation
 
 # 2. API Setup
 API_KEY = st.secrets["GEMINI_API_KEY"] 
@@ -30,20 +31,6 @@ def _extract_json(text):
         return json.loads(text)
     except (json.JSONDecodeError, IndexError, AttributeError):
         return None
-
-def calculate_10yr_appreciation(current_value, location_score):
-    if current_value <= 0:
-        return {"future_value": 0, "annual_rate": 0, "total_growth": 0}
-        
-    # Dynamic rate: Base 3% + (location_score - 5) * 0.5%
-    # Result: Score 10 = 5.5%, Score 5 = 3%, Score 0 = 0.5%
-    annual_rate = 0.03 + ((location_score - 5) * 0.005)
-    future_value = current_value * ((1 + annual_rate) ** 10)
-    return {
-        "future_value": future_value,
-        "annual_rate": annual_rate * 100,
-        "total_growth": ((future_value - current_value) / current_value) * 100
-    }
 
 def researcher_agent(address, model):
         prompt = f"""Research the property at {address}.

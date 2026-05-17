@@ -2,7 +2,8 @@ from google import genai
 import streamlit as st
 import datetime 
 import pandas as pd 
-from engine import get_initial_analysis, get_final_analysis, calculate_10yr_appreciation
+from engine import get_initial_analysis, get_final_analysis
+from finance import calculate_10yr_appreciation, calculate_mortgage, calculate_operating_expenses, calculate_investment_metrics
 import urllib.parse
 from authenticate import check_password
 from knowledge_base import save_knowledge_base 
@@ -135,48 +136,29 @@ if st.session_state.property_data:
         step=0.1,
         help="The AI suggested the initial value, but you can override it here."
     )
-        
-    # 5. The Math (Using the SLIDER value, not the raw AI value)
-    #Mortgage Payment
-    loan_amount=price*(1-(down_payment/100))
-    monthly_ir = (interest_rate / 100) / 12
-    total_payments = loan_term * 12
-    if monthly_ir > 0:
-        monthly_mortgage = loan_amount * (monthly_ir * (1 + monthly_ir)**total_payments) / ((1 + monthly_ir)**total_payments - 1)
-    else:
-        monthly_mortgage = loan_amount / total_payments
 
-    #Expense calculations
-    monthly_taxes=((tax_rate/100)*price)/12
-    calculated_monthly_maint = (final_maint_percent / 100 * final_monthly_rent)
-    init_vacancy_reserve=final_monthly_rent*0.05
-    
     vac_min, vac_max = 1.0, 10.0
     clamped_vac = max(vac_min, min(vac_max, ai_vacancy_rate))
     user_vacancy_reserve = st.sidebar.slider(
-    "Adjust Vacancy Reserve %", 
-    vac_min, vac_max, 
-    value = clamped_vac,
-    step=0.1,         
-    help="The AI set this at 5% of rent, but you can adjust it based on your market knowledge."
+        "Adjust Vacancy Reserve %", 
+        vac_min, vac_max, 
+        value = clamped_vac,
+        step=0.1,         
+        help="The AI set this at 5% of rent, but you can adjust it based on your market knowledge."
     )
-    actual_vacancy_reserve = (user_vacancy_reserve / 100) * final_monthly_rent
 
-    init_management_fee=final_monthly_rent*0.10
     mgmt_min, mgmt_max = 8.0, 12.0
     clamped_mgmt = max(mgmt_min, min(mgmt_max, float(ai_mgmt_fee)))
     user_management_fee = st.sidebar.slider(
-    "Adjust Management Fee %", 
-    mgmt_min, mgmt_max, 
-    value = clamped_mgmt,
-    step=0.1,           
-    help="The AI set this at 10% of rent, but you can adjust it based on your market knowledge."
+        "Adjust Management Fee %", 
+        mgmt_min, mgmt_max, 
+        value = clamped_mgmt,
+        step=0.1,           
+        help="The AI set this at 10% of rent, but you can adjust it based on your market knowledge."
     )
-    actual_management_fee = (user_management_fee / 100) * final_monthly_rent
-    
-    init_closing_costs_pct = 3.0
+
     closing_min, closing_max = 0.0, 10.0
-    clamped_closing = max(closing_min, min(closing_max, init_closing_costs_pct))
+    clamped_closing = max(closing_min, min(closing_max, 3.0))
     user_closing_costs_pct = st.sidebar.slider(
         "Adjust Closing Costs (%)",
         closing_min, closing_max,
@@ -184,25 +166,23 @@ if st.session_state.property_data:
         step=0.1,
         help = "Standard closing costs are around 3-5% of the purchase price."
     )
+        
+    # 5. The Math (Using the SLIDER value, not the raw AI value)
+    monthly_mortgage = calculate_mortgage(price, down_payment, interest_rate, loan_term)
 
-    user_closing_costs_total=(price * (user_closing_costs_pct / 100))
+    user_closing_costs_total = (price * (user_closing_costs_pct / 100))
     st.sidebar.caption(f"Estimated Closing Costs: ${user_closing_costs_total:,.2f}")
-    operating_expenses = monthly_taxes + monthly_insurance + monthly_HOA + calculated_monthly_maint + actual_vacancy_reserve + actual_management_fee
+
+    operating_expenses, monthly_taxes, calculated_monthly_maint, actual_vacancy_reserve, actual_management_fee = calculate_operating_expenses(
+        price, tax_rate, monthly_insurance, monthly_HOA, final_maint_percent, final_monthly_rent, user_vacancy_reserve, user_management_fee
+    )
     total_monthly_expenses = monthly_mortgage + operating_expenses
     monthly_net_cash_flow = final_monthly_rent - total_monthly_expenses
 
     #Metrics
-    annual_noi = (final_monthly_rent-operating_expenses)*12
-    if (price>0):
-        cap_rate = (annual_noi / price) * 100
-    else: 
-        cap_rate=0 
-
-    total_investment = (price * (down_payment / 100)) + user_closing_costs_total    
-    if(total_investment>0):
-        cash_on_cash=(monthly_net_cash_flow*12)/(total_investment)*100
-    else: 
-        cash_on_cash = 0 
+    annual_noi = (final_monthly_rent - operating_expenses) * 12
+    total_investment = (price * (down_payment / 100)) + user_closing_costs_total
+    cap_rate, cash_on_cash = calculate_investment_metrics(price, annual_noi, total_investment, monthly_net_cash_flow)
 
     branding_label = property_info.get("property_label", "Balanced")
 
