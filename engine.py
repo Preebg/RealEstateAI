@@ -10,8 +10,6 @@ from streamlit_gsheets import GSheetsConnection
 import time 
 from qiskit import QuantumCircuit, transpile
 from qiskit_aer import AerSimulator
-import requests
-import urllib.parse
 
 # 2. API Setup
 API_KEY = st.secrets["GEMINI_API_KEY"] 
@@ -30,49 +28,6 @@ def _extract_json(text):
     elif "```" in text:
         text = text.split("```")[1].split("```")[0].strip()
     return json.loads(text)
-
-def get_address_suggestions(search_term, **kwargs):
-    """Provides autocomplete suggestions from KB and Photon API (OpenStreetMap)."""
-    if not search_term:
-        return []
-
-    # 1. Start with Knowledge Base matches (Fastest)
-    kb_data = get_kb_raw_data()
-    suggestions = [addr for addr in kb_data.keys() if search_term.lower() in addr.lower()]
-    
-    # 2. Supplement with Photon API for nationwide USA addresses
-    try:
-        # Photon API endpoint
-        url = f"https://photon.komoot.io/api/?q={urllib.parse.quote(search_term)}&limit=10"
-        response = requests.get(url, timeout=3)
-        
-        if response.status_code == 200:
-            data = response.json()
-            # Photon returns a list of features. We extract the formatted address.
-            # We prioritize results in the United States.
-            api_suggestions = []
-            for feature in data:
-                props = feature.get("properties", {})
-                country = props.get("country", "")
-                
-                if country == "United States":
-                    # Construct a readable address string
-                    name = props.get("name", "")
-                    city = props.get("city", "")
-                    state = props.get("state", "")
-                    
-                    # Build the address string based on available data
-                    addr_parts = [name, city, state]
-                    full_addr = ", ".join([p for p in addr_parts if p])
-                    if full_addr:
-                        api_suggestions.append(full_addr)
-            
-            suggestions.extend(api_suggestions)
-    except Exception as e:
-        print(f"Photon Autocomplete Error: {e}")
-            
-    # Remove duplicates while preserving order
-    return list(dict.fromkeys(suggestions))
 
 def calculate_10yr_appreciation(current_value, location_score):
     if current_value <= 0:
