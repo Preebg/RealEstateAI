@@ -1,4 +1,4 @@
-from turtle import st
+import streamlit as st
 from streamlit.testing.v1 import AppTest
 APP_PASSWORD = st.secrets["APP_PASSWORD"]
 def run_verification():
