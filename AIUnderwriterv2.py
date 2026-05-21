@@ -3,7 +3,11 @@ import streamlit as st
 import datetime 
 import pandas as pd 
 from engine import calculate_quantum_probability, get_initial_analysis, get_final_analysis
-from finance import calculate_10yr_appreciation, calculate_mortgage, calculate_operating_expenses, calculate_investment_metrics
+from finance import (
+    analyze_investment,
+    calculate_10yr_appreciation,
+    project_value_schedule,
+)
 import urllib.parse
 from authenticate import check_password
 from knowledge_base import save_knowledge_base 
@@ -166,22 +170,35 @@ if st.session_state.property_data:
         help = "Standard closing costs are around 3-5% of the purchase price."
     )
         
-    # 5. The Math (Using the SLIDER value, not the raw AI value)
-    monthly_mortgage = calculate_mortgage(price, down_payment, interest_rate, loan_term)
-
-    user_closing_costs_total = (price * (user_closing_costs_pct / 100))
-    st.sidebar.caption(f"Estimated Closing Costs: ${user_closing_costs_total:,.2f}")
-
-    operating_expenses, monthly_taxes, calculated_monthly_maint, actual_vacancy_reserve, actual_management_fee = calculate_operating_expenses(
-        price, tax_rate, monthly_insurance, monthly_HOA, final_maint_percent, final_monthly_rent, user_vacancy_reserve, user_management_fee
+    analysis = analyze_investment(
+        price=price,
+        down_payment_pct=down_payment,
+        interest_rate=interest_rate,
+        loan_term=int(loan_term),
+        closing_costs_pct=user_closing_costs_pct,
+        tax_rate=tax_rate,
+        monthly_insurance=monthly_insurance,
+        monthly_hoa=monthly_HOA,
+        maint_percent=final_maint_percent,
+        monthly_rent=final_monthly_rent,
+        vacancy_reserve_pct=user_vacancy_reserve,
+        management_fee_pct=user_management_fee,
     )
-    total_monthly_expenses = monthly_mortgage + operating_expenses
-    monthly_net_cash_flow = final_monthly_rent - total_monthly_expenses
+    monthly_mortgage = analysis["monthly_mortgage"]
+    user_closing_costs_total = analysis["closing_costs_total"]
+    op_ex = analysis["operating_expenses"]
+    operating_expenses = op_ex["total"]
+    monthly_taxes = op_ex["monthly_taxes"]
+    calculated_monthly_maint = op_ex["monthly_maintenance"]
+    actual_vacancy_reserve = op_ex["vacancy_reserve"]
+    actual_management_fee = op_ex["management_fee"]
+    total_monthly_expenses = analysis["total_monthly_expenses"]
+    monthly_net_cash_flow = analysis["monthly_net_cash_flow"]
+    total_investment = analysis["total_investment"]
+    cap_rate = analysis["cap_rate"]
+    cash_on_cash = analysis["cash_on_cash"]
 
-    #Metrics
-    annual_noi = (final_monthly_rent - operating_expenses) * 12
-    total_investment = (price * (down_payment / 100)) + user_closing_costs_total
-    cap_rate, cash_on_cash = calculate_investment_metrics(price, annual_noi, total_investment, monthly_net_cash_flow)
+    st.sidebar.caption(f"Estimated Closing Costs: ${user_closing_costs_total:,.2f}")
 
     branding_label = property_info.get("property_label", "Balanced")
 
@@ -225,11 +242,9 @@ if st.session_state.property_data:
             st.info(f"**Logic:** The forecast uses a compound growth formula. The rate is dynamically adjusted based on the Location Score ({location_score}/10).")
             st.markdown("**Methodology:** This app utilizes a Compound Growth Model to project future value based on historical neighborhood trends and location-weighted growth rates.")
             
-            # Appreciation Graph
             start_year = datetime.datetime.now().year
             years = list(range(start_year, start_year + 11))
-            # Calculate value for each year: Value * (1 + rate)^year
-            values = [predicted_value * ((1 + forecast_rate/100)**i) for i in range(11)]
+            values = project_value_schedule(predicted_value, forecast_rate)
             
             fig, ax = plt.subplots(figsize=(8, 4))
             ax.plot(years, values, marker='o', color='#2ecc71', linewidth=2)

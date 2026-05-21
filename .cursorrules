@@ -1,0 +1,1 @@
+Always use type hinting for Python functions. When modifying financial logic in finance.py, ensure all currency is rounded to 2 decimal places. For quantum simulations in engine.py, prioritize Qiskit Aer GPU-accelerated methods.
