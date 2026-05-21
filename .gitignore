@@ -4,5 +4,7 @@ venv/
 __pycache__/
 property_kb.json
 .streamlit/cache/
+.streamlit/oauth_pkce_pending.json
+harvester_scheduled.log
 poised-epigram-493119-g0-64095d0f749b.json
 .aider*

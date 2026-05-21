@@ -11,7 +11,7 @@ from qiskit import QuantumCircuit, transpile
 from qiskit_aer import AerSimulator
 
 from finance import calculate_10yr_appreciation
-from knowledge_base import get_kb_context, get_kb_raw_data
+from knowledge_base import get_kb_context, lookup_property
 
 # --- Model routing (harvester + underwriter) ---
 DISCOVERY_MODEL = "gemini-2.5-flash"
@@ -436,9 +436,9 @@ def analyzer_agent(
 
 def get_initial_analysis(address: str) -> tuple[dict[str, Any], bool, str | None]:
     """Stage 1: Fast research and basic analysis for immediate display."""
-    kb_data = get_kb_raw_data()
-    if address in kb_data:
-        return kb_data[address], True, None
+    cached = lookup_property(address)
+    if cached:
+        return cached, True, None
 
     research_results = researcher_agent(address, PRIMARY_SEARCH_MODEL)
     kb_context = get_kb_context()

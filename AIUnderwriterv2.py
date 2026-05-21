@@ -9,14 +9,17 @@ from finance import (
     project_value_schedule,
 )
 import urllib.parse
-from authenticate import check_password
-from knowledge_base import render_market_pulse, save_knowledge_base
+from authenticate import get_logged_in_user, render_auth_sidebar
+from knowledge_base import lookup_property, render_auth_page, save_knowledge_base
+from market_pulse import render_market_pulse
 import matplotlib.pyplot as plt
 from pdf_generator import generate_property_pdf
 import tldextract
 
-if not check_password():
-    st.stop() 
+st.set_page_config(page_title="AI Property Scout", page_icon="🏠", layout="wide")
+
+if not render_auth_page():
+    st.stop()
 def safe_float(value):
     """Converts a value to float, handling strings, None, or empty values."""
     if value is None:
@@ -43,12 +46,13 @@ def get_pretty_label(url):
         return "View Source"
 
 # 1. Setup the Web Interface
-st.set_page_config(page_title="AI Property Scout", page_icon="🏠")
 st.title("🏠 AI Property Analyzer")
 st.write("Enter details below to get an AI-calculated Risk-Adjusted ROI.")
 
 # 2. Sidebar for Inputs (Instead of hardcoded variables)
 with st.sidebar:
+    render_auth_sidebar()
+    st.divider()
     render_market_pulse()
     st.divider()
     st.header("Investment Parameters")
@@ -63,9 +67,23 @@ if st.button("Analyze Property"):
     if address:
         st.session_state.property_data = None
 
-        # Stage 1: Fast Analysis
         with st.status("🔍 Researching property and estimating value...") as status:
-            initial_data, from_kb, research_results = get_initial_analysis(address)
+            # Instant Pull: check Knowledge Base before any AI engine calls
+            cached = lookup_property(address)
+            if cached:
+                status.update(
+                    label="⚡ Instant Pull from Knowledge Base",
+                    state="running",
+                )
+                initial_data = cached
+                from_kb = True
+                research_results = None
+            else:
+                status.update(
+                    label="🔍 No cache hit — running AI research...",
+                    state="running",
+                )
+                initial_data, from_kb, research_results = get_initial_analysis(address)
 
             # Exception Case: Price is 0
             if not from_kb and safe_float(initial_data.get("price")) == 0:
@@ -84,11 +102,15 @@ if st.button("Analyze Property"):
             st.write(f"**Estimated Value in 2034:** ${forecast['future_value']:,.2f}")
             st.write(f"**Projected Annual Growth:** {forecast['annual_rate']:.2f}%")
 
-            # Stage 2: Detailed Analysis
             status.update(label="✅ Verifying data and calculating ROI...", state="running")
             final_result = get_final_analysis(initial_data, address, research_results)
             st.session_state.property_data = final_result
-            status.update(label="✅ Analysis Complete!", state="complete")
+            done_label = (
+                "✅ Loaded from Knowledge Base (Instant Pull)"
+                if from_kb
+                else "✅ Analysis Complete!"
+            )
+            status.update(label=done_label, state="complete")
 
     else:
         st.warning("Please enter a property address.")
@@ -354,7 +376,12 @@ if st.session_state.property_data:
             
             # Save to JSON
             print(f"DEBUG: Saving address: {address}")
-            save_knowledge_base(property_info)
+            user = get_logged_in_user()
+            if user:
+                save_knowledge_base(property_info, user_id=user["id"])
+            else:
+                st.error("You must be signed in to save to the knowledge base.")
+                st.stop()
             st.cache_data.clear()  # Clear cache to ensure fresh data is pulled next time
             
             # Use success message and rerun to hide this section immediately

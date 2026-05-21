@@ -3,14 +3,16 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 import time
+from pathlib import Path
 from typing import Any, Callable
 
 from google.genai import errors
 
 import engine
 from finance import analyze_investment
-from knowledge_base import get_market_pulse, render_market_pulse, save_harvest_property
+from knowledge_base import get_admin_uid, get_market_pulse, save_harvest_property
 
 LOG_FILE = "failed_addresses.log"
 INVESTMENT_PARAMS = {
@@ -64,7 +66,63 @@ def headless_cash_flow(property_data: dict[str, Any]) -> float:
     return analysis["monthly_net_cash_flow"]
 
 
-def run_harvester_pipeline() -> dict[str, Any]:
+def _load_local_secrets() -> None:
+    """Load .streamlit/secrets.toml into os.environ for headless CLI runs."""
+    secrets_path = Path(__file__).resolve().parent / ".streamlit" / "secrets.toml"
+    if not secrets_path.exists():
+        return
+    try:
+        import tomllib
+
+        with secrets_path.open("rb") as f:
+            for key, value in tomllib.load(f).items():
+                if isinstance(value, str) and not os.getenv(key):
+                    os.environ[key] = value
+    except Exception as exc:
+        print(f"Note: Could not load secrets.toml ({exc}). Use environment variables.")
+
+
+def require_harvest_config() -> str:
+    """Validate API keys and return admin user_id for attributed saves."""
+    _load_local_secrets()
+
+    missing = [
+        name
+        for name in ("GEMINI_API_KEY", "SUPABASE_URL", "SUPABASE_KEY", "ADMIN_USER_ID")
+        if not os.getenv(name) and not _secret_fallback(name)
+    ]
+    if missing:
+        print(
+            "Missing required configuration: "
+            + ", ".join(missing)
+            + "\nAdd them to .streamlit/secrets.toml or set as environment variables."
+        )
+        sys.exit(1)
+
+    admin_uid = get_admin_uid()
+    if not admin_uid:
+        print(
+            "ADMIN_USER_ID is not set.\n"
+            "1. Supabase Dashboard → Authentication → Users → copy your User UID\n"
+            "2. Add to .streamlit/secrets.toml: ADMIN_USER_ID = \"your-uuid-here\""
+        )
+        sys.exit(1)
+
+    print(f"Harvest saves will use admin user_id: {admin_uid}")
+    return admin_uid
+
+
+def _secret_fallback(name: str) -> str | None:
+    """Read a secret from Streamlit when running under streamlit run harvester.py."""
+    try:
+        import streamlit as st
+
+        return st.secrets.get(name)
+    except Exception:
+        return None
+
+
+def run_harvester_pipeline(admin_user_id: str) -> dict[str, Any]:
     """
     Execute the full 3-stage harvester once per run.
 
@@ -124,7 +182,7 @@ def run_harvester_pipeline() -> dict[str, Any]:
             quantum = engine.run_harvest_quantum(final_data, cash_flow)
             final_data["monthly_net_cash_flow"] = cash_flow
 
-            save_harvest_property(final_data)
+            save_harvest_property(final_data, user_id=admin_user_id)
             report["saved"].append(address)
             bucket = market_city.lower()
             if bucket in report:
@@ -152,10 +210,8 @@ def run_harvester_pipeline() -> dict[str, Any]:
 
 
 def main() -> None:
-    if not os.getenv("GEMINI_API_KEY"):
-        print("Set GEMINI_API_KEY before running the harvester.")
-        return
-    run_harvester_pipeline()
+    admin_user_id = require_harvest_config()
+    run_harvester_pipeline(admin_user_id)
 
 
 # ---------------------------------------------------------------------------
@@ -164,6 +220,7 @@ def main() -> None:
 
 def _render_streamlit_app() -> None:
     import streamlit as st
+    from market_pulse import render_market_pulse
 
     st.set_page_config(page_title="Hot Market Harvester", page_icon="🌾")
     st.title("🌾 Upstate NY Hot Market Harvester")
@@ -175,8 +232,14 @@ def _render_streamlit_app() -> None:
     render_market_pulse()
     st.divider()
 
-    if not os.getenv("GEMINI_API_KEY"):
-        st.error("Set GEMINI_API_KEY in your environment before harvesting.")
+    try:
+        admin_user_id = require_harvest_config()
+        st.caption(f"Saving as admin: `{admin_user_id[:8]}...`")
+    except SystemExit:
+        st.error(
+            "Set GEMINI_API_KEY, SUPABASE_URL, SUPABASE_KEY, and ADMIN_USER_ID in "
+            ".streamlit/secrets.toml or environment variables."
+        )
         st.stop()
 
     col1, col2, col3 = st.columns(3)
@@ -192,7 +255,7 @@ def _render_streamlit_app() -> None:
 
     if st.button("🚀 Run Full Harvest", type="primary"):
         with st.status("Running 3-stage harvest...", expanded=True) as status:
-            report = run_harvester_pipeline()
+            report = run_harvester_pipeline(admin_user_id)
             status.update(label="Harvest complete", state="complete")
 
         st.success(
