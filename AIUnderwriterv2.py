@@ -10,7 +10,7 @@ from finance import (
 )
 import urllib.parse
 from authenticate import check_password
-from knowledge_base import save_knowledge_base 
+from knowledge_base import render_market_pulse, save_knowledge_base
 import matplotlib.pyplot as plt
 from pdf_generator import generate_property_pdf
 import tldextract
@@ -49,6 +49,8 @@ st.write("Enter details below to get an AI-calculated Risk-Adjusted ROI.")
 
 # 2. Sidebar for Inputs (Instead of hardcoded variables)
 with st.sidebar:
+    render_market_pulse()
+    st.divider()
     st.header("Investment Parameters")
     down_payment=st.number_input("Expected Down Payment (%)", value=25)
     loan_term=st.number_input("Loan Term (yrs)", value=30)

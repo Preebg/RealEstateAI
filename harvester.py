@@ -1,139 +1,229 @@
-# harvester.py
-import time
-import logging
-import json
-from google.genai import errors
-import engine
-from knowledge_base import save_knowledge_base
+# harvester.py — 3-Stage Hot Market Harvester (Rochester + Syracuse)
+from __future__ import annotations
 
-# --- CONFIGURATION ---
-TARGETS_FILE = "targets.txt"
+import logging
+import os
+import time
+from typing import Any, Callable
+
+from google.genai import errors
+
+import engine
+from finance import analyze_investment
+from knowledge_base import get_market_pulse, render_market_pulse, save_harvest_property
+
 LOG_FILE = "failed_addresses.log"
-# Default Investment Parameters (since there is no UI slider in headless mode)
 INVESTMENT_PARAMS = {
-    "down_payment": 25,
+    "down_payment": 25.0,
     "interest_rate": 6.0,
     "loan_term": 30,
-    "closing_costs_pct": 3.0
+    "closing_costs_pct": 3.0,
 }
 
-logging.basicConfig(filename=LOG_FILE, level=logging.ERROR, 
-                    format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(
+    filename=LOG_FILE,
+    level=logging.ERROR,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+)
 
-def execute_with_backoff(func, *args, **kwargs):
-    """Handles 429 Rate Limit errors with exponential backoff."""
+
+def execute_with_backoff(func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    """Delegates to engine retry; 60s backoff on 429."""
     retries = 0
-    max_retries = 5
-    while retries < max_retries:
+    while retries < engine.MAX_API_RETRIES:
         try:
             return func(*args, **kwargs)
         except errors.ClientError as e:
             if e.code == 429:
-                wait_time = (2 ** retries)
-                print(f"⚠️ Rate limit hit. Backing off for {wait_time}s...")
-                time.sleep(wait_time)
+                print(
+                    f"429 rate limit. Backing off {engine.RATE_LIMIT_BACKOFF_SEC}s..."
+                )
+                time.sleep(engine.RATE_LIMIT_BACKOFF_SEC)
                 retries += 1
             else:
-                raise e
-    raise Exception("Max retries exceeded for API rate limits.")
+                raise
+    raise RuntimeError("Max retries exceeded for API rate limits.")
 
-def calculate_headless_cash_flow(data):
-    """Replicates the math logic from AIUnderwriterv2.py for headless execution."""
-    try:
-        price = float(data.get("price", 0))
-        rent = float(data.get("rent", 0))
-        tax_rate = float(data.get("tax_rate", 0))
-        hoa = float(data.get("hoa", 0))
-        insurance = float(data.get("insurance", 0))
-        maint_pct = float(data.get("maint_percent", 0))
-        vac_rate = float(data.get("ai_vacancy_rate", 5.0))
-        mgmt_fee_pct = float(data.get("ai_management_fee", 10.0))
 
-        # Mortgage Calculation
-        loan_amount = price * (1 - (INVESTMENT_PARAMS["down_payment"] / 100))
-        monthly_ir = (INVESTMENT_PARAMS["interest_rate"] / 100) / 12
-        total_payments = INVESTMENT_PARAMS["loan_term"] * 12
-        
-        if monthly_ir > 0:
-            monthly_mortgage = loan_amount * (monthly_ir * (1 + monthly_ir)**total_payments) / ((1 + monthly_ir)**total_payments - 1)
-        else:
-            monthly_mortgage = loan_amount / total_payments
-
-        # Operating Expenses
-        monthly_taxes = ((tax_rate / 100) * price) / 12
-        monthly_maint = (maint_pct / 100 * rent)
-        vacancy_reserve = (vac_rate / 100) * rent
-        mgmt_fee = (mgmt_fee_pct / 100) * rent
-        
-        op_ex = monthly_taxes + hoa + insurance + monthly_maint + vacancy_reserve + mgmt_fee
-        cash_flow = rent - (monthly_mortgage + op_ex)
-        
-        return cash_flow
-    except Exception as e:
-        print(f"Math Error: {e}")
-        return 0.0
-
-def discover_cheap_properties(location, max_price=300000):
-    """Uses the researcher agent to find new property addresses under a price cap."""
-    print(f"🌐 Searching for properties under ${max_price} in {location}...")
-    prompt = f"Find a list of 10-20 residential properties currently for sale in {location} listed for under ${max_price}. Return ONLY a plain list of full addresses, one per line."
-    
-    # Use the engine's client and primary model
-    response = engine.client.models.generate_content(
-        model=engine.primary_search_model_name,
-        contents=prompt,
-        config=engine.types.GenerateContentConfig(
-            tools=[engine.types.Tool(google_search=engine.types.GoogleSearch())]
-        )
+def headless_cash_flow(property_data: dict[str, Any]) -> float:
+    """Monthly net cash flow using centralized finance module."""
+    analysis = analyze_investment(
+        price=float(property_data.get("price", 0)),
+        down_payment_pct=INVESTMENT_PARAMS["down_payment"],
+        interest_rate=INVESTMENT_PARAMS["interest_rate"],
+        loan_term=int(INVESTMENT_PARAMS["loan_term"]),
+        closing_costs_pct=INVESTMENT_PARAMS["closing_costs_pct"],
+        tax_rate=float(property_data.get("tax_rate", 0)),
+        monthly_insurance=float(property_data.get("insurance", 0)),
+        monthly_hoa=float(property_data.get("hoa", 0)),
+        maint_percent=float(property_data.get("maint_percent", 4)),
+        monthly_rent=float(property_data.get("rent", 0)),
+        vacancy_reserve_pct=float(property_data.get("ai_vacancy_rate", 5)),
+        management_fee_pct=float(property_data.get("ai_management_fee", 10)),
     )
-    
-    addresses = [line.strip() for line in response.text.split('\n') if line.strip()]
-    with open(TARGETS_FILE, "a") as f:
-        for addr in addresses:
-            f.write(f"{addr}\n")
-    print(f"✅ Added {len(addresses)} potential targets to {TARGETS_FILE}")
+    return analysis["monthly_net_cash_flow"]
 
-def main():
-    # 1. Discovery Phase (Optional: Change location as needed)
-    # discover_cheap_properties("Atlanta, GA") 
 
-    # 2. Load Targets
-    try:
-        with open(TARGETS_FILE, "r") as f:
-            addresses = [line.strip() for line in f if line.strip()]
-    except FileNotFoundError:
-        print(f"❌ {TARGETS_FILE} not found. Please create it or run discovery.")
-        return
+def run_harvester_pipeline() -> dict[str, Any]:
+    """
+    Execute the full 3-stage harvester once per run.
 
-    total = len(addresses)
-    print(f"🚀 Starting harvest of {total} properties...")
+    Stage 1: Single grounded discovery (gemini-2.5-flash) — 20 RPD max.
+    Stage 2: Per-address research (gemma-4-31b-it).
+    Stage 3: Synthesis + quantum + KB save (gemini-3.1-flash-lite-preview).
+    """
+    report: dict[str, Any] = {
+        "discovered": 0,
+        "researched": 0,
+        "synthesized": 0,
+        "skipped": [],
+        "failed": [],
+        "saved": [],
+        "rochester": [],
+        "syracuse": [],
+    }
 
-    for idx, address in enumerate(addresses):
+    print("=" * 60)
+    print("STAGE 1 — Discovery (single Search Grounding call)")
+    print("=" * 60)
+    listings = execute_with_backoff(engine.discover_hot_market_listings)
+    report["discovered"] = len(listings)
+    print(f"Found {len(listings)} listings under ${engine.MAX_DISCOVERY_PRICE:,}")
+
+    if not listings:
+        print("No listings discovered. Exiting.")
+        return report
+
+    for idx, listing in enumerate(listings):
+        address = listing["address"]
+        market_city = listing["city"]
+        print(f"\n[{idx + 1}/{len(listings)}] {address} ({market_city})")
+
         try:
-            # Stage 1: Initial Analysis
-            initial_data, from_kb = execute_with_backoff(engine.get_initial_analysis, address)
-            
-            # Stage 2: Final Analysis
-            final_data = execute_with_backoff(engine.get_final_analysis, initial_data, address)
-            
-            # Stage 3: Math & Quantum Probability
-            cash_flow = calculate_headless_cash_flow(final_data)
-            prob = engine.calculate_quantum_probability(
-                cash_flow, 
-                final_data.get("forecast_rate", 0), 
-                final_data.get("location_score", 0)
+            print("  STAGE 2 — Research (gemma)")
+            research = execute_with_backoff(engine.research_property, address)
+            report["researched"] += 1
+
+            if engine.should_skip_synthesis(research):
+                reason = (
+                    "Poor condition"
+                    if str(research.get("property_condition", "")).lower() == "poor"
+                    else f"Price > ${engine.MAX_SYNTHESIS_PRICE:,}"
+                )
+                print(f"  SKIP Stage 3 — {reason}")
+                report["skipped"].append({"address": address, "reason": reason})
+                continue
+
+            print("  STAGE 3 — Synthesis + Quantum")
+            final_data = execute_with_backoff(
+                engine.synthesize_harvest_property, address, research, market_city
             )
-            
-            # Stage 4: Persistence
-            save_knowledge_base(final_data)
-            
-            # Telemetry
-            print(f"[Processing {idx+1}/{total}] {address} - Success: {prob:.2f}% probability")
+            report["synthesized"] += 1
+
+            cash_flow = headless_cash_flow(final_data)
+            quantum = engine.run_harvest_quantum(final_data, cash_flow)
+            final_data["monthly_net_cash_flow"] = cash_flow
+
+            save_harvest_property(final_data)
+            report["saved"].append(address)
+            bucket = market_city.lower()
+            if bucket in report:
+                report[bucket].append(
+                    {"address": address, "quantum": quantum, "cash_flow": cash_flow}
+                )
+
+            print(f"  Saved — Quantum: {quantum:.1f}% | Cash Flow: ${cash_flow:,.2f}")
 
         except Exception as e:
-            print(f"❌ Failed {address}: {str(e)}")
-            logging.error(f"Address: {address} | Error: {str(e)}")
-            continue
+            print(f"  FAILED — {e}")
+            report["failed"].append({"address": address, "error": str(e)})
+            logging.error("Address: %s | Error: %s", address, e)
+
+    print("\n" + "=" * 60)
+    print("HARVEST COMPLETE")
+    print(
+        f"Discovered: {report['discovered']} | "
+        f"Researched: {report['researched']} | "
+        f"Synthesized: {report['synthesized']} | "
+        f"Skipped: {len(report['skipped'])} | "
+        f"Failed: {len(report['failed'])}"
+    )
+    return report
+
+
+def main() -> None:
+    if not os.getenv("GEMINI_API_KEY"):
+        print("Set GEMINI_API_KEY before running the harvester.")
+        return
+    run_harvester_pipeline()
+
+
+# ---------------------------------------------------------------------------
+# Streamlit control panel (streamlit run harvester.py)
+# ---------------------------------------------------------------------------
+
+def _render_streamlit_app() -> None:
+    import streamlit as st
+
+    st.set_page_config(page_title="Hot Market Harvester", page_icon="🌾")
+    st.title("🌾 Upstate NY Hot Market Harvester")
+    st.caption(
+        "Rochester & Syracuse • Stage 1: 1× grounded discovery • "
+        "Stage 2: Gemma research • Stage 3: Synthesis + Quantum"
+    )
+
+    render_market_pulse()
+    st.divider()
+
+    if not os.getenv("GEMINI_API_KEY"):
+        st.error("Set GEMINI_API_KEY in your environment before harvesting.")
+        st.stop()
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Discovery Model", engine.DISCOVERY_MODEL)
+    col2.metric("Research Model", engine.RESEARCH_MODEL)
+    col3.metric("Synthesis Model", engine.SYNTHESIS_MODEL)
+
+    st.info(
+        f"Stage 1 uses **one** Search Grounding call (≤20 listings under "
+        f"${engine.MAX_DISCOVERY_PRICE:,}). Stage 3 skips Poor condition or "
+        f"price > ${engine.MAX_SYNTHESIS_PRICE:,}."
+    )
+
+    if st.button("🚀 Run Full Harvest", type="primary"):
+        with st.status("Running 3-stage harvest...", expanded=True) as status:
+            report = run_harvester_pipeline()
+            status.update(label="Harvest complete", state="complete")
+
+        st.success(
+            f"Saved {len(report['saved'])} properties "
+            f"({len(report['rochester'])} Rochester, {len(report['syracuse'])} Syracuse)"
+        )
+
+        if report["skipped"]:
+            with st.expander(f"Skipped ({len(report['skipped'])})"):
+                st.dataframe(report["skipped"], use_container_width=True)
+        if report["failed"]:
+            with st.expander(f"Failed ({len(report['failed'])})"):
+                st.dataframe(report["failed"], use_container_width=True)
+
+        st.rerun()
+
+    with st.expander("Raw Market Pulse Data"):
+        st.json(get_market_pulse())
+
+
+def _running_under_streamlit() -> bool:
+    try:
+        from streamlit.runtime.scriptrunner import get_script_run_ctx
+
+        return get_script_run_ctx() is not None
+    except Exception:
+        return False
+
 
 if __name__ == "__main__":
-    main()
+    if _running_under_streamlit():
+        _render_streamlit_app()
+    else:
+        main()
