@@ -8,6 +8,7 @@ import json
 import os
 import secrets
 import time
+import datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
@@ -337,6 +338,24 @@ def sign_up_with_email(email: str, password: str) -> tuple[bool, str]:
     response = supabase.auth.sign_up(
         {"email": email.strip(), "password": password}
     )
+    try:
+        user = getattr(response, "user", None) or getattr(getattr(response, "session", None), "user", None)
+        if user and getattr(user, "id", None):
+            # Best-effort write for compliance auditing. Requires a `profiles` table
+            # keyed by `id` (auth user id) with `email` and `policy_accepted_at`.
+            accepted_at = st.session_state.get("policy_accepted_at")
+            if accepted_at:
+                supabase.table("profiles").upsert(
+                    {
+                        "id": user.id,
+                        "email": email.strip(),
+                        "policy_accepted_at": accepted_at,
+                    },
+                    on_conflict="id",
+                ).execute()
+    except Exception:
+        # Don't block account creation if profile upsert fails.
+        pass
     if response.session:
         _persist_session(response.session)
         return True, "Account created. You are now signed in."
@@ -415,6 +434,75 @@ def get_db_client() -> Client:
     return auth_client if auth_client is not None else get_supabase()
 
 
+def get_signup_policy_text() -> str:
+    """Privacy Policy copy shown in the sign-up terms popup."""
+    return """
+### Privacy Policy & Legal Disclosures (Must Read)
+
+**Effective date:** {effective_date}
+
+#### 1) What this app is
+This application is an AI-assisted, educational real-estate analysis tool. It may generate estimates, summaries, and risk-style scores based on user inputs and third-party information. It is **not** a broker, lender, or financial advisor.
+
+#### 2) Data we collect
+When you create an account or use the app, we may collect:
+- **Account data**: email address and Supabase user identifier (UID)
+- **Usage data**: properties you analyze and any values you save to your Knowledge Base
+- **Generated outputs**: AI summaries, forecasts, and simulated “quantum” scores
+
+We do **not** sell personal information.
+
+#### 3) How we use data
+We use your data to:
+- authenticate you and protect your Knowledge Base,
+- generate analyses you request,
+- store properties you save for later retrieval.
+
+#### 4) Sharing
+We may share data with:
+- **Supabase** (database + authentication provider),
+- **AI model providers** used for analysis (only the inputs needed to produce the requested output).
+
+#### 5) Security & retention
+We apply reasonable security practices; however, no system is perfectly secure. Your saved Knowledge Base entries are retained until you delete them or we retire the service.
+
+#### 6) AI + “Quantum” simulation disclosure (NY, TX, CA)
+This app may display **quantum-probabilistic scores** or similar risk-style outputs. These are **simulations** derived from mathematical transforms of user inputs and/or model outputs. They are **not guarantees** and should not be interpreted as predictions of future performance.
+
+If you are located in **New York (NY)**, **Texas (TX)**, or **California (CA)**, you acknowledge:
+- the tool is **educational** and may produce erroneous or biased results,
+- AI outputs may be incomplete, outdated, or incorrect,
+- any “quantum” outputs are a simulation and **not** a financial promise.
+
+#### 7) Your choices
+You can stop using the app at any time. If you want your data removed, contact the operator of this portfolio project.
+
+#### 8) Acceptance
+By creating an account, you confirm you have read and agree to this Privacy Policy and the AI/Quantum disclosures above.
+""".format(
+        effective_date=datetime.date.today().isoformat()
+    ).strip()
+
+
+def _mark_terms_opened() -> None:
+    """Track that the user opened the terms popup (compliance audit trail)."""
+    st.session_state["terms_viewed"] = True
+    st.session_state["terms_opened_at"] = (
+        datetime.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+    )
+
+
+@st.dialog("Privacy Policy & Terms", width="large")
+def _show_terms_dialog(policy_text: str) -> None:
+    """Same-page modal popup for must-read policy text."""
+    _mark_terms_opened()
+    with st.container(height=350):
+        st.markdown(policy_text)
+    st.caption("Scroll to review all sections before agreeing.")
+    if st.button("Close", use_container_width=True, key="terms_dialog_close"):
+        st.rerun()
+
+
 def render_auth_sidebar() -> None:
     """Sidebar block: email + Logout when signed in."""
     user = get_logged_in_user()
@@ -491,6 +579,8 @@ def render_login_page() -> bool:
                         st.error(f"Login failed: {exc}")
 
         with signup_tab:
+            policy_text = get_signup_policy_text()
+
             signup_email = st.text_input(
                 "Email", key="auth_signup_email", placeholder="you@email.com"
             )
@@ -501,12 +591,87 @@ def render_login_page() -> bool:
                 "Confirm password", type="password", key="auth_signup_confirm"
             )
 
+            if "signup_has_interacted" not in st.session_state:
+                st.session_state["signup_has_interacted"] = False
+            if "terms_viewed" not in st.session_state:
+                st.session_state["terms_viewed"] = False
+
+            # Track interaction (non-empty inputs or checkbox changes).
+            if signup_email or signup_password or signup_confirm:
+                st.session_state["signup_has_interacted"] = True
+
+            row_cb, row_space, row_text, row_link = st.columns(
+                [0.06, 0.015, 0.56, 0.385], gap="small"
+            )
+            with row_cb:
+                agreed = st.checkbox(
+                    "agree",
+                    key="policy_agreed",
+                    disabled=not st.session_state["terms_viewed"],
+                    label_visibility="collapsed",
+                )
+            with row_space:
+                st.empty()
+            with row_text:
+                st.markdown(
+                    '<p style="margin:0;padding-top:0.42rem;line-height:1.2;">I have read and agree to the&nbsp;</p>',
+                    unsafe_allow_html=True,
+                )
+            with row_link:
+                st.markdown(
+                    """
+<style>
+button[data-testid="baseButton-secondary"][arial-label="Open terms popup"]{
+  padding: 0!important;
+  margin: 0!important;
+  min-height: unset!important;
+  height: auto!important;
+  border: none!important;
+  box-shadow: none!important;
+  background: transparent!important;
+  color: #2563eb!important;
+  font-size: 1rem!important;
+  font-weight: 400!important;
+  text-decoration: underline!important;
+  line-height: 1.25!important;
+  margin-top: 0.42rem!important;
+}
+button[data-testid="baseButton-secondary"][arial-label="Open terms popup"] p{
+  color: inherit!important;
+  text-decoration: inherit!important;
+  margin: 0!important;
+}
+</style>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
+                term_pressed = st.button(
+                    "terms",
+                    key="open_terms_modal",
+                    type="secondary",
+                )
+                if term_pressed:
+                    _show_terms_dialog(policy_text)
+
+            if not st.session_state["terms_viewed"]:
+                st.caption(
+                    'Click **terms** to open the Privacy Policy popup and enable agreement.'
+                )
+
+            if agreed:
+                st.session_state["signup_has_interacted"] = True
+
+            create_disabled = not bool(agreed)
+
             if st.button(
                 "Create account",
                 type="primary",
                 use_container_width=True,
                 key="auth_signup_btn",
+                disabled=create_disabled,
             ):
+                st.session_state["signup_has_interacted"] = True
                 if not signup_email or not signup_password:
                     st.warning("Enter an email and password.")
                 elif signup_password != signup_confirm:
@@ -515,6 +680,8 @@ def render_login_page() -> bool:
                     st.warning("Password must be at least 6 characters.")
                 else:
                     try:
+                        # Record acceptance time for compliance logging (profiles table).
+                        st.session_state["policy_accepted_at"] = datetime.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
                         _, message = sign_up_with_email(signup_email, signup_password)
                         st.success(message)
                         if get_logged_in_user():

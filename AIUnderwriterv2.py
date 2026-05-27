@@ -65,6 +65,9 @@ if "property_data" not in st.session_state:
 
 if st.button("Analyze Property"):
     if address:
+        st.warning(
+            "**LEGAL DISCLOSURE:** This is an AI-powered educational tool. Quantum-probabilistic scores are simulations, not financial guarantees. Consult a professional before making investment decisions in NY, NC, FL, TX, AL,  PA, or SC."
+        )
         st.session_state.property_data = None
 
         with st.status("🔍 Researching property and estimating value...") as status:
