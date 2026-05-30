@@ -4,21 +4,19 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import json
 import os
 import secrets
-import time
 import datetime
-from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
 
 import streamlit as st
+from postgrest.exceptions import APIError
 from supabase import Client, create_client
 
-# Survives full-page OAuth redirect when Streamlit session_state is wiped.
-_PKCE_PENDING_FILE = Path(__file__).resolve().parent / ".streamlit" / "oauth_pkce_pending.json"
-_PKCE_TTL_SECONDS = 900  # 15 minutes
+from app_logging import configure_logging, report_error
+
+log = configure_logging("authenticate")
 
 
 class StreamlitAuthStorage:
@@ -68,17 +66,29 @@ def _get_redirect_url() -> str:
     explicit = os.getenv("OAUTH_REDIRECT_URL")
     if explicit:
         return explicit.rstrip("/")
-    try:
+    if "OAUTH_REDIRECT_URL" in st.secrets:
         return str(st.secrets["OAUTH_REDIRECT_URL"]).rstrip("/")
-    except Exception:
-        pass
-    try:
-        base = str(st.context.url).rstrip("/")
-        if base:
-            return base
-    except Exception:
-        pass
+    base = str(st.context.url).rstrip("/")
+    if base:
+        return base
     return "http://localhost:8501"
+
+
+def _get_pkce_session_id() -> str:
+    """Stable id for this OAuth attempt; echoed in redirect_to as pkce_sid."""
+    sid = st.session_state.get("pkce_session_id")
+    if not sid:
+        sid = secrets.token_urlsafe(32)
+        st.session_state["pkce_session_id"] = sid
+    return sid
+
+
+def _redirect_url_with_pkce_sid() -> str:
+    """Redirect URL including pkce_sid so callback can load verifier from Supabase."""
+    base = _get_redirect_url()
+    sid = _get_pkce_session_id()
+    separator = "&" if "?" in base else "?"
+    return f"{base}{separator}pkce_sid={sid}"
 
 
 def _generate_pkce_pair() -> tuple[str, str]:
@@ -109,38 +119,53 @@ def _decode_verifier_state(state: str) -> str | None:
 
 
 def _save_pending_pkce(code_verifier: str, code_challenge: str = "") -> None:
-    """Write PKCE verifier to disk so callback survives Streamlit session reset."""
-    _PKCE_PENDING_FILE.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "code_verifier": code_verifier,
-        "code_challenge": code_challenge,
-        "created_at": time.time(),
-    }
-    _PKCE_PENDING_FILE.write_text(json.dumps(payload), encoding="utf-8")
+    """Persist PKCE verifier in Supabase (survives Streamlit session reset on redirect)."""
+    sid = _get_pkce_session_id()
+    supabase = get_supabase()
+    try:
+        supabase.rpc(
+            "store_oauth_pkce",
+            {
+                "p_session_id": sid,
+                "p_code_verifier": code_verifier,
+                "p_code_challenge": code_challenge or "",
+            },
+        ).execute()
+    except APIError as exc:
+        report_error(log, "pkce_store_failed", exc, pkce_session_id=sid[:8] + "…")
+        raise
     st.session_state["pkce_code_verifier"] = code_verifier
+    log.info("pkce_stored", pkce_session_id=sid[:8] + "…")
 
 
 def _load_pending_pkce() -> dict[str, Any] | None:
-    """Load PKCE material written before the Google redirect."""
-    if not _PKCE_PENDING_FILE.exists():
+    """Load and consume PKCE material from Supabase using pkce_sid."""
+    sid = _query_param("pkce_sid") or st.session_state.get("pkce_session_id")
+    if not sid:
         return None
-    try:
-        data = json.loads(_PKCE_PENDING_FILE.read_text(encoding="utf-8"))
-        created = float(data.get("created_at", 0))
-        if time.time() - created > _PKCE_TTL_SECONDS:
-            _clear_pending_pkce()
-            return None
-        return data
-    except (json.JSONDecodeError, OSError, ValueError):
+
+    supabase = get_supabase()
+    response = supabase.rpc("consume_oauth_pkce", {"p_session_id": sid}).execute()
+    rows = response.data or []
+    if not rows:
+        log.warning("pkce_not_found", pkce_session_id=str(sid)[:8] + "…")
         return None
+
+    row = rows[0]
+    return {
+        "code_verifier": row.get("code_verifier"),
+        "code_challenge": row.get("code_challenge") or "",
+    }
 
 
 def _clear_pending_pkce() -> None:
-    try:
-        if _PKCE_PENDING_FILE.exists():
-            _PKCE_PENDING_FILE.unlink()
-    except OSError:
-        pass
+    """Remove pending PKCE row if still present."""
+    sid = st.session_state.get("pkce_session_id") or _query_param("pkce_sid")
+    if not sid:
+        return
+    supabase = get_supabase()
+    supabase.rpc("consume_oauth_pkce", {"p_session_id": sid}).execute()
+    st.session_state.pop("pkce_session_id", None)
 
 
 def _query_param(name: str) -> str | None:
@@ -152,7 +177,14 @@ def _query_param(name: str) -> str | None:
 
 def _clear_oauth_query_params() -> None:
     """Remove OAuth callback params so the user can retry cleanly."""
-    for key in ("code", "state", "error", "error_description", "pkce_verifier"):
+    for key in (
+        "code",
+        "state",
+        "error",
+        "error_description",
+        "pkce_verifier",
+        "pkce_sid",
+    ):
         if key in st.query_params:
             del st.query_params[key]
 
@@ -184,7 +216,7 @@ def _extract_verifier_from_auth_client(supabase: Client) -> str | None:
 
 def _read_pkce_verifier(supabase: Client | None = None) -> str | None:
     """
-    Read PKCE verifier — disk file first (survives redirect), then session/SDK.
+    Read PKCE verifier — Supabase first (survives redirect), then session/SDK.
     """
     pending = _load_pending_pkce()
     if pending and pending.get("code_verifier"):
@@ -271,7 +303,8 @@ def process_auth_callback() -> bool:
             _persist_session(response.session)
             _clear_oauth_query_params()
             st.rerun()
-        except Exception as exc:
+        except (APIError, ValueError, TypeError) as exc:
+            report_error(log, "oauth_exchange_failed", exc)
             st.error(f"Sign-in failed: {exc}")
             _clear_oauth_query_params()
             _clear_pending_pkce()
@@ -283,9 +316,9 @@ def login_with_google() -> str:
     """
     Build Google OAuth URL with PKCE.
     Let Supabase manage OAuth `state` (CSRF) — do not pass a custom state value.
-    Persist the code_verifier to disk for the post-redirect callback.
+    Persist the code_verifier in Supabase for the post-redirect callback.
     """
-    redirect_to = _get_redirect_url()
+    redirect_to = _redirect_url_with_pkce_sid()
     supabase = get_supabase()
 
     # SDK flow: Supabase generates valid state + PKCE and returns the authorize URL.
@@ -301,8 +334,8 @@ def login_with_google() -> str:
             if verifier:
                 _save_pending_pkce(verifier)
             return response.url
-    except Exception:
-        pass
+    except (APIError, ValueError, TypeError) as exc:
+        report_error(log, "oauth_sign_in_sdk_failed", exc, level="warning")
 
     # Fallback: manual authorize URL (no custom state — that causes "state is invalid").
     code_verifier, code_challenge = _generate_pkce_pair()
@@ -550,6 +583,7 @@ def render_login_page() -> bool:
                 if st.button("Refresh Google sign-in link", use_container_width=True):
                     st.session_state.pop("google_oauth_url", None)
                     st.session_state.pop("pkce_code_verifier", None)
+                    st.session_state.pop("pkce_session_id", None)
                     _clear_pending_pkce()
                     st.rerun()
                 st.caption(

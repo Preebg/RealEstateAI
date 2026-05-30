@@ -1,16 +1,20 @@
-from google import genai
 import streamlit as st
 import datetime 
 import pandas as pd 
-from engine import calculate_quantum_probability, get_initial_analysis, get_final_analysis
+from engine import calculate_quantum_risk, get_initial_analysis, get_final_analysis, safe_float
 from finance import (
     analyze_investment,
     calculate_10yr_appreciation,
     project_value_schedule,
 )
-import urllib.parse
 from authenticate import get_logged_in_user, render_auth_sidebar
-from knowledge_base import lookup_property, render_auth_page, save_knowledge_base
+from knowledge_base import (
+    compute_rent_deviation_pct,
+    is_rent_outlier,
+    lookup_property,
+    render_auth_page,
+    save_knowledge_base,
+)
 from market_pulse import render_market_pulse
 import matplotlib.pyplot as plt
 from pdf_generator import generate_property_pdf
@@ -20,18 +24,7 @@ st.set_page_config(page_title="AI Property Scout", page_icon="🏠", layout="wid
 
 if not render_auth_page():
     st.stop()
-def safe_float(value):
-    """Converts a value to float, handling strings, None, or empty values."""
-    if value is None:
-        return 0.0
-    try:
-        # Remove commas and dollar signs just in case the AI added them
-        if isinstance(value, str):
-            value = value.replace('$', '').replace(',', '').strip()
-        return float(value)
-    except (ValueError, TypeError):
-        return 0.0
-    
+
 #Helper function to clean source names for display
 
 def get_pretty_label(url):
@@ -42,7 +35,7 @@ def get_pretty_label(url):
         if brand and brand != "Google":
             return f"{brand}.{ext.suffix}"
         return "View Source"
-    except:
+    except Exception:
         return "View Source"
 
 # 1. Setup the Web Interface
@@ -129,6 +122,14 @@ if st.session_state.property_data:
     monthly_HOA=safe_float(property_info.get("hoa"))
     monthly_insurance=safe_float(property_info.get("insurance")) 
     ai_maint_percent=safe_float(property_info.get("maint_percent"))
+
+    # HITL: preserve AI baselines before save overwrites rent / maint_percent
+    if property_info.get("original_ai_rent") is None:
+        property_info["original_ai_rent"] = monthly_rent
+    if property_info.get("original_ai_maint") is None:
+        property_info["original_ai_maint"] = ai_maint_percent
+    original_ai_rent = safe_float(property_info["original_ai_rent"])
+    original_ai_maint = safe_float(property_info["original_ai_maint"])
     
     # New Predicted Value Fields
     predicted_value = safe_float(property_info.get("predicted_value"))
@@ -230,25 +231,45 @@ if st.session_state.property_data:
     branding_label = property_info.get("property_label", "Balanced")
 
     with st.spinner("⚛️ Running Quantum Simulation..."):
-        quantum_score = calculate_quantum_probability(
-            monthly_net_cash_flow, 
-            forecast_rate, 
-            location_score
+        quantum_risk = calculate_quantum_risk(
+            monthly_net_cash_flow,
+            forecast_rate,
+            location_score,
         )
-        # Save to the main dictionary for Supabase later
-        property_info["quantum_risk_score"] = quantum_score
+        property_info["quantum_risk_score"] = quantum_risk["overall_success_pct"]
+        property_info["quantum_risk"] = quantum_risk
 
     # 4. Display Results
     st.divider()
-    header_col1, header_col2 = st.columns([2, 1])
+    header_col1, header_col2, header_col3 = st.columns([2, 1, 1])
     with header_col1:
         st.subheader("📊 Analysis Overview")
 
     with header_col2:
         st.metric(
-            label="⚛️ Quantum Success Prob.", 
-            value=f"{quantum_score:.1f}%",
-            help="Calculated via Qiskit Ry-Gate rotations modeling non-linear market volatility."
+            label="⚛️ Cash Flow Success",
+            value=f"{quantum_risk['cashflow_success_pct']:.1f}%",
+            help="Quantum probability of positive monthly cash-flow returns.",
+        )
+    with header_col3:
+        st.metric(
+            label="📈 Appreciation Success",
+            value=f"{quantum_risk['appreciation_success_pct']:.1f}%",
+            help="Quantum probability of appreciation-driven wealth growth.",
+        )
+
+    qcol1, qcol2 = st.columns(2)
+    with qcol1:
+        st.metric(
+            label="💰 Combined Wealth Success",
+            value=f"{quantum_risk['combined_wealth_success_pct']:.1f}%",
+            help="Chance of making money from both cash flow and appreciation together.",
+        )
+    with qcol2:
+        st.metric(
+            label="⚛️ Overall Quantum Success",
+            value=f"{quantum_risk['overall_success_pct']:.1f}%",
+            help="Full QAOA alignment across cash flow, appreciation, and location.",
         )
 
     tab1 = st.tabs(["📋 Detailed Metrics"])[0]
@@ -343,7 +364,15 @@ if st.session_state.property_data:
 
         # The PDF Button
         st.write("---")
-        pdf_bytes = generate_property_pdf(address, property_info, pdf_metrics, table_data, investment_params, location_score)
+        pdf_bytes = generate_property_pdf(
+            address,
+            property_info,
+            pdf_metrics,
+            table_data,
+            investment_params,
+            location_score,
+            quantum_risk=quantum_risk,
+        )
 
         st.download_button(
             label="📩 Download Full PDF Report",
@@ -365,29 +394,49 @@ if st.session_state.property_data:
         st.divider()
         st.subheader("Improve the Algorithm")
         st.info("This property is new to the database. Save your adjustments to help the AI learn.")
-        
+
+        rent_deviation = compute_rent_deviation_pct(original_ai_rent, final_monthly_rent)
+        hitl_is_outlier = is_rent_outlier(original_ai_rent, final_monthly_rent)
+        if hitl_is_outlier:
+            st.warning(
+                f"Your rent (${final_monthly_rent:,.0f}) differs from the AI suggestion "
+                f"(${original_ai_rent:,.0f}) by **{rent_deviation:.0f}%**. "
+                "Please add a brief **Override Note** below so we can learn from expert judgment."
+            )
+        override_notes = st.text_area(
+            "Override Note (required for large rent changes)",
+            value=property_info.get("override_notes") or "",
+            placeholder="e.g. Section 8 contract, major renovation, or comp mismatch in AI research.",
+            disabled=not hitl_is_outlier,
+            help="Required when your rent override is more than 50% away from the AI estimate.",
+        )
+
         if st.button("✅ Confirm & Save to Knowledge Base"):
-            # Update the dictionary with your manual slider overrides
+            if hitl_is_outlier and not str(override_notes).strip():
+                st.error("An override note is required when rent differs by more than 50% from the AI.")
+                st.stop()
+
             property_info["rent"] = final_monthly_rent
             property_info["maint_percent"] = final_maint_percent
-            property_info["address"] = address  
-            property_info["from_kb"] = True     # Mark it as saved
-            
+            property_info["original_ai_rent"] = original_ai_rent
+            property_info["original_ai_maint"] = original_ai_maint
+            property_info["is_outlier"] = hitl_is_outlier
+            property_info["override_notes"] = str(override_notes).strip()
+            property_info["address"] = address
+            property_info["from_kb"] = True
+
             property_info["location_score"] = location_score
             property_info["appreciation_forecast"] = appreciation_forecast
             property_info["property_category"] = branding_label
-            
-            # Save to JSON
-            print(f"DEBUG: Saving address: {address}")
+
             user = get_logged_in_user()
             if user:
                 save_knowledge_base(property_info, user_id=user["id"])
             else:
                 st.error("You must be signed in to save to the knowledge base.")
                 st.stop()
-            st.cache_data.clear()  # Clear cache to ensure fresh data is pulled next time
-            
-            # Use success message and rerun to hide this section immediately
+            st.cache_data.clear()
+
             st.success(f"Saved {address} to the knowledge base!")
             st.rerun()
     else:

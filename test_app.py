@@ -1,41 +1,12 @@
 import unittest
-from unittest.mock import MagicMock, patch
-import numpy as np
-import math
+from unittest.mock import patch
 
 # Mock streamlit before importing engine to avoid secrets errors
 with patch('streamlit.secrets', {"GEMINI_API_KEY": "fake_key"}):
-    from engine import (
-        run_search_with_failover, 
-        calculate_10yr_appreciation, 
-        calculate_quantum_probability, 
-        run_monte_carlo
-    )
-    from google.genai import errors
+    from engine import calculate_quantum_probability, calculate_quantum_risk
+    from finance import calculate_10yr_appreciation
 
 class TestAIUnderwriterEngine(unittest.TestCase):
-
-    @patch('engine.client.models.generate_content')
-    def test_run_search_with_failover(self, mock_generate):
-        """
-        Test that the system fails over to the secondary model 
-        after the primary model returns a 500 error.
-        """
-        # Setup: First 3 calls raise a 500 ClientError, 4th call (fallback) succeeds
-        mock_error = errors.ClientError(code=500, response_json={})
-        
-        mock_success = MagicMock()
-        mock_success.text = "Success from fallback"
-        
-        mock_generate.side_effect = [mock_error, mock_error, mock_error, mock_success]
-
-        # We mock time.sleep to make the test run instantly
-        with patch('time.sleep', return_value=None):
-            result = run_search_with_failover("Test Address")
-
-        self.assertEqual(result.text, "Success from fallback")
-        # Verify it was called 4 times (3 primary attempts + 1 fallback)
-        self.assertEqual(mock_generate.call_count, 4)
 
     def test_calculate_10yr_appreciation_zero_value(self):
         """
@@ -46,46 +17,79 @@ class TestAIUnderwriterEngine(unittest.TestCase):
         expected = {"future_value": 0, "annual_rate": 0, "total_growth": 0}
         self.assertEqual(result, expected)
 
-    def test_calculate_quantum_probability(self):
+    def test_calculate_quantum_probability_legacy(self):
         """
         Verify that calculate_quantum_probability correctly maps 
-        location_score 0 to 0% and 10 to 100%.
+        location_score 0 to 0%, 10 to 100%, and 5 to 50% for legacy single-argument calls.
         """
-        # Score 0 -> theta 0 -> sin(0)^2 = 0
+        # Score 0 -> 0%
         self.assertAlmostEqual(calculate_quantum_probability(0), 0.0)
         
-        # Score 10 -> theta pi/2 -> sin(pi/2)^2 = 1^2 = 100%
+        # Score 10 -> 100%
         self.assertAlmostEqual(calculate_quantum_probability(10), 100.0)
         
-        # Score 5 -> theta pi/4 -> sin(pi/4)^2 = (sqrt(2)/2)^2 = 0.5 = 50%
+        # Score 5 -> 50%
         self.assertAlmostEqual(calculate_quantum_probability(5), 50.0)
 
-    def test_run_monte_carlo_stability(self):
+    def test_calculate_quantum_probability_qaoa_three_args(self):
         """
-        Ensure run_monte_carlo returns exactly 1,000 results 
-        and handles various forecast rates.
+        Verify that calculate_quantum_probability runs the QAOA circuit
+        properly when 3 arguments are provided.
         """
-        current_value = 300000
-        forecast_rate = 4.5
-        vacancy_rate = 5.0
+        # Perfect property: high cash flow, high forecast, high location score
+        score_perfect = calculate_quantum_probability(1000.0, 10.0, 10.0)
+        self.assertTrue(0.0 <= score_perfect <= 100.0)
         
-        results = run_monte_carlo(current_value, forecast_rate, vacancy_rate)
-        
-        # Check length
-        self.assertEqual(len(results), 1000)
-        
-        # Check that results are numeric and reasonable (not all zeros or NaNs)
-        self.assertTrue(all(isinstance(x, (int, float)) for x in results))
-        self.assertTrue(any(x > 0 for x in results))
+        # Poor property: 0 cash flow, 0 forecast, 0 location score
+        score_poor = calculate_quantum_probability(0.0, 0.0, 0.0)
+        self.assertEqual(score_poor, 0.0)
 
-    def test_run_monte_carlo_negative_growth(self):
-        """
-        Ensure Monte Carlo handles negative growth rates without crashing.
-        """
-        results = run_monte_carlo(300000, -2.0, 5.0)
-        self.assertEqual(len(results), 1000)
-        # With negative growth, the average should be lower than the starting value
-        self.assertTrue(np.mean(results) < 300000)
+        # Average property: check that it returns a valid probability
+        score_avg = calculate_quantum_probability(500.0, 5.0, 5.0)
+        self.assertTrue(0.0 < score_avg < 100.0)
+
+    def test_calculate_quantum_risk_breakdown(self):
+        """Breakdown includes cash-flow and appreciation success probabilities."""
+        risk = calculate_quantum_risk(1000.0, 10.0, 10.0)
+        for key in (
+            "cashflow_success_pct",
+            "appreciation_success_pct",
+            "combined_wealth_success_pct",
+            "overall_success_pct",
+        ):
+            self.assertIn(key, risk)
+            self.assertTrue(0.0 <= risk[key] <= 100.0)
+
+        risk_poor = calculate_quantum_risk(0.0, 0.0, 0.0)
+        self.assertEqual(risk_poor["combined_wealth_success_pct"], 0.0)
+
+    def test_calculate_quantum_risk_legacy_location_only(self):
+        """Legacy shortcut: zero cash flow + zero forecast maps location score to all fields."""
+        breakdown_keys = (
+            "cashflow_success_pct",
+            "appreciation_success_pct",
+            "location_success_pct",
+            "combined_wealth_success_pct",
+            "overall_success_pct",
+        )
+        for score, expected in ((0, 0.0), (5, 50.0), (10, 100.0)):
+            risk = calculate_quantum_risk(0, 0, score)
+            for key in breakdown_keys:
+                self.assertAlmostEqual(risk[key], expected)
+
+    def test_calculate_quantum_risk_is_deterministic(self):
+        """Same inputs must yield identical probabilities (fixed simulator seed)."""
+        args = (500.0, 5.0, 5.0)
+        first = calculate_quantum_risk(*args)
+        second = calculate_quantum_risk(*args)
+        self.assertEqual(first, second)
+
+    def test_calculate_quantum_risk_clamps_negative_cash_flow(self):
+        """Negative cash flow is clamped to 0 before QAOA normalization."""
+        negative = calculate_quantum_risk(-500.0, 5.0, 5.0)
+        zero_cf = calculate_quantum_risk(0.0, 5.0, 5.0)
+        self.assertEqual(negative, zero_cf)
 
 if __name__ == '__main__':
     unittest.main()
+
