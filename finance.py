@@ -3,9 +3,32 @@ from typing import TypedDict
 # Values above this threshold are treated as annual premiums and converted to monthly.
 MONTHLY_INSURANCE_ANNUAL_THRESHOLD = 400.0
 
-# Property tax rates are stored as percent (e.g. 3.4 = 3.4%).
-TAX_RATE_PERCENT_MIN = 0.3
-TAX_RATE_PERCENT_MAX = 12.0
+# Vacancy / management fees are stored as percent (e.g. 6 = 6%, minimum ~1%).
+PERCENT_FEE_MIN = 1.0
+PERCENT_FEE_MAX = 20.0
+
+
+def normalize_percent_rate(
+    value: float,
+    *,
+    min_pct: float = PERCENT_FEE_MIN,
+    max_pct: float = PERCENT_FEE_MAX,
+) -> float:
+    """
+    Convert decimal rates to percent form.
+
+    LLMs sometimes return 0.06 when they mean 6%. Real vacancy and management
+    rates are at least ~1%; values between 0 and 1 that scale into range are
+    multiplied by 100.
+    """
+    if value <= 0:
+        return value
+    if value >= 1.0:
+        return round(value, 4)
+    scaled = value * 100.0
+    if min_pct <= scaled <= max_pct:
+        return round(scaled, 4)
+    return round(value, 4)
 
 
 def normalize_monthly_insurance(value: float) -> float:
@@ -22,14 +45,7 @@ def normalize_tax_rate_percent(value: float) -> float:
     LLMs sometimes return 0.034 when they mean 3.4%. Values between 0 and 1
     that scale to a plausible property tax rate are multiplied by 100.
     """
-    if value <= 0:
-        return value
-    if value >= 1.0:
-        return round(value, 4)
-    scaled = value * 100.0
-    if TAX_RATE_PERCENT_MIN <= scaled <= TAX_RATE_PERCENT_MAX:
-        return round(scaled, 4)
-    return round(value, 4)
+    return normalize_percent_rate(value, min_pct=0.3, max_pct=12.0)
 
 
 class AppreciationForecast(TypedDict):

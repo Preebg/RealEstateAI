@@ -9,7 +9,11 @@ from postgrest.exceptions import APIError
 
 from app_logging import configure_logging, report_error
 from authenticate import get_db_client, get_logged_in_user
-from finance import normalize_monthly_insurance, normalize_tax_rate_percent
+from finance import (
+    normalize_monthly_insurance,
+    normalize_percent_rate,
+    normalize_tax_rate_percent,
+)
 
 log = configure_logging("knowledge_base")
 
@@ -203,6 +207,12 @@ def _normalize_record_numerics(record: dict[str, Any]) -> dict[str, Any]:
             )
         except (TypeError, ValueError):
             pass
+    for fee_key in ("ai_vacancy_rate", "ai_management_fee"):
+        if normalized.get(fee_key) is not None:
+            try:
+                normalized[fee_key] = normalize_percent_rate(float(normalized[fee_key]))
+            except (TypeError, ValueError):
+                pass
     return normalized
 
 
@@ -282,6 +292,9 @@ def save_knowledge_base(
         payload["insurance"] = normalize_monthly_insurance(float(payload["insurance"]))
     if payload.get("tax_rate") is not None:
         payload["tax_rate"] = normalize_tax_rate_percent(float(payload["tax_rate"]))
+    for fee_key in ("ai_vacancy_rate", "ai_management_fee"):
+        if payload.get(fee_key) is not None:
+            payload[fee_key] = normalize_percent_rate(float(payload[fee_key]))
 
     payload.setdefault("is_outlier", False)
     payload.setdefault("from_kb", False)

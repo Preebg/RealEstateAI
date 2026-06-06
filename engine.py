@@ -16,7 +16,12 @@ from qiskit_aer import AerSimulator
 from scipy.optimize import minimize
 
 from app_logging import get_logger, report_error
-from finance import calculate_10yr_appreciation, normalize_monthly_insurance, normalize_tax_rate_percent
+from finance import (
+    calculate_10yr_appreciation,
+    normalize_monthly_insurance,
+    normalize_percent_rate,
+    normalize_tax_rate_percent,
+)
 from knowledge_base import get_kb_context, lookup_property
 
 _log = get_logger("engine")
@@ -548,6 +553,8 @@ def _sanitize_synthesis_numerics(data: dict[str, Any]) -> None:
             parsed = normalize_monthly_insurance(parsed)
         elif key == "tax_rate":
             parsed = normalize_tax_rate_percent(parsed)
+        elif key in ("vacancy_rate", "management_fee"):
+            parsed = normalize_percent_rate(parsed)
         data[key] = int(parsed) if key in _INTEGER_SYNTHESIS_KEYS else parsed
 
 
@@ -733,8 +740,8 @@ Return ONLY JSON with these keys:
   "predicted_value": number,
   "prediction_reasoning": "1-2 sentences",
   "location_score": number,
-  "vacancy_rate": number,
-  "management_fee": number,
+  "vacancy_rate": number, (vacancy reserve as PERCENT of rent — e.g. 6 for 6%, NOT 0.06; typical range 3-10, never below 1),
+  "management_fee": number, (management fee as PERCENT of rent — e.g. 10 for 10%, NOT 0.10; typical range 8-12, never below 1),
   "property_label": "strategy label",
   "square_footage": number,
   "property_condition": "string",
@@ -780,12 +787,21 @@ No currency symbols or commas outside JSON."""
 
 def enrich_with_forecast(property_data: dict[str, Any]) -> dict[str, Any]:
     """Attach appreciation forecast and AI fee defaults."""
-    property_data["ai_vacancy_rate"] = safe_float(
-        property_data.get("vacancy_rate", 5.0)
-    )
-    property_data["ai_management_fee"] = safe_float(
-        property_data.get("management_fee", 10.0)
-    )
+    if property_data.get("vacancy_rate") is not None:
+        vacancy = normalize_percent_rate(safe_float(property_data["vacancy_rate"]))
+    else:
+        vacancy = normalize_percent_rate(
+            safe_float(property_data.get("ai_vacancy_rate", 5.0))
+        )
+    if property_data.get("management_fee") is not None:
+        mgmt = normalize_percent_rate(safe_float(property_data["management_fee"]))
+    else:
+        mgmt = normalize_percent_rate(
+            safe_float(property_data.get("ai_management_fee", 10.0))
+        )
+
+    property_data["ai_vacancy_rate"] = vacancy
+    property_data["ai_management_fee"] = mgmt
 
     forecast = calculate_10yr_appreciation(
         safe_float(property_data.get("predicted_value")),
@@ -862,8 +878,8 @@ def analyzer_agent(
         "predicted_value": number, If the property listed price is much below the comps, use the comps to predict a more accurate value. If the property is listed at or above comps, provide a predicted value based on the listing price and justify it with the research data. Do not simply repeat the listing price as the predicted value if it is not supported by the comps and market data.
         "prediction_reasoning": "1-2 sentence explanation based on the comps found. You MUST cite specific data points and property names from the research data to justify the valuation.",
         "location_score": number, (0-10 based on transit/schools),
-        "vacancy_rate": number,
-        "management_fee": number,
+        "vacancy_rate": number, (vacancy reserve as PERCENT of rent — e.g. 6 for 6%, NOT 0.06; typical 3-10, minimum 1),
+        "management_fee": number, (management fee as PERCENT of rent — e.g. 10 for 10%, NOT 0.10; typical 8-12, minimum 1),
         "property_label": "A dynamic label describing the property (e.g., 'Cash-flower' - if cashflow above 8%, 'Appreciation Machine' if greater than 4%, 'Value-Add Play' if description says TLC or somethng like that, 'High-Risk Speculation' if cashflow below 4% and appreciation is below 2%) based on the financial metrics",
         "sources": ["list of URLs used"]
     }}

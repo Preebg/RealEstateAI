@@ -374,6 +374,47 @@ class TestTaxRateNormalization(unittest.TestCase):
         self.assertAlmostEqual(data["tax_rate"], 3.4)
 
 
+class TestFeePercentNormalization(unittest.TestCase):
+    def test_converts_decimal_vacancy_and_mgmt_to_percent(self):
+        from finance import normalize_percent_rate
+
+        self.assertAlmostEqual(normalize_percent_rate(0.06), 6.0)
+        self.assertAlmostEqual(normalize_percent_rate(0.10), 10.0)
+        self.assertAlmostEqual(normalize_percent_rate(6.0), 6.0)
+        self.assertAlmostEqual(normalize_percent_rate(10.0), 10.0)
+
+    def test_sanitize_synthesis_fee_rates(self):
+        from engine import _sanitize_synthesis_numerics
+
+        data = {"vacancy_rate": 0.06, "management_fee": 0.10}
+        _sanitize_synthesis_numerics(data)
+        self.assertAlmostEqual(data["vacancy_rate"], 6.0)
+        self.assertAlmostEqual(data["management_fee"], 10.0)
+
+    def test_enrich_preserves_stored_ai_fee_rates(self):
+        from engine import enrich_with_forecast
+
+        result = enrich_with_forecast(
+            {"ai_vacancy_rate": 0.06, "ai_management_fee": 0.10, "predicted_value": 200000}
+        )
+        self.assertAlmostEqual(result["ai_vacancy_rate"], 6.0)
+        self.assertAlmostEqual(result["ai_management_fee"], 10.0)
+
+    def test_enrich_prefers_synthesis_fee_rates_when_present(self):
+        from engine import enrich_with_forecast
+
+        result = enrich_with_forecast(
+            {
+                "vacancy_rate": 0.05,
+                "management_fee": 0.08,
+                "ai_vacancy_rate": 99.0,
+                "predicted_value": 200000,
+            }
+        )
+        self.assertAlmostEqual(result["ai_vacancy_rate"], 5.0)
+        self.assertAlmostEqual(result["ai_management_fee"], 8.0)
+
+
 class TestHarvestAiBaselines(unittest.TestCase):
     def test_save_harvest_moves_rent_to_original_ai_columns(self):
         from unittest.mock import MagicMock, patch
