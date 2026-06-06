@@ -1,7 +1,8 @@
 venv/
 .venv/
 .streamlit/secrets.toml
-.cursor/mcp.json
+.cursor/
+.agents/
 __pycache__/
 property_kb.json
 .streamlit/cache/
