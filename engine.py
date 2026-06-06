@@ -4,6 +4,7 @@ import contextvars
 import json
 import os
 import random
+import re
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -222,12 +223,27 @@ def generate_with_retry(
                 contents=contents,
                 config=config,
             )
+            text = _extract_response_text(response)
+            if not text.strip() and attempt < max_retries - 1:
+                delay_sec = retry_delay_seconds(attempt)
+                total_wait_sec += delay_sec
+                _log_retry(
+                    model=model,
+                    attempt=attempt,
+                    max_retries=max_retries,
+                    error=RuntimeError("empty response text"),
+                    delay_sec=delay_sec,
+                    total_wait_sec=total_wait_sec,
+                    retriable=True,
+                )
+                time.sleep(delay_sec)
+                continue
             if attempt > 0:
                 print(
                     f"[gemini-retry] model={model} succeeded "
                     f"after {attempt + 1} attempt(s), total_wait_sec={total_wait_sec:.2f}"
                 )
-            return response.text or ""
+            return text
         except (errors.ClientError, errors.ServerError, errors.APIError) as e:
             last_error = e
             will_retry = _is_retriable(e) and attempt < max_retries - 1
@@ -262,17 +278,213 @@ def generate_with_retry(
     ) from last_error
 
 
+def _extract_response_text(response: Any) -> str:
+    """Read model text safely; grounded responses sometimes omit response.text."""
+    try:
+        text = response.text
+        if text:
+            return text
+    except (AttributeError, ValueError):
+        pass
+
+    chunks: list[str] = []
+    for candidate in getattr(response, "candidates", None) or []:
+        content = getattr(candidate, "content", None)
+        for part in getattr(content, "parts", None) or []:
+            part_text = getattr(part, "text", "")
+            if part_text:
+                chunks.append(part_text)
+    return "".join(chunks)
+
+
+def _json_candidates(text: str) -> list[str]:
+    """Build ordered JSON parse candidates from free-form LLM output."""
+    stripped = text.strip()
+    if not stripped:
+        return []
+
+    candidates: list[str] = []
+    seen: set[str] = set()
+
+    def _add(candidate: str) -> None:
+        candidate = candidate.strip()
+        if candidate and candidate not in seen:
+            seen.add(candidate)
+            candidates.append(candidate)
+
+    _add(stripped)
+    if "```json" in stripped:
+        _add(stripped.split("```json", 1)[1].split("```", 1)[0])
+    elif "```" in stripped:
+        _add(stripped.split("```", 1)[1].split("```", 1)[0])
+
+    for match in sorted(re.findall(r"\[[\s\S]*\]", stripped), key=len, reverse=True):
+        _add(match)
+    for match in sorted(re.findall(r"\{[\s\S]*\}", stripped), key=len, reverse=True):
+        _add(match)
+
+    return candidates
+
+
 def _extract_json(text: str) -> dict[str, Any] | list[Any] | None:
     """Helper to extract JSON from LLM responses."""
-    try:
-        text = text.strip()
-        if "```json" in text:
-            text = text.split("```json")[1].split("```")[0].strip()
-        elif "```" in text:
-            text = text.split("```")[1].split("```")[0].strip()
-        return json.loads(text)
-    except (json.JSONDecodeError, IndexError, AttributeError):
+    for candidate in _json_candidates(text):
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+    return None
+
+
+def _coerce_discovery_list(parsed: Any) -> list[Any]:
+    """Accept bare arrays or common wrapper objects from discovery models."""
+    if isinstance(parsed, list):
+        return parsed
+    if isinstance(parsed, dict):
+        for key in ("listings", "properties", "results", "homes", "data"):
+            value = parsed.get(key)
+            if isinstance(value, list):
+                return value
+        if parsed.get("address"):
+            return [parsed]
+    return []
+
+
+def _infer_discovery_city(address: str, city: str) -> str:
+    """Normalize Rochester/Syracuse from explicit city or address text."""
+    normalized = city.strip()
+    if normalized.lower() in ("rochester", "syracuse"):
+        return normalized.title()
+    address_lower = address.lower()
+    if "rochester" in address_lower:
+        return "Rochester"
+    if "syracuse" in address_lower:
+        return "Syracuse"
+    return ""
+
+
+def _normalize_discovery_item(item: Any) -> dict[str, Any] | None:
+    """Map alternate discovery field names into the harvester listing shape."""
+    if not isinstance(item, dict):
         return None
+
+    address = str(
+        item.get("address")
+        or item.get("street_address")
+        or item.get("full_address")
+        or item.get("location")
+        or ""
+    ).strip()
+    if not address:
+        return None
+
+    city = _infer_discovery_city(
+        address,
+        str(item.get("city") or item.get("market") or item.get("market_city") or ""),
+    )
+    if not city:
+        return None
+
+    list_price = safe_float(
+        item.get("list_price", item.get("price", item.get("asking_price", 0)))
+    )
+    return {"address": address, "city": city, "list_price": list_price}
+
+
+def _parse_discovery_fallback(text: str) -> list[dict[str, Any]]:
+    """Parse plain-text address lines when JSON discovery fails."""
+    results: list[dict[str, Any]] = []
+    for line in text.splitlines():
+        line = line.strip().lstrip("-•*0123456789.) ")
+        if len(line) < 10 or "," not in line:
+            continue
+        city = _infer_discovery_city(line, "")
+        if city:
+            results.append({"address": line, "city": city, "list_price": 0.0})
+    return results
+
+
+def _dedupe_discovery_listings(
+    listings: list[dict[str, Any]],
+    *,
+    max_price: float,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    seen: set[str] = set()
+    unique: list[dict[str, Any]] = []
+    for item in listings:
+        key = item["address"].lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        if item["list_price"] <= max_price or item["list_price"] == 0:
+            unique.append(item)
+    return unique[:limit]
+
+
+def _build_listings_from_raw(raw: str, max_price: float) -> list[dict[str, Any]]:
+    """Parse and normalize discovery model output into listing dicts."""
+    parsed = _extract_json(raw)
+    listings: list[dict[str, Any]] = []
+    for item in _coerce_discovery_list(parsed):
+        normalized = _normalize_discovery_item(item)
+        if normalized:
+            listings.append(normalized)
+
+    if not listings:
+        listings = _parse_discovery_fallback(raw)
+
+    return _dedupe_discovery_listings(listings, max_price=max_price)
+
+
+def _discovery_prompt(max_price: float, *, split_market: str | None = None) -> str:
+    """Build a grounded-search discovery prompt."""
+    if split_market:
+        city, location, count = next(
+            (name, loc, target)
+            for name, loc, target in HOT_MARKETS
+            if name == split_market
+        )
+        scope = f"{count} residential properties CURRENTLY FOR SALE in {location}"
+    else:
+        markets_desc = ", ".join(
+            f"{count} in {location}" for _, location, count in HOT_MARKETS
+        )
+        scope = f"residential properties CURRENTLY FOR SALE: {markets_desc}"
+
+    return f"""You are a real estate discovery agent for Upstate NY hot markets.
+
+Use Google Search to find {scope}.
+Each listing price must be strictly under ${max_price:,.0f}.
+
+Return ONLY a JSON array (no markdown, no commentary). Example:
+[
+  {{"address": "123 Main St, Rochester, NY 14607", "city": "Rochester", "list_price": 189000}},
+  {{"address": "456 Oak Ave, Syracuse, NY 13202", "city": "Syracuse", "list_price": 175000}}
+]
+
+Rules:
+- Search Zillow, Redfin, Realtor.com, or MLS listing pages for active for-sale homes.
+- Return as many valid listings as you can find, up to 20 total.
+- Use real street addresses with city and state.
+- list_price must be the active asking price as a plain number (no $ or commas).
+- city must be exactly "Rochester" or "Syracuse"."""
+
+
+def _run_discovery_attempt(
+    *,
+    model: str,
+    max_price: float,
+    split_market: str | None = None,
+) -> tuple[list[dict[str, Any]], str]:
+    prompt = _discovery_prompt(max_price, split_market=split_market)
+    raw = generate_with_retry(
+        model,
+        prompt,
+        use_search=_model_supports_grounding(model),
+    )
+    listings = _build_listings_from_raw(raw, max_price)
+    return listings, raw
 
 
 def safe_float(value: Any, default: float = 0.0) -> float:
@@ -325,93 +537,80 @@ def discover_hot_market_listings(
     model: str | None = None,
 ) -> list[dict[str, Any]]:
     """
-    Stage 1 (Discovery): ONE Search Grounding call for Rochester + Syracuse.
+    Stage 1 (Discovery): Search Grounding for Rochester + Syracuse.
     Returns up to 20 listings (< max_price).
     """
-    markets_desc = ", ".join(
-        f"{count} in {location}" for _, location, count in HOT_MARKETS
-    )
-    prompt = f"""You are a real estate discovery agent for Upstate NY hot markets.
+    primary_model = model or DISCOVERY_MODEL
+    models_to_try = [primary_model]
+    if primary_model == DISCOVERY_MODEL and DISCOVERY_FALLBACK_MODEL not in models_to_try:
+        models_to_try.append(DISCOVERY_FALLBACK_MODEL)
 
-Find residential properties CURRENTLY FOR SALE:
-- {markets_desc}
-- Each listing price must be strictly under ${max_price:,.0f}
+    last_raw = ""
+    for active_model in models_to_try:
+        listings, last_raw = _run_discovery_attempt(
+            model=active_model,
+            max_price=max_price,
+        )
+        if listings:
+            _log.info(
+                "discovery_success",
+                model=active_model,
+                strategy="combined",
+                count=len(listings),
+            )
+            return listings
 
-Return ONLY a JSON array (no markdown) with exactly 20 objects when possible:
-[
-  {{
-    "address": "full street address with city and state",
-    "city": "Rochester" or "Syracuse",
-    "list_price": number
-  }}
-]
+        _log.warning(
+            "discovery_empty_combined",
+            model=active_model,
+            raw_preview=last_raw[:400],
+        )
+        print(
+            f"[discovery] Combined search returned 0 listings on {active_model}; "
+            "retrying per market..."
+        )
 
-Rules:
-- Use live listing data from Zillow, Redfin, Realtor.com, or MLS.
-- No duplicates. Real addresses only.
-- list_price is the active asking price in USD (no symbols)."""
+        split_listings: list[dict[str, Any]] = []
+        for market_name, _, _ in HOT_MARKETS:
+            market_listings, market_raw = _run_discovery_attempt(
+                model=active_model,
+                max_price=max_price,
+                split_market=market_name,
+            )
+            last_raw = market_raw or last_raw
+            split_listings.extend(market_listings)
 
-    active_model = model or DISCOVERY_MODEL
-    raw = generate_with_retry(
-        active_model,
-        prompt,
-        use_search=_model_supports_grounding(active_model),
-    )
-    parsed = _extract_json(raw)
+        split_listings = _dedupe_discovery_listings(split_listings, max_price=max_price)
+        if split_listings:
+            _log.info(
+                "discovery_success",
+                model=active_model,
+                strategy="split_market",
+                count=len(split_listings),
+            )
+            return split_listings
 
-    listings: list[dict[str, Any]] = []
-    if isinstance(parsed, list):
-        for item in parsed:
-            if not isinstance(item, dict):
-                continue
-            addr = str(item.get("address", "")).strip()
-            if not addr:
-                continue
-            city = str(item.get("city", "")).strip()
-            if city not in ("Rochester", "Syracuse"):
-                if "rochester" in addr.lower():
-                    city = "Rochester"
-                elif "syracuse" in addr.lower():
-                    city = "Syracuse"
-                else:
-                    continue
-            listings.append(
-                {
-                    "address": addr,
-                    "city": city,
-                    "list_price": safe_float(item.get("list_price")),
-                }
+        _log.warning(
+            "discovery_empty_all_strategies",
+            model=active_model,
+            raw_preview=last_raw[:400],
+        )
+        if active_model != models_to_try[-1]:
+            print(
+                f"[discovery] No listings from {active_model}; "
+                f"trying fallback model {models_to_try[-1]}..."
             )
 
-    if not listings:
-        listings = _parse_discovery_fallback(raw)
-
-    seen: set[str] = set()
-    unique: list[dict[str, Any]] = []
-    for item in listings:
-        key = item["address"].lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        if item["list_price"] <= max_price or item["list_price"] == 0:
-            unique.append(item)
-
-    return unique[:20]
-
-
-def _parse_discovery_fallback(text: str) -> list[dict[str, Any]]:
-    """Parse plain-text address lines when JSON discovery fails."""
-    results: list[dict[str, Any]] = []
-    for line in text.splitlines():
-        line = line.strip().lstrip("-•*0123456789.) ")
-        if len(line) < 10 or "," not in line:
-            continue
-        city = "Rochester" if "rochester" in line.lower() else (
-            "Syracuse" if "syracuse" in line.lower() else ""
+    if last_raw.strip():
+        print("[discovery] Last model response preview:")
+        print(last_raw[:500])
+    else:
+        print(
+            "[discovery] Models returned empty text after search grounding. "
+            "This is a known intermittent Gemini issue; rerun the harvester."
         )
-        if city:
-            results.append({"address": line, "city": city, "list_price": 0.0})
-    return results
+
+    return []
 
 
 def research_property(address: str) -> dict[str, Any]:

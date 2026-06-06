@@ -319,6 +319,11 @@ def run_harvester_pipeline(admin_user_id: str) -> dict[str, Any]:
 
     if not listings:
         print("No listings discovered. Exiting.")
+        print(
+            "Tip: 503/empty grounded responses are usually transient. "
+            "Pull latest code and rerun; discovery now retries per market "
+            "and falls back to the Gemma discovery model automatically."
+        )
         return report
 
     for idx, listing in enumerate(listings):

@@ -296,5 +296,50 @@ class TestHarvestSkipLogic(unittest.TestCase):
         )
 
 
+class TestDiscoveryParsing(unittest.TestCase):
+    def test_extract_wrapped_listings_object(self):
+        from engine import _build_listings_from_raw
+
+        raw = json.dumps(
+            {
+                "listings": [
+                    {
+                        "address": "10 Park Ave, Rochester, NY",
+                        "city": "Rochester",
+                        "price": 210000,
+                    }
+                ]
+            }
+        )
+        listings = _build_listings_from_raw(raw, 250_000)
+        self.assertEqual(len(listings), 1)
+        self.assertEqual(listings[0]["city"], "Rochester")
+        self.assertEqual(listings[0]["list_price"], 210000.0)
+
+    def test_discover_uses_split_market_when_combined_empty(self):
+        calls = {"count": 0}
+
+        def fake_generate(model, prompt, **kwargs):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                return "No parseable listings in this response."
+            return json.dumps(
+                [
+                    {
+                        "address": "15 Maple Dr, Rochester, NY 14609",
+                        "city": "Rochester",
+                        "list_price": 199000,
+                    }
+                ]
+            )
+
+        with patch("engine.generate_with_retry", side_effect=fake_generate):
+            listings = discover_hot_market_listings(model=DISCOVERY_MODEL)
+
+        self.assertEqual(len(listings), 1)
+        self.assertEqual(listings[0]["city"], "Rochester")
+        self.assertGreater(calls["count"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()
