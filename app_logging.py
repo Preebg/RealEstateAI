@@ -34,25 +34,25 @@ class _StdlibLogger:
         self._logger = logging.getLogger(name)
 
     def _emit(self, level: int, event: str, **context: Any) -> None:
+        exc_info = context.pop("exc_info", None)
+        clean_context = {}
+        for k, v in context.items():
+            if isinstance(v, Exception):
+                clean_context[k] = str(v)
+            else:
+                clean_context[k] = v
+
         payload = {
             "event": event,
             "level": logging.getLevelName(level),
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            **context,
+            **clean_context,
         }
-        if "exc_info" in context and context["exc_info"] is not None:
-            self._logger.log(level, json.dumps(payload), exc_info=context["exc_info"])
+        
+        if exc_info is not None:
+            self._logger.log(level, json.dumps(payload), exc_info=exc_info)
         else:
             self._logger.log(level, json.dumps(payload))
-
-    def info(self, event: str, **context: Any) -> None:
-        self._emit(logging.INFO, event, **context)
-
-    def warning(self, event: str, **context: Any) -> None:
-        self._emit(logging.WARNING, event, **context)
-
-    def error(self, event: str, **context: Any) -> None:
-        self._emit(logging.ERROR, event, **context)
 
 
 def _init_sentry() -> None:
