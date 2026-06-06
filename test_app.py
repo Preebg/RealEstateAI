@@ -341,6 +341,100 @@ class TestDiscoveryParsing(unittest.TestCase):
         self.assertGreater(calls["count"], 1)
 
 
+class TestInsuranceNormalization(unittest.TestCase):
+    def test_converts_likely_annual_premium_to_monthly(self):
+        from finance import normalize_monthly_insurance
+
+        self.assertAlmostEqual(normalize_monthly_insurance(960.0), 80.0)
+        self.assertAlmostEqual(normalize_monthly_insurance(400.0), 400.0)
+        self.assertAlmostEqual(normalize_monthly_insurance(120.0), 120.0)
+
+    def test_sanitize_synthesis_insurance(self):
+        from engine import _sanitize_synthesis_numerics
+
+        data = {"insurance": 840}
+        _sanitize_synthesis_numerics(data)
+        self.assertAlmostEqual(data["insurance"], 70.0)
+
+
+class TestTaxRateNormalization(unittest.TestCase):
+    def test_converts_decimal_tax_rate_to_percent(self):
+        from finance import normalize_tax_rate_percent
+
+        self.assertAlmostEqual(normalize_tax_rate_percent(0.034), 3.4)
+        self.assertAlmostEqual(normalize_tax_rate_percent(0.025), 2.5)
+        self.assertAlmostEqual(normalize_tax_rate_percent(3.4), 3.4)
+        self.assertAlmostEqual(normalize_tax_rate_percent(0.5), 0.5)
+
+    def test_sanitize_synthesis_tax_rate(self):
+        from engine import _sanitize_synthesis_numerics
+
+        data = {"tax_rate": 0.034}
+        _sanitize_synthesis_numerics(data)
+        self.assertAlmostEqual(data["tax_rate"], 3.4)
+
+
+class TestHarvestAiBaselines(unittest.TestCase):
+    def test_save_harvest_moves_rent_to_original_ai_columns(self):
+        from unittest.mock import MagicMock, patch
+
+        from knowledge_base import save_harvest_property
+
+        mock_client = MagicMock()
+        mock_table = MagicMock()
+        mock_client.table.return_value = mock_table
+        mock_table.upsert.return_value.execute.return_value = MagicMock(data=[{}])
+
+        with patch("knowledge_base.get_client", return_value=mock_client):
+            save_harvest_property(
+                {
+                    "address": "1 Test St, Rochester, NY",
+                    "rent": 1500,
+                    "maint_percent": 3.5,
+                    "price": 200000,
+                },
+                user_id="7f35bc1e-9de5-484d-8f73-27fd3da733eb",
+            )
+
+        payload = mock_table.upsert.call_args.args[0]
+        self.assertEqual(payload["original_ai_rent"], 1500.0)
+        self.assertEqual(payload["original_ai_maint"], 3.5)
+        self.assertNotIn("rent", payload)
+        self.assertNotIn("maint_percent", payload)
+
+    def test_display_rent_prefers_ai_baseline(self):
+        from knowledge_base import get_effective_display_rent, get_official_rent
+
+        record = {
+            "original_ai_rent": 1400,
+            "rent": 2100,
+        }
+        self.assertEqual(get_effective_display_rent(record), 1400.0)
+        self.assertEqual(get_official_rent(record), 2100.0)
+
+
+class TestScannedAddressDetection(unittest.TestCase):
+    def test_normalize_address_key(self):
+        from knowledge_base import normalize_address_key
+
+        self.assertEqual(
+            normalize_address_key("  123 Main St,  Rochester, NY "),
+            "123 main st, rochester, ny",
+        )
+
+    def test_is_property_already_scanned(self):
+        from unittest.mock import patch
+
+        from knowledge_base import is_property_already_scanned
+
+        with patch(
+            "knowledge_base._fetch_properties",
+            return_value=[{"address": "10 Park Ave, Rochester, NY"}],
+        ):
+            self.assertTrue(is_property_already_scanned("10 Park Ave, Rochester, NY"))
+            self.assertFalse(is_property_already_scanned("99 New Rd, Syracuse, NY"))
+
+
 class TestUuidValidation(unittest.TestCase):
     def test_rejects_typo_uuid_with_letter_l(self):
         from knowledge_base import is_valid_uuid

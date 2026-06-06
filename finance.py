@@ -1,5 +1,36 @@
 from typing import TypedDict
 
+# Values above this threshold are treated as annual premiums and converted to monthly.
+MONTHLY_INSURANCE_ANNUAL_THRESHOLD = 400.0
+
+# Property tax rates are stored as percent (e.g. 3.4 = 3.4%).
+TAX_RATE_PERCENT_MIN = 0.3
+TAX_RATE_PERCENT_MAX = 12.0
+
+
+def normalize_monthly_insurance(value: float) -> float:
+    """Convert likely annual insurance premiums to a monthly amount."""
+    if value > MONTHLY_INSURANCE_ANNUAL_THRESHOLD:
+        return round(value / 12.0, 2)
+    return value
+
+
+def normalize_tax_rate_percent(value: float) -> float:
+    """
+    Convert decimal tax rates to percent form.
+
+    LLMs sometimes return 0.034 when they mean 3.4%. Values between 0 and 1
+    that scale to a plausible property tax rate are multiplied by 100.
+    """
+    if value <= 0:
+        return value
+    if value >= 1.0:
+        return round(value, 4)
+    scaled = value * 100.0
+    if TAX_RATE_PERCENT_MIN <= scaled <= TAX_RATE_PERCENT_MAX:
+        return round(scaled, 4)
+    return round(value, 4)
+
 
 class AppreciationForecast(TypedDict):
     future_value: float

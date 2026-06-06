@@ -12,7 +12,14 @@ from google.genai import errors
 import engine
 from app_logging import configure_logging, report_error
 from finance import analyze_investment
-from knowledge_base import get_admin_uid, get_market_pulse, save_harvest_property
+from knowledge_base import (
+    get_admin_uid,
+    get_market_pulse,
+    get_scanned_addresses,
+    is_property_already_scanned,
+    normalize_address_key,
+    save_harvest_property,
+)
 
 log = configure_logging("harvester")
 
@@ -229,6 +236,12 @@ def _process_listing(
     if market_city not in ("Rochester", "Syracuse"):
         raise ValueError(f"Listing has unsupported market city: {market_city!r}")
 
+    if is_property_already_scanned(address, user_id=admin_user_id):
+        print("  SKIP - Already scanned (in knowledge base)")
+        report["already_scanned"].append({"address": address, "reason": "Already in KB"})
+        log.info("listing_already_scanned", address=address)
+        return
+
     log.info("listing_start", address=address, market_city=market_city)
     print("  STAGE 2 - Research (gemma)")
     research = execute_with_backoff(engine.research_property, address)
@@ -303,11 +316,16 @@ def run_harvester_pipeline(admin_user_id: str) -> dict[str, Any]:
         "researched": 0,
         "synthesized": 0,
         "skipped": [],
+        "already_scanned": [],
         "failed": [],
         "saved": [],
         "rochester": [],
         "syracuse": [],
     }
+
+    scanned_addresses = sorted(get_scanned_addresses(admin_user_id))
+    if scanned_addresses:
+        print(f"Skipping {len(scanned_addresses)} addresses already in the knowledge base.")
 
     print("=" * 60)
     print("STAGE 1 - Discovery (single Search Grounding call)")
@@ -316,7 +334,15 @@ def run_harvester_pipeline(admin_user_id: str) -> dict[str, Any]:
         engine.discover_hot_market_listings,
         stage="discovery",
         fallback_model=engine.DISCOVERY_FALLBACK_MODEL,
+        exclude_addresses=scanned_addresses,
     )
+    if scanned_addresses:
+        scanned_keys = {normalize_address_key(addr) for addr in scanned_addresses}
+        listings = [
+            listing
+            for listing in listings
+            if normalize_address_key(str(listing.get("address", ""))) not in scanned_keys
+        ]
     report["discovered"] = len(listings)
     print(f"Found {len(listings)} listings under ${engine.MAX_DISCOVERY_PRICE:,}")
 
@@ -350,6 +376,7 @@ def run_harvester_pipeline(admin_user_id: str) -> dict[str, Any]:
         f"Researched: {report['researched']} | "
         f"Synthesized: {report['synthesized']} | "
         f"Skipped: {len(report['skipped'])} | "
+        f"Already scanned: {len(report['already_scanned'])} | "
         f"Failed: {len(report['failed'])}"
     )
     log.info(
@@ -358,6 +385,7 @@ def run_harvester_pipeline(admin_user_id: str) -> dict[str, Any]:
         researched=report["researched"],
         synthesized=report["synthesized"],
         skipped=len(report["skipped"]),
+        already_scanned=len(report["already_scanned"]),
         failed=len(report["failed"]),
         saved=len(report["saved"]),
     )
@@ -434,6 +462,9 @@ def _render_streamlit_app() -> None:
         if report["skipped"]:
             with st.expander(f"Skipped ({len(report['skipped'])})"):
                 st.dataframe(report["skipped"], use_container_width=True)
+        if report["already_scanned"]:
+            with st.expander(f"Already scanned ({len(report['already_scanned'])})"):
+                st.dataframe(report["already_scanned"], use_container_width=True)
         if report["failed"]:
             with st.expander(f"Failed ({len(report['failed'])})"):
                 st.dataframe(report["failed"], use_container_width=True)

@@ -9,6 +9,7 @@ from postgrest.exceptions import APIError
 
 from app_logging import configure_logging, report_error
 from authenticate import get_db_client, get_logged_in_user
+from finance import normalize_monthly_insurance, normalize_tax_rate_percent
 
 log = configure_logging("knowledge_base")
 
@@ -108,13 +109,101 @@ def lookup_property(address: str, user_id: str | None = None) -> dict[str, Any] 
     data = get_kb_raw_data(user_id)
     hit = data.get(normalized)
     if hit:
-        record = dict(hit)
+        record = _normalize_record_numerics(hit)
         record["from_kb"] = True
         return record
     return None
 
 
 RENT_OUTLIER_DEVIATION_PCT = 50.0
+
+
+def normalize_address_key(address: str) -> str:
+    """Canonical address key for duplicate detection."""
+    return " ".join(str(address or "").strip().lower().split())
+
+
+def get_scanned_addresses(user_id: str | None = None) -> set[str]:
+    """Return normalized addresses already stored in the knowledge base."""
+    return {
+        normalize_address_key(row["address"])
+        for row in _fetch_properties(user_id)
+        if row.get("address")
+    }
+
+
+def is_property_already_scanned(address: str, user_id: str | None = None) -> bool:
+    """True when this address already exists in the KB for the scoped user."""
+    if not address or not str(address).strip():
+        return False
+    return normalize_address_key(address) in get_scanned_addresses(user_id)
+
+
+def get_ai_baseline_rent(record: dict[str, Any]) -> float:
+    """AI-suggested monthly rent (falls back to saved rent for legacy rows)."""
+    if record.get("original_ai_rent") is not None:
+        try:
+            return float(record["original_ai_rent"])
+        except (TypeError, ValueError):
+            pass
+    try:
+        return float(record.get("rent") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def get_ai_baseline_maint(record: dict[str, Any]) -> float:
+    """AI-suggested maintenance % (falls back to saved maint for legacy rows)."""
+    if record.get("original_ai_maint") is not None:
+        try:
+            return float(record["original_ai_maint"])
+        except (TypeError, ValueError):
+            pass
+    try:
+        return float(record.get("maint_percent") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def get_official_rent(record: dict[str, Any]) -> float | None:
+    """User-confirmed rent when it differs from the AI baseline."""
+    if record.get("rent") is None:
+        return None
+    official = float(record["rent"])
+    ai = get_ai_baseline_rent(record)
+    if abs(official - ai) < 0.01:
+        return None
+    return official
+
+
+def get_effective_display_rent(record: dict[str, Any]) -> float:
+    """Rent shown in the UI: AI baseline on pull, unless no baseline exists."""
+    return get_ai_baseline_rent(record)
+
+
+def get_effective_display_maint(record: dict[str, Any]) -> float:
+    """Maintenance % shown in the UI from the AI baseline."""
+    return get_ai_baseline_maint(record)
+
+
+def _normalize_record_numerics(record: dict[str, Any]) -> dict[str, Any]:
+    """Apply read-time normalization for legacy or malformed stored values."""
+    normalized = dict(record)
+    if normalized.get("insurance") is not None:
+        try:
+            normalized["insurance"] = normalize_monthly_insurance(
+                float(normalized["insurance"])
+            )
+        except (TypeError, ValueError):
+            pass
+    if normalized.get("tax_rate") is not None:
+        try:
+            normalized["tax_rate"] = normalize_tax_rate_percent(
+                float(normalized["tax_rate"])
+            )
+        except (TypeError, ValueError):
+            pass
+    return normalized
 
 
 def compute_rent_deviation_pct(ai_rent: float, user_rent: float) -> float:
@@ -183,8 +272,16 @@ def save_knowledge_base(
             "ai_vacancy_rate",
             "ai_management_fee",
             "monthly_net_cash_flow",
+            "insurance",
+            "hoa",
+            "maint_percent",
         ],
     )
+
+    if payload.get("insurance") is not None:
+        payload["insurance"] = normalize_monthly_insurance(float(payload["insurance"]))
+    if payload.get("tax_rate") is not None:
+        payload["tax_rate"] = normalize_tax_rate_percent(float(payload["tax_rate"]))
 
     payload.setdefault("is_outlier", False)
     payload.setdefault("from_kb", False)
@@ -261,7 +358,8 @@ def save_harvest_property(
 ) -> Any:
     """
     Persist a harvested property (Stage 3 output + quantum score).
-    Pass user_id=get_admin_uid() from the harvester for explicit admin attribution.
+    AI rent/maint go to original_ai_* columns; official rent/maint are left
+    unset until a user confirms overrides in the underwriter.
     """
     uid = _resolve_user_id(user_id) or get_admin_uid()
     if not uid:
@@ -271,22 +369,38 @@ def save_harvest_property(
     payload = property_data.copy()
     payload.setdefault("from_kb", True)
     payload.setdefault("property_category", payload.get("property_label", ""))
+
+    ai_rent = payload.pop("rent", None)
+    ai_maint = payload.pop("maint_percent", None)
+    if ai_rent is not None:
+        payload["original_ai_rent"] = ai_rent
+    if ai_maint is not None:
+        payload["original_ai_maint"] = ai_maint
+
     return save_knowledge_base(payload, user_id=uid, show_errors=False)
 
 
 def get_kb_context(user_id: str | None = None) -> str:
-    """Pull recent examples for the LLM (scoped to current user)."""
-    rows = _fetch_properties(user_id)[:3]
+    """Pull recent examples and scanned addresses for the LLM (scoped to user)."""
+    rows = _fetch_properties(user_id)
     if not rows:
         return ""
 
     context = "\n--- RECENT ANALYSES ---\n"
-    for item in rows:
+    for item in rows[:3]:
         market = item.get("market_city") or "Unknown"
         context += (
             f"Address: {item['address']} | Market: {market} | "
             f"Predicted: {item.get('predicted_value')}\n"
         )
+
+    scanned = [str(item["address"]) for item in rows if item.get("address")]
+    if scanned:
+        context += "\n--- ALREADY SCANNED (skip rediscovery / re-underwriting) ---\n"
+        for addr in scanned[:50]:
+            context += f"- {addr}\n"
+        if len(scanned) > 50:
+            context += f"- ... and {len(scanned) - 50} more\n"
     return context
 
 
@@ -328,7 +442,10 @@ def get_market_pulse(user_id: str | None = None) -> dict[str, dict[str, Any]]:
             continue
         prices = [float(r.get("price") or 0) for r in records]
         quantums = [float(r.get("quantum_risk_score") or 0) for r in records]
-        rents = [float(r.get("rent") or 0) for r in records]
+        rents = [
+            float(get_official_rent(r) or get_ai_baseline_rent(r))
+            for r in records
+        ]
         labels = [
             str(r.get("property_label") or "") for r in records if r.get("property_label")
         ]
@@ -398,6 +515,14 @@ __all__ = [
     "compute_rent_deviation_pct",
     "is_rent_outlier",
     "is_valid_uuid",
+    "normalize_address_key",
+    "get_scanned_addresses",
+    "is_property_already_scanned",
+    "get_ai_baseline_rent",
+    "get_ai_baseline_maint",
+    "get_official_rent",
+    "get_effective_display_rent",
+    "get_effective_display_maint",
     "get_client",
     "get_admin_uid",
     "get_kb_raw_data",

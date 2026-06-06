@@ -16,7 +16,7 @@ from qiskit_aer import AerSimulator
 from scipy.optimize import minimize
 
 from app_logging import get_logger, report_error
-from finance import calculate_10yr_appreciation
+from finance import calculate_10yr_appreciation, normalize_monthly_insurance, normalize_tax_rate_percent
 from knowledge_base import get_kb_context, lookup_property
 
 _log = get_logger("engine")
@@ -437,7 +437,12 @@ def _build_listings_from_raw(raw: str, max_price: float) -> list[dict[str, Any]]
     return _dedupe_discovery_listings(listings, max_price=max_price)
 
 
-def _discovery_prompt(max_price: float, *, split_market: str | None = None) -> str:
+def _discovery_prompt(
+    max_price: float,
+    *,
+    split_market: str | None = None,
+    exclude_addresses: list[str] | None = None,
+) -> str:
     """Build a grounded-search discovery prompt."""
     if split_market:
         city, location, count = next(
@@ -451,6 +456,17 @@ def _discovery_prompt(max_price: float, *, split_market: str | None = None) -> s
             f"{count} in {location}" for _, location, count in HOT_MARKETS
         )
         scope = f"residential properties CURRENTLY FOR SALE: {markets_desc}"
+
+    exclude_block = ""
+    if exclude_addresses:
+        sample = exclude_addresses[:40]
+        exclude_block = (
+            "\n- Do NOT return any property whose address matches (or is substantially "
+            "the same as) an address we have already analyzed:\n"
+            + "\n".join(f"  - {addr}" for addr in sample)
+        )
+        if len(exclude_addresses) > len(sample):
+            exclude_block += f"\n  - ... and {len(exclude_addresses) - len(sample)} more"
 
     return f"""You are a real estate discovery agent for Upstate NY hot markets.
 
@@ -468,7 +484,7 @@ Rules:
 - Return as many valid listings as you can find, up to 20 total.
 - Use real street addresses with city and state.
 - list_price must be the active asking price as a plain number (no $ or commas).
-- city must be exactly "Rochester" or "Syracuse"."""
+- city must be exactly "Rochester" or "Syracuse".{exclude_block}"""
 
 
 def _run_discovery_attempt(
@@ -476,8 +492,13 @@ def _run_discovery_attempt(
     model: str,
     max_price: float,
     split_market: str | None = None,
+    exclude_addresses: list[str] | None = None,
 ) -> tuple[list[dict[str, Any]], str]:
-    prompt = _discovery_prompt(max_price, split_market=split_market)
+    prompt = _discovery_prompt(
+        max_price,
+        split_market=split_market,
+        exclude_addresses=exclude_addresses,
+    )
     raw = generate_with_retry(
         model,
         prompt,
@@ -523,6 +544,10 @@ def _sanitize_synthesis_numerics(data: dict[str, Any]) -> None:
         if key not in data:
             continue
         parsed = safe_float(data[key])
+        if key == "insurance":
+            parsed = normalize_monthly_insurance(parsed)
+        elif key == "tax_rate":
+            parsed = normalize_tax_rate_percent(parsed)
         data[key] = int(parsed) if key in _INTEGER_SYNTHESIS_KEYS else parsed
 
 
@@ -535,6 +560,7 @@ def discover_hot_market_listings(
     max_price: float = MAX_DISCOVERY_PRICE,
     *,
     model: str | None = None,
+    exclude_addresses: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """
     Stage 1 (Discovery): Search Grounding for Rochester + Syracuse.
@@ -550,6 +576,7 @@ def discover_hot_market_listings(
         listings, last_raw = _run_discovery_attempt(
             model=active_model,
             max_price=max_price,
+            exclude_addresses=exclude_addresses,
         )
         if listings:
             _log.info(
@@ -576,6 +603,7 @@ def discover_hot_market_listings(
                 model=active_model,
                 max_price=max_price,
                 split_market=market_name,
+                exclude_addresses=exclude_addresses,
             )
             last_raw = market_raw or last_raw
             split_listings.extend(market_listings)
@@ -697,9 +725,9 @@ Return ONLY JSON with these keys:
   "price": number,
   "year": number,
   "rent": number,
-  "tax_rate": number,
+  "tax_rate": number, (effective annual tax rate as PERCENT — e.g. 3.4 for 3.4%, NOT 0.034; use annual_taxes / price * 100),
   "hoa": number,
-  "insurance": number,
+  "insurance": number, (MONTHLY cost — if research implies an annual premium above $400, divide by 12),
   "summary": "3-4 sentence investment summary",
   "maint_percent": number,
   "predicted_value": number,
@@ -826,7 +854,7 @@ def analyzer_agent(
         "price": number,
         "year": number,
         "rent": number,
-        "tax_rate": number, (Annual Tax / Price * 100)
+        "tax_rate": number, (Annual Tax / Price * 100 as a PERCENT value — e.g. 3.4 for 3.4%, NOT 0.034),
         "hoa": number,
         "insurance": number, (Monthly cost - if research provides annual, divide by 12 (it's likely annual amount if the value is above $400))),
         "summary": "3-4 sentence summary of condition, features, and any 'TLC' or 'Updated' notes",
@@ -869,6 +897,7 @@ def get_initial_analysis(address: str) -> tuple[dict[str, Any], bool, str | None
             research_results,
         )
 
+    _sanitize_synthesis_numerics(extracted)
     return extracted, False, research_results
 
 

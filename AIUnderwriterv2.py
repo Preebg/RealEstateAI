@@ -10,6 +10,10 @@ from finance import (
 from authenticate import get_logged_in_user, render_auth_sidebar
 from knowledge_base import (
     compute_rent_deviation_pct,
+    get_ai_baseline_maint,
+    get_ai_baseline_rent,
+    get_effective_display_maint,
+    get_effective_display_rent,
     is_rent_outlier,
     lookup_property,
     render_auth_page,
@@ -117,19 +121,19 @@ if st.session_state.property_data:
     # Extract values from the dictionary 
     price=safe_float(property_info.get("price"))
     year_built=safe_float(property_info.get("year"))
-    monthly_rent=safe_float(property_info.get("rent"))
+    monthly_rent=get_effective_display_rent(property_info)
     tax_rate=safe_float(property_info.get("tax_rate"))
     monthly_HOA=safe_float(property_info.get("hoa"))
-    monthly_insurance=safe_float(property_info.get("insurance")) 
-    ai_maint_percent=safe_float(property_info.get("maint_percent"))
+    monthly_insurance=safe_float(property_info.get("insurance"))
+    ai_maint_percent=get_effective_display_maint(property_info)
 
-    # HITL: preserve AI baselines before save overwrites rent / maint_percent
+    # HITL: preserve AI baselines; official rent/maint are written on user save.
     if property_info.get("original_ai_rent") is None:
         property_info["original_ai_rent"] = monthly_rent
     if property_info.get("original_ai_maint") is None:
         property_info["original_ai_maint"] = ai_maint_percent
-    original_ai_rent = safe_float(property_info["original_ai_rent"])
-    original_ai_maint = safe_float(property_info["original_ai_maint"])
+    original_ai_rent = get_ai_baseline_rent(property_info)
+    original_ai_maint = get_ai_baseline_maint(property_info)
     
     # New Predicted Value Fields
     predicted_value = safe_float(property_info.get("predicted_value"))
