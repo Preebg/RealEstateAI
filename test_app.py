@@ -1,3 +1,4 @@
+import json
 import math
 import unittest
 from unittest.mock import patch
@@ -7,7 +8,17 @@ from scipy.optimize import minimize as scipy_minimize
 # Mock streamlit before importing engine to avoid secrets errors
 with patch("streamlit.secrets", {"GEMINI_API_KEY": "fake_key"}):
     from engine import calculate_quantum_probability, calculate_quantum_risk
+    from engine import (
+        DISCOVERY_FALLBACK_MODEL,
+        DISCOVERY_MODEL,
+        RESEARCH_MODEL,
+        discover_hot_market_listings,
+        is_daily_quota_exhausted,
+        research_property,
+        should_skip_synthesis,
+    )
     from finance import calculate_10yr_appreciation
+    from google.genai import errors
 
 from qiskit_aer import AerSimulator
 
@@ -222,6 +233,67 @@ class TestAIUnderwriterEngine(unittest.TestCase):
         negative = calculate_quantum_risk(-500.0, 5.0, 5.0)
         zero_cf = calculate_quantum_risk(0.0, 5.0, 5.0)
         self.assertEqual(negative, zero_cf)
+
+
+class TestDailyQuotaDetection(unittest.TestCase):
+    def test_detects_explicit_daily_quota_message(self):
+        err = errors.ClientError(
+            429,
+            {
+                "error": {
+                    "message": "Quota exceeded for metric generate_requests_per_model_per_day",
+                    "status": "RESOURCE_EXHAUSTED",
+                }
+            },
+        )
+        self.assertTrue(is_daily_quota_exhausted(err))
+
+    def test_detects_runtime_error_after_retry_exhaustion(self):
+        cause = errors.ClientError(
+            429,
+            {"error": {"message": "Resource has been exhausted", "status": "RESOURCE_EXHAUSTED"}},
+        )
+        wrapped = RuntimeError("Max retries (5) exceeded for model=gemini-2.5-flash")
+        wrapped.__cause__ = cause
+        self.assertTrue(is_daily_quota_exhausted(wrapped))
+
+    def test_ignores_non_quota_client_errors(self):
+        err = errors.ClientError(400, {"error": {"message": "Invalid request"}})
+        self.assertFalse(is_daily_quota_exhausted(err))
+
+
+class TestSearchGrounding(unittest.TestCase):
+    def test_discovery_uses_search_for_gemini_and_gemma_fallback(self):
+        with patch("engine.generate_with_retry", return_value="[]") as mock_gen:
+            discover_hot_market_listings(model=DISCOVERY_MODEL)
+            self.assertTrue(mock_gen.call_args.kwargs["use_search"])
+
+            mock_gen.reset_mock()
+            discover_hot_market_listings(model=DISCOVERY_FALLBACK_MODEL)
+            self.assertTrue(mock_gen.call_args.kwargs["use_search"])
+
+    def test_research_uses_search_grounding(self):
+        payload = json.dumps(
+            {
+                "address": "1 Main St, Rochester, NY",
+                "price": 150000,
+                "taxes": 3000,
+                "hoa": 0,
+                "square_footage": 1200,
+                "property_condition": "Good",
+            }
+        )
+        with patch("engine.generate_with_retry", return_value=payload) as mock_gen:
+            research_property("1 Main St, Rochester, NY")
+            self.assertTrue(mock_gen.call_args.kwargs["use_search"])
+            self.assertEqual(mock_gen.call_args.args[0], RESEARCH_MODEL)
+
+
+class TestHarvestSkipLogic(unittest.TestCase):
+    def test_skip_synthesis_on_zero_price(self):
+        self.assertTrue(
+            should_skip_synthesis({"property_condition": "Good", "price": 0})
+        )
 
 
 if __name__ == "__main__":

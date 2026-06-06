@@ -22,8 +22,10 @@ _log = get_logger("engine")
 
 # --- Model routing (harvester + underwriter) ---
 DISCOVERY_MODEL = "gemini-2.5-flash"
+DISCOVERY_FALLBACK_MODEL = "gemma-4-26b-a4b-it"
 RESEARCH_MODEL = "gemma-4-31b-it"
 SYNTHESIS_MODEL = "gemini-3.1-flash-lite-preview"
+SYNTHESIS_FALLBACK_MODEL = "gemma-4-26b-a4b-it"
 
 # Underwriter search failover (UI path)
 PRIMARY_SEARCH_MODEL = "gemma-4-31b-it"
@@ -129,6 +131,69 @@ def _is_retriable(error: Exception) -> bool:
     if isinstance(error, errors.ClientError):
         return error.code == 429
     return isinstance(error, (errors.ServerError, errors.APIError))
+
+
+_RPD_QUOTA_MARKERS = (
+    "per_day",
+    "per day",
+    "requests_per_day",
+    "generate_requests_per_model",
+    "daily quota",
+    "daily limit",
+    "rpd",
+    "quota exceeded",
+    "resource_exhausted",
+    "resource exhausted",
+    "check quota",
+    "exceeded your current quota",
+)
+
+
+def _collect_error_messages(error: BaseException) -> str:
+    """Flatten an exception chain into one lowercase string for quota heuristics."""
+    parts: list[str] = []
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        parts.append(str(current))
+        response = getattr(current, "response", None)
+        if response is not None:
+            parts.append(str(response))
+        current = current.__cause__
+    return " ".join(parts).lower()
+
+
+def _has_quota_client_error(error: BaseException) -> bool:
+    current: BaseException | None = error
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, errors.ClientError) and current.code in (403, 429):
+            return True
+        current = current.__cause__
+    return False
+
+
+def is_daily_quota_exhausted(error: BaseException) -> bool:
+    """True when a Gemini error indicates daily (RPD) quota is exhausted."""
+    if not _has_quota_client_error(error):
+        return False
+
+    message = _collect_error_messages(error)
+    if any(marker in message for marker in _RPD_QUOTA_MARKERS):
+        return True
+
+    # After engine/harvester retry backoff, a lingering 429 is usually daily quota.
+    if isinstance(error, RuntimeError) and "max retries" in message.lower():
+        return True
+
+    return False
+
+
+def _model_supports_grounding(model: str) -> bool:
+    """Google Search grounding is available on Gemini and Gemma 4 models."""
+    return model.startswith("gemini") or model.startswith("gemma-4")
 
 
 def generate_with_retry(
@@ -256,6 +321,8 @@ def _sanitize_synthesis_numerics(data: dict[str, Any]) -> None:
 
 def discover_hot_market_listings(
     max_price: float = MAX_DISCOVERY_PRICE,
+    *,
+    model: str | None = None,
 ) -> list[dict[str, Any]]:
     """
     Stage 1 (Discovery): ONE Search Grounding call for Rochester + Syracuse.
@@ -284,7 +351,12 @@ Rules:
 - No duplicates. Real addresses only.
 - list_price is the active asking price in USD (no symbols)."""
 
-    raw = generate_with_retry(DISCOVERY_MODEL, prompt, use_search=True)
+    active_model = model or DISCOVERY_MODEL
+    raw = generate_with_retry(
+        active_model,
+        prompt,
+        use_search=_model_supports_grounding(active_model),
+    )
     parsed = _extract_json(raw)
 
     listings: list[dict[str, Any]] = []
@@ -344,11 +416,12 @@ def _parse_discovery_fallback(text: str) -> list[dict[str, Any]]:
 
 def research_property(address: str) -> dict[str, Any]:
     """
-    Stage 2 (Research): Gemma extraction — no Search Grounding (1500 RPD).
+    Stage 2 (Research): Gemma extraction with Search Grounding.
     """
     prompt = f"""Research the residential property at: {address}
 
-Extract ONLY these fields from public listing data you know:
+Use live listing search results (Zillow, Redfin, Realtor.com, MLS, county records).
+Extract ONLY these fields:
 - price (current list price USD, number only)
 - taxes (total ANNUAL property tax USD)
 - hoa (monthly HOA fee USD, 0 if none)
@@ -365,7 +438,11 @@ Return ONLY JSON:
   "property_condition": "Good"
 }}"""
 
-    raw = generate_with_retry(RESEARCH_MODEL, prompt, use_search=False)
+    raw = generate_with_retry(
+        RESEARCH_MODEL,
+        prompt,
+        use_search=_model_supports_grounding(RESEARCH_MODEL),
+    )
     data = _extract_json(raw)
     if not isinstance(data, dict):
         return {
@@ -388,21 +465,24 @@ Return ONLY JSON:
 
 
 def should_skip_synthesis(research: dict[str, Any]) -> bool:
-    """Skip Stage 3 if condition is Poor or price exceeds cap."""
+    """Skip Stage 3 if condition is Poor, price is missing, or price exceeds cap."""
     condition = str(research.get("property_condition", "")).strip().lower()
     price = safe_float(research.get("price"))
-    return condition == "poor" or price > MAX_SYNTHESIS_PRICE
+    return condition == "poor" or price <= 0 or price > MAX_SYNTHESIS_PRICE
 
 
 def synthesize_harvest_property(
     address: str,
     research: dict[str, Any],
     market_city: str,
+    *,
+    model: str | None = None,
+    user_id: str | None = None,
 ) -> dict[str, Any]:
     """
     Stage 3 (Synthesis): Investment summary from research data only.
     """
-    kb_context = get_kb_context()
+    kb_context = get_kb_context(user_id)
     prompt = f"""You are an expert real estate underwriter for {market_city} hot market investments.
 
 CONTEXT FROM DATABASE:
@@ -436,7 +516,7 @@ Return ONLY JSON with these keys:
 
 No currency symbols or commas outside JSON."""
 
-    raw = generate_with_retry(SYNTHESIS_MODEL, prompt, use_search=False)
+    raw = generate_with_retry(model or SYNTHESIS_MODEL, prompt, use_search=False)
     data = _extract_json(raw)
     if not isinstance(data, dict):
         price = safe_float(research.get("price"))

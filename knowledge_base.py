@@ -160,10 +160,17 @@ def save_knowledge_base(
             "predicted_value",
             "quantum_risk_score",
             "square_footage",
+            "appreciation_forecast",
+            "forecast_rate",
+            "forecast_growth",
+            "ai_vacancy_rate",
+            "ai_management_fee",
+            "monthly_net_cash_flow",
         ],
     )
 
     payload.setdefault("is_outlier", False)
+    payload.setdefault("from_kb", False)
     if payload.get("override_notes") is None:
         payload["override_notes"] = ""
 
@@ -185,11 +192,19 @@ def save_knowledge_base(
         "prediction_reasoning",
         "location_score",
         "property_label",
+        "property_category",
+        "from_kb",
         "quantum_risk_score",
         "sources",
         "market_city",
         "square_footage",
         "property_condition",
+        "appreciation_forecast",
+        "forecast_rate",
+        "forecast_growth",
+        "ai_vacancy_rate",
+        "ai_management_fee",
+        "monthly_net_cash_flow",
         "original_ai_rent",
         "original_ai_maint",
         "is_outlier",
