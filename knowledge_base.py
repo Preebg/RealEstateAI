@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 from typing import Any
 from uuid import UUID
 
@@ -98,20 +99,23 @@ def _fetch_properties(user_id: str | None = None) -> list[dict[str, Any]]:
 
 
 def get_kb_raw_data(user_id: str | None = None) -> dict[str, dict[str, Any]]:
-    """Fetch properties for the logged-in user (plus admin rows if configured)."""
+    """Fetch properties keyed by normalized address for reliable lookup."""
     rows = _fetch_properties(user_id)
     if not rows:
         return {}
-    return {item["address"]: item for item in rows if item.get("address")}
+    return {
+        normalize_address_key(item["address"]): item
+        for item in rows
+        if item.get("address")
+    }
 
 
 def lookup_property(address: str, user_id: str | None = None) -> dict[str, Any] | None:
     """Instant Pull: return a cached property for this address if it exists."""
     if not address or not address.strip():
         return None
-    normalized = address.strip()
     data = get_kb_raw_data(user_id)
-    hit = data.get(normalized)
+    hit = data.get(normalize_address_key(address))
     if hit:
         record = _normalize_record_numerics(hit)
         record["from_kb"] = True
@@ -125,6 +129,35 @@ RENT_OUTLIER_DEVIATION_PCT = 50.0
 def normalize_address_key(address: str) -> str:
     """Canonical address key for duplicate detection."""
     return " ".join(str(address or "").strip().lower().split())
+
+
+_ZIPCODE_PATTERN = re.compile(r"\b(\d{5})(?:-\d{4})?\b")
+
+
+def parse_zipcode_from_address(address: str | None) -> str | None:
+    """
+    Extract a 5-digit US ZIP code from a property address string.
+
+    Examples:
+        "123 Main St, Rochester, NY 14607" -> "14607"
+        "456 Oak Ave, Syracuse, NY 13202-1234" -> "13202"
+    """
+    if not address or not str(address).strip():
+        return None
+    matches = _ZIPCODE_PATTERN.findall(str(address))
+    if not matches:
+        return None
+    return matches[-1]
+
+
+def _apply_zipcode_from_address(payload: dict[str, Any]) -> None:
+    """Populate zip_code on save when it can be parsed from the address."""
+    address = payload.get("address")
+    if not address:
+        return
+    zip_code = parse_zipcode_from_address(str(address))
+    if zip_code:
+        payload["zip_code"] = zip_code
 
 
 def get_scanned_addresses(user_id: str | None = None) -> set[str]:
@@ -213,6 +246,13 @@ def _normalize_record_numerics(record: dict[str, Any]) -> dict[str, Any]:
                 normalized[fee_key] = normalize_percent_rate(float(normalized[fee_key]))
             except (TypeError, ValueError):
                 pass
+    if normalized.get("maint_percent") is not None:
+        try:
+            normalized["maint_percent"] = normalize_percent_rate(
+                float(normalized["maint_percent"])
+            )
+        except (TypeError, ValueError):
+            pass
     return normalized
 
 
@@ -295,6 +335,8 @@ def save_knowledge_base(
     for fee_key in ("ai_vacancy_rate", "ai_management_fee"):
         if payload.get(fee_key) is not None:
             payload[fee_key] = normalize_percent_rate(float(payload[fee_key]))
+    if payload.get("maint_percent") is not None:
+        payload["maint_percent"] = normalize_percent_rate(float(payload["maint_percent"]))
 
     payload.setdefault("is_outlier", False)
     payload.setdefault("from_kb", False)
@@ -304,9 +346,13 @@ def save_knowledge_base(
     if "year" in payload and "year_built" not in payload:
         payload["year_built"] = payload.pop("year")
 
+    _apply_zipcode_from_address(payload)
+
     allowed_columns = [
         "address",
         "user_id",
+        "zip_code",
+        "state_code",
         "price",
         "year_built",
         "rent",
@@ -529,6 +575,7 @@ __all__ = [
     "is_rent_outlier",
     "is_valid_uuid",
     "normalize_address_key",
+    "parse_zipcode_from_address",
     "get_scanned_addresses",
     "is_property_already_scanned",
     "get_ai_baseline_rent",

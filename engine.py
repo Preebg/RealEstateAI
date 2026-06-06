@@ -413,7 +413,7 @@ def _dedupe_discovery_listings(
     listings: list[dict[str, Any]],
     *,
     max_price: float,
-    limit: int = 20,
+    limit: int = 25,
 ) -> list[dict[str, Any]]:
     seen: set[str] = set()
     unique: list[dict[str, Any]] = []
@@ -553,7 +553,7 @@ def _sanitize_synthesis_numerics(data: dict[str, Any]) -> None:
             parsed = normalize_monthly_insurance(parsed)
         elif key == "tax_rate":
             parsed = normalize_tax_rate_percent(parsed)
-        elif key in ("vacancy_rate", "management_fee"):
+        elif key in ("vacancy_rate", "management_fee", "maint_percent"):
             parsed = normalize_percent_rate(parsed)
         data[key] = int(parsed) if key in _INTEGER_SYNTHESIS_KEYS else parsed
 

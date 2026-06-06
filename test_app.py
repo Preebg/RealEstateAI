@@ -478,6 +478,73 @@ class TestScannedAddressDetection(unittest.TestCase):
             self.assertTrue(is_property_already_scanned("10 Park Ave, Rochester, NY"))
             self.assertFalse(is_property_already_scanned("99 New Rd, Syracuse, NY"))
 
+    def test_lookup_property_uses_normalized_address(self):
+        from unittest.mock import patch
+
+        from knowledge_base import lookup_property
+
+        row = {
+            "address": "123 Main St, Rochester, NY 14607",
+            "price": 200000,
+            "rent": 1500,
+        }
+        with patch("knowledge_base._fetch_properties", return_value=[row]):
+            hit = lookup_property("123 main st, rochester, ny 14607")
+        self.assertIsNotNone(hit)
+        self.assertTrue(hit.get("from_kb"))
+        self.assertEqual(hit["price"], 200000)
+
+
+class TestMaintPercentNormalization(unittest.TestCase):
+    def test_sanitize_synthesis_maint_percent(self):
+        from engine import _sanitize_synthesis_numerics
+
+        data = {"maint_percent": 0.04}
+        _sanitize_synthesis_numerics(data)
+        self.assertAlmostEqual(data["maint_percent"], 4.0)
+
+
+class TestZipcodeParsing(unittest.TestCase):
+    def test_parse_zipcode_from_standard_address(self):
+        from knowledge_base import parse_zipcode_from_address
+
+        self.assertEqual(
+            parse_zipcode_from_address("123 Main St, Rochester, NY 14607"),
+            "14607",
+        )
+        self.assertEqual(
+            parse_zipcode_from_address("456 Oak Ave, Syracuse, NY 13202-1234"),
+            "13202",
+        )
+
+    def test_parse_zipcode_returns_none_when_missing(self):
+        from knowledge_base import parse_zipcode_from_address
+
+        self.assertIsNone(parse_zipcode_from_address("123 Main St, Rochester, NY"))
+        self.assertIsNone(parse_zipcode_from_address(""))
+
+    def test_save_knowledge_base_includes_parsed_zipcode(self):
+        from unittest.mock import MagicMock, patch
+
+        from knowledge_base import save_knowledge_base
+
+        mock_client = MagicMock()
+        mock_table = MagicMock()
+        mock_client.table.return_value = mock_table
+        mock_table.upsert.return_value.execute.return_value = MagicMock(data=[{}])
+
+        with patch("knowledge_base.get_client", return_value=mock_client):
+            save_knowledge_base(
+                {
+                    "address": "10 Park Ave, Rochester, NY 14609",
+                    "price": 200000,
+                },
+                user_id="7f35bc1e-9de5-484d-8f73-27fd3da733eb",
+            )
+
+        payload = mock_table.upsert.call_args.args[0]
+        self.assertEqual(payload["zip_code"], "14609")
+
 
 class TestUuidValidation(unittest.TestCase):
     def test_rejects_typo_uuid_with_letter_l(self):
