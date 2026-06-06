@@ -264,6 +264,59 @@ class TestDailyQuotaDetection(unittest.TestCase):
         err = errors.ClientError(400, {"error": {"message": "Invalid request"}})
         self.assertFalse(is_daily_quota_exhausted(err))
 
+    def test_generate_with_retry_fails_fast_on_daily_quota(self):
+        from engine import generate_with_retry
+
+        quota_err = errors.ClientError(
+            429,
+            {
+                "error": {
+                    "message": "Quota exceeded for metric generate_requests_per_model_per_day",
+                    "status": "RESOURCE_EXHAUSTED",
+                }
+            },
+        )
+        with patch("engine.get_session") as mock_session:
+            mock_session.return_value.client.models.generate_content.side_effect = (
+                quota_err
+            )
+            with patch("engine.time.sleep") as mock_sleep:
+                with self.assertRaises(errors.ClientError):
+                    generate_with_retry(DISCOVERY_MODEL, "prompt")
+                mock_sleep.assert_not_called()
+
+    def test_discovery_switches_to_gemma_on_flash_quota(self):
+        payload = json.dumps(
+            [
+                {
+                    "address": "10 Park Ave, Rochester, NY",
+                    "city": "Rochester",
+                    "list_price": 210000,
+                }
+            ]
+        )
+        quota_err = errors.ClientError(
+            429,
+            {
+                "error": {
+                    "message": "Quota exceeded for metric generate_requests_per_model_per_day",
+                    "status": "RESOURCE_EXHAUSTED",
+                }
+            },
+        )
+        calls: list[str] = []
+
+        def fake_generate(model, contents, **kwargs):
+            calls.append(model)
+            if model == DISCOVERY_MODEL:
+                raise quota_err
+            return payload
+
+        with patch("engine.generate_with_retry", side_effect=fake_generate):
+            listings = discover_hot_market_listings()
+        self.assertEqual(len(listings), 1)
+        self.assertEqual(calls, [DISCOVERY_MODEL, DISCOVERY_FALLBACK_MODEL])
+
 
 class TestSearchGrounding(unittest.TestCase):
     def test_discovery_uses_search_for_gemini_and_gemma_fallback(self):
@@ -446,15 +499,40 @@ class TestHarvestAiBaselines(unittest.TestCase):
         self.assertNotIn("rent", payload)
         self.assertNotIn("maint_percent", payload)
 
-    def test_display_rent_prefers_ai_baseline(self):
+    def test_display_rent_prefers_user_override_when_saved(self):
         from knowledge_base import get_effective_display_rent, get_official_rent
 
         record = {
             "original_ai_rent": 1400,
             "rent": 2100,
+            "has_user_override": True,
         }
-        self.assertEqual(get_effective_display_rent(record), 1400.0)
+        self.assertEqual(get_effective_display_rent(record), 2100.0)
         self.assertEqual(get_official_rent(record), 2100.0)
+
+    def test_merge_with_user_override(self):
+        from knowledge_base import _merge_with_user_override
+
+        canonical = {
+            "id": "abc",
+            "address": "1 Test St",
+            "original_ai_rent": 1500,
+            "ai_vacancy_rate": 5.0,
+        }
+        merged = _merge_with_user_override(
+            canonical,
+            {
+                "rent": 1800,
+                "vacancy_rate": 6.0,
+                "management_fee": 9.0,
+                "is_outlier": False,
+                "override_notes": "",
+            },
+        )
+        self.assertEqual(merged["rent"], 1800)
+        self.assertEqual(merged["user_vacancy_rate"], 6.0)
+        self.assertEqual(merged["original_ai_rent"], 1500)
+        self.assertTrue(merged["has_user_override"])
 
 
 class TestScannedAddressDetection(unittest.TestCase):
@@ -472,7 +550,7 @@ class TestScannedAddressDetection(unittest.TestCase):
         from knowledge_base import is_property_already_scanned
 
         with patch(
-            "knowledge_base._fetch_properties",
+            "knowledge_base._fetch_canonical_properties",
             return_value=[{"address": "10 Park Ave, Rochester, NY"}],
         ):
             self.assertTrue(is_property_already_scanned("10 Park Ave, Rochester, NY"))
@@ -484,12 +562,14 @@ class TestScannedAddressDetection(unittest.TestCase):
         from knowledge_base import lookup_property
 
         row = {
+            "id": "7f35bc1e-9de5-484d-8f73-27fd3da733eb",
             "address": "123 Main St, Rochester, NY 14607",
             "price": 200000,
             "rent": 1500,
         }
-        with patch("knowledge_base._fetch_properties", return_value=[row]):
-            hit = lookup_property("123 main st, rochester, ny 14607")
+        with patch("knowledge_base._fetch_canonical_properties", return_value=[row]):
+            with patch("knowledge_base._fetch_user_overrides_map", return_value={}):
+                hit = lookup_property("123 main st, rochester, ny 14607")
         self.assertIsNotNone(hit)
         self.assertTrue(hit.get("from_kb"))
         self.assertEqual(hit["price"], 200000)
@@ -526,7 +606,7 @@ class TestZipcodeParsing(unittest.TestCase):
     def test_save_knowledge_base_includes_parsed_zipcode(self):
         from unittest.mock import MagicMock, patch
 
-        from knowledge_base import save_knowledge_base
+        from knowledge_base import save_canonical_property
 
         mock_client = MagicMock()
         mock_table = MagicMock()
@@ -534,7 +614,7 @@ class TestZipcodeParsing(unittest.TestCase):
         mock_table.upsert.return_value.execute.return_value = MagicMock(data=[{}])
 
         with patch("knowledge_base.get_client", return_value=mock_client):
-            save_knowledge_base(
+            save_canonical_property(
                 {
                     "address": "10 Park Ave, Rochester, NY 14609",
                     "price": 200000,
@@ -544,6 +624,7 @@ class TestZipcodeParsing(unittest.TestCase):
 
         payload = mock_table.upsert.call_args.args[0]
         self.assertEqual(payload["zip_code"], "14609")
+        self.assertNotIn("rent", payload)
 
 
 class TestUuidValidation(unittest.TestCase):
@@ -556,6 +637,47 @@ class TestUuidValidation(unittest.TestCase):
         from knowledge_base import is_valid_uuid
 
         self.assertTrue(is_valid_uuid("7f35bc1e-9de5-484d-8f73-27fd3da733eb"))
+
+
+class TestHeadlessDbClient(unittest.TestCase):
+    def test_headless_prefers_service_role_client(self):
+        import os
+        from unittest.mock import MagicMock, patch
+
+        mock_service = MagicMock()
+        env = {
+            "SUPABASE_SERVICE_ROLE_KEY": "service-role-key",
+            "SUPABASE_URL": "https://example.supabase.co",
+            "SUPABASE_KEY": "anon-key",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            with patch("authenticate._headless_mode", return_value=True):
+                with patch("authenticate.get_authenticated_client", return_value=None):
+                    with patch(
+                        "authenticate.create_client", return_value=mock_service
+                    ) as create:
+                        from authenticate import get_db_client
+
+                        client = get_db_client()
+                        self.assertIs(client, mock_service)
+                        create.assert_called_once_with(
+                            "https://example.supabase.co", "service-role-key"
+                        )
+
+    def test_streamlit_prefers_authenticated_client(self):
+        from unittest.mock import MagicMock, patch
+
+        mock_auth = MagicMock()
+        with patch("authenticate._headless_mode", return_value=False):
+            with patch(
+                "authenticate.get_authenticated_client", return_value=mock_auth
+            ):
+                with patch("authenticate.create_client") as create:
+                    from authenticate import get_db_client
+
+                    client = get_db_client()
+                    self.assertIs(client, mock_auth)
+                    create.assert_not_called()
 
 
 if __name__ == "__main__":

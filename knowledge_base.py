@@ -75,27 +75,89 @@ def _resolve_user_id(user_id: str | None) -> str | None:
     return None
 
 
-def _fetch_properties(user_id: str | None = None) -> list[dict[str, Any]]:
-    """Query properties scoped to current user + optional admin UID."""
-    uid = _resolve_user_id(user_id)
-    if not uid:
-        return []
-
+def _fetch_canonical_properties() -> list[dict[str, Any]]:
+    """Return all shared canonical property rows (one per address)."""
     supabase = get_client()
-    admin_uid = get_admin_uid()
-
-    query = supabase.table("properties").select("*")
-    if admin_uid and admin_uid != uid:
-        query = query.or_(f"user_id.eq.{uid},user_id.eq.{admin_uid}")
-    else:
-        query = query.eq("user_id", uid)
-
     try:
-        response = query.execute()
+        response = supabase.table("properties").select("*").execute()
     except APIError as exc:
-        report_error(log, "kb_fetch_failed", exc, user_id=uid)
+        report_error(log, "kb_canonical_fetch_failed", exc)
         return []
     return response.data or []
+
+
+def _fetch_user_overrides_map(user_id: str) -> dict[str, dict[str, Any]]:
+    """Map property_id -> override row for the given user."""
+    if not is_valid_uuid(user_id):
+        return {}
+    supabase = get_client()
+    try:
+        response = (
+            supabase.table("user_property_overrides")
+            .select("*")
+            .eq("user_id", user_id)
+            .execute()
+        )
+    except APIError as exc:
+        report_error(log, "kb_override_fetch_failed", exc, user_id=user_id)
+        return {}
+    rows = response.data or []
+    return {
+        str(row["property_id"]): row
+        for row in rows
+        if row.get("property_id")
+    }
+
+
+def _merge_with_user_override(
+    canonical: dict[str, Any],
+    override: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Layer per-user assumptions on top of immutable canonical AI/property facts."""
+    merged = _normalize_record_numerics(dict(canonical))
+    if not override:
+        return merged
+
+    if override.get("rent") is not None:
+        merged["rent"] = override["rent"]
+    if override.get("maint_percent") is not None:
+        merged["maint_percent"] = override["maint_percent"]
+    if override.get("vacancy_rate") is not None:
+        merged["user_vacancy_rate"] = override["vacancy_rate"]
+    if override.get("management_fee") is not None:
+        merged["user_management_fee"] = override["management_fee"]
+    merged["is_outlier"] = bool(override.get("is_outlier"))
+    merged["override_notes"] = override.get("override_notes") or ""
+    merged["has_user_override"] = True
+    merged["user_override_id"] = override.get("id")
+    return merged
+
+
+def _fetch_properties(user_id: str | None = None) -> list[dict[str, Any]]:
+    """Canonical properties merged with the current user's overrides."""
+    uid = _resolve_user_id(user_id)
+    canonical_rows = _fetch_canonical_properties()
+    if not uid:
+        return [_normalize_record_numerics(row) for row in canonical_rows]
+
+    overrides = _fetch_user_overrides_map(uid)
+    merged: list[dict[str, Any]] = []
+    for row in canonical_rows:
+        prop_id = str(row.get("id", ""))
+        merged.append(_merge_with_user_override(row, overrides.get(prop_id)))
+    return merged
+
+
+def get_property_id_by_address(address: str) -> str | None:
+    """Resolve canonical property UUID from address."""
+    if not address or not str(address).strip():
+        return None
+    key = normalize_address_key(address)
+    for row in _fetch_canonical_properties():
+        if normalize_address_key(str(row.get("address", ""))) == key:
+            pid = row.get("id")
+            return str(pid) if pid else None
+    return None
 
 
 def get_kb_raw_data(user_id: str | None = None) -> dict[str, dict[str, Any]]:
@@ -124,6 +186,47 @@ def lookup_property(address: str, user_id: str | None = None) -> dict[str, Any] 
 
 
 RENT_OUTLIER_DEVIATION_PCT = 50.0
+
+USER_OVERRIDE_COLUMNS = (
+    "rent",
+    "maint_percent",
+    "vacancy_rate",
+    "management_fee",
+    "is_outlier",
+    "override_notes",
+)
+
+CANONICAL_PROPERTY_COLUMNS = (
+    "address",
+    "user_id",
+    "zip_code",
+    "state_code",
+    "price",
+    "year_built",
+    "tax_rate",
+    "hoa",
+    "insurance",
+    "summary",
+    "predicted_value",
+    "prediction_reasoning",
+    "location_score",
+    "property_label",
+    "property_category",
+    "from_kb",
+    "quantum_risk_score",
+    "sources",
+    "market_city",
+    "square_footage",
+    "property_condition",
+    "appreciation_forecast",
+    "forecast_rate",
+    "forecast_growth",
+    "ai_vacancy_rate",
+    "ai_management_fee",
+    "monthly_net_cash_flow",
+    "original_ai_rent",
+    "original_ai_maint",
+)
 
 
 def normalize_address_key(address: str) -> str:
@@ -161,10 +264,11 @@ def _apply_zipcode_from_address(payload: dict[str, Any]) -> None:
 
 
 def get_scanned_addresses(user_id: str | None = None) -> set[str]:
-    """Return normalized addresses already stored in the knowledge base."""
+    """Return normalized addresses in the shared canonical catalog."""
+    _ = user_id  # canonical catalog is shared across users
     return {
         normalize_address_key(row["address"])
-        for row in _fetch_properties(user_id)
+        for row in _fetch_canonical_properties()
         if row.get("address")
     }
 
@@ -204,7 +308,7 @@ def get_ai_baseline_maint(record: dict[str, Any]) -> float:
 
 def get_official_rent(record: dict[str, Any]) -> float | None:
     """User-confirmed rent when it differs from the AI baseline."""
-    if record.get("rent") is None:
+    if not record.get("has_user_override") or record.get("rent") is None:
         return None
     official = float(record["rent"])
     ai = get_ai_baseline_rent(record)
@@ -214,13 +318,69 @@ def get_official_rent(record: dict[str, Any]) -> float | None:
 
 
 def get_effective_display_rent(record: dict[str, Any]) -> float:
-    """Rent shown in the UI: AI baseline on pull, unless no baseline exists."""
+    """Rent for sliders: saved user override, else AI baseline."""
+    if record.get("has_user_override") and record.get("rent") is not None:
+        try:
+            return float(record["rent"])
+        except (TypeError, ValueError):
+            pass
     return get_ai_baseline_rent(record)
 
 
 def get_effective_display_maint(record: dict[str, Any]) -> float:
-    """Maintenance % shown in the UI from the AI baseline."""
+    """Maintenance % for sliders: saved user override, else AI baseline."""
+    if record.get("has_user_override") and record.get("maint_percent") is not None:
+        try:
+            return float(record["maint_percent"])
+        except (TypeError, ValueError):
+            pass
     return get_ai_baseline_maint(record)
+
+
+def get_effective_display_vacancy(record: dict[str, Any]) -> float:
+    """Vacancy reserve % for sliders."""
+    if record.get("user_vacancy_rate") is not None:
+        try:
+            return float(record["user_vacancy_rate"])
+        except (TypeError, ValueError):
+            pass
+    try:
+        return float(record.get("ai_vacancy_rate") or 5.0)
+    except (TypeError, ValueError):
+        return 5.0
+
+
+def get_effective_display_management_fee(record: dict[str, Any]) -> float:
+    """Management fee % for sliders."""
+    if record.get("user_management_fee") is not None:
+        try:
+            return float(record["user_management_fee"])
+        except (TypeError, ValueError):
+            pass
+    try:
+        return float(record.get("ai_management_fee") or 10.0)
+    except (TypeError, ValueError):
+        return 10.0
+
+
+def user_has_override_changes(
+    record: dict[str, Any],
+    *,
+    rent: float,
+    maint_percent: float,
+    vacancy_rate: float,
+    management_fee: float,
+) -> bool:
+    """True when slider values differ from AI baselines."""
+    if abs(rent - get_ai_baseline_rent(record)) > 0.01:
+        return True
+    if abs(maint_percent - get_ai_baseline_maint(record)) > 0.01:
+        return True
+    if abs(vacancy_rate - float(record.get("ai_vacancy_rate") or 5.0)) > 0.01:
+        return True
+    if abs(management_fee - float(record.get("ai_management_fee") or 10.0)) > 0.01:
+        return True
+    return False
 
 
 def _normalize_record_numerics(record: dict[str, Any]) -> dict[str, Any]:
@@ -288,27 +448,18 @@ def _clean_numeric(payload: dict[str, Any], keys: list[str]) -> None:
             payload[key] = 0.0
 
 
-def save_knowledge_base(
-    property_data: dict[str, Any],
-    user_id: str,
-    *,
-    show_errors: bool = True,
-):
-    """Saves or updates a property in Supabase for the given user."""
-    if not user_id:
-        raise ValueError("user_id is required to save a property.")
-    if not is_valid_uuid(user_id):
-        raise ValueError(f"user_id must be a valid UUID, got: {user_id!r}")
-
-    supabase = get_client()
+def _prepare_canonical_payload(property_data: dict[str, Any], user_id: str) -> dict[str, Any]:
+    """Normalize and filter fields for the shared properties table."""
     payload = property_data.copy()
     payload["user_id"] = user_id
+
+    for key in USER_OVERRIDE_COLUMNS:
+        payload.pop(key, None)
 
     _clean_numeric(
         payload,
         [
             "price",
-            "rent",
             "original_ai_rent",
             "original_ai_maint",
             "tax_rate",
@@ -324,7 +475,6 @@ def save_knowledge_base(
             "monthly_net_cash_flow",
             "insurance",
             "hoa",
-            "maint_percent",
         ],
     )
 
@@ -335,56 +485,28 @@ def save_knowledge_base(
     for fee_key in ("ai_vacancy_rate", "ai_management_fee"):
         if payload.get(fee_key) is not None:
             payload[fee_key] = normalize_percent_rate(float(payload[fee_key]))
-    if payload.get("maint_percent") is not None:
-        payload["maint_percent"] = normalize_percent_rate(float(payload["maint_percent"]))
 
-    payload.setdefault("is_outlier", False)
     payload.setdefault("from_kb", False)
-    if payload.get("override_notes") is None:
-        payload["override_notes"] = ""
 
     if "year" in payload and "year_built" not in payload:
         payload["year_built"] = payload.pop("year")
 
     _apply_zipcode_from_address(payload)
+    return {k: v for k, v in payload.items() if k in CANONICAL_PROPERTY_COLUMNS}
 
-    allowed_columns = [
-        "address",
-        "user_id",
-        "zip_code",
-        "state_code",
-        "price",
-        "year_built",
-        "rent",
-        "tax_rate",
-        "hoa",
-        "insurance",
-        "summary",
-        "maint_percent",
-        "predicted_value",
-        "prediction_reasoning",
-        "location_score",
-        "property_label",
-        "property_category",
-        "from_kb",
-        "quantum_risk_score",
-        "sources",
-        "market_city",
-        "square_footage",
-        "property_condition",
-        "appreciation_forecast",
-        "forecast_rate",
-        "forecast_growth",
-        "ai_vacancy_rate",
-        "ai_management_fee",
-        "monthly_net_cash_flow",
-        "original_ai_rent",
-        "original_ai_maint",
-        "is_outlier",
-        "override_notes",
-    ]
 
-    filtered_payload = {k: v for k, v in payload.items() if k in allowed_columns}
+def save_canonical_property(
+    property_data: dict[str, Any],
+    user_id: str,
+    *,
+    show_errors: bool = True,
+) -> Any:
+    """Upsert shared property facts (AI baselines + harvest metadata)."""
+    if not user_id or not is_valid_uuid(user_id):
+        raise ValueError(f"user_id must be a valid UUID, got: {user_id!r}")
+
+    supabase = get_client()
+    filtered_payload = _prepare_canonical_payload(property_data, user_id)
 
     try:
         response = (
@@ -395,21 +517,132 @@ def save_knowledge_base(
     except APIError as exc:
         report_error(
             log,
-            "kb_save_failed",
+            "kb_canonical_save_failed",
             exc,
             user_id=user_id,
             address=filtered_payload.get("address"),
         )
         if show_errors and st is not None:
-            st.error(f"Failed to save to Supabase: {exc}")
+            st.error(f"Failed to save property to Supabase: {exc}")
         return None
 
     log.info(
-        "kb_save_success",
+        "kb_canonical_save_success",
         user_id=user_id,
         address=filtered_payload.get("address"),
     )
     return response
+
+
+def save_user_property_override(
+    user_id: str,
+    property_id: str,
+    override_data: dict[str, Any],
+    *,
+    show_errors: bool = True,
+) -> Any:
+    """Upsert per-user underwriting assumptions for a canonical property."""
+    if not user_id or not is_valid_uuid(user_id):
+        raise ValueError(f"user_id must be a valid UUID, got: {user_id!r}")
+    if not property_id or not is_valid_uuid(property_id):
+        raise ValueError(f"property_id must be a valid UUID, got: {property_id!r}")
+
+    payload: dict[str, Any] = {
+        "user_id": user_id,
+        "property_id": property_id,
+    }
+
+    _clean_numeric(
+        override_data,
+        ["rent", "maint_percent", "vacancy_rate", "management_fee"],
+    )
+    for key in ("rent", "maint_percent", "vacancy_rate", "management_fee"):
+        if key in override_data and override_data[key] is not None:
+            value = float(override_data[key])
+            if key in ("vacancy_rate", "management_fee"):
+                value = normalize_percent_rate(value)
+            elif key == "maint_percent":
+                value = normalize_percent_rate(value)
+            payload[key] = value
+
+    payload["is_outlier"] = bool(override_data.get("is_outlier", False))
+    payload["override_notes"] = str(override_data.get("override_notes") or "")
+
+    supabase = get_client()
+    try:
+        response = (
+            supabase.table("user_property_overrides")
+            .upsert(payload, on_conflict="user_id,property_id")
+            .execute()
+        )
+    except APIError as exc:
+        report_error(
+            log,
+            "kb_override_save_failed",
+            exc,
+            user_id=user_id,
+            property_id=property_id,
+        )
+        if show_errors and st is not None:
+            st.error(f"Failed to save your assumptions: {exc}")
+        return None
+
+    log.info(
+        "kb_override_save_success",
+        user_id=user_id,
+        property_id=property_id,
+    )
+    return response
+
+
+def save_knowledge_base(
+    property_data: dict[str, Any],
+    user_id: str,
+    *,
+    show_errors: bool = True,
+    save_override: bool = True,
+):
+    """
+    Save canonical property facts and optionally the current user's overrides.
+
+    Canonical rows are stored under the admin UID when configured so the catalog
+    is shared; user-specific slider values go to user_property_overrides.
+    """
+    if not user_id:
+        raise ValueError("user_id is required to save a property.")
+    if not is_valid_uuid(user_id):
+        raise ValueError(f"user_id must be a valid UUID, got: {user_id!r}")
+
+    canonical_uid = get_admin_uid() or user_id
+    canonical_response = save_canonical_property(
+        property_data,
+        user_id=canonical_uid,
+        show_errors=show_errors,
+    )
+    if canonical_response is None:
+        return None
+
+    if not save_override:
+        return canonical_response
+
+    address = property_data.get("address")
+    property_id = get_property_id_by_address(str(address or ""))
+    if not property_id and canonical_response.data:
+        row = canonical_response.data[0]
+        if row.get("id"):
+            property_id = str(row["id"])
+
+    if not property_id:
+        log.warning("kb_override_skipped", reason="missing_property_id", address=address)
+        return canonical_response
+
+    override_response = save_user_property_override(
+        user_id,
+        property_id,
+        property_data,
+        show_errors=show_errors,
+    )
+    return override_response or canonical_response
 
 
 def save_harvest_property(
@@ -436,7 +669,7 @@ def save_harvest_property(
     if ai_maint is not None:
         payload["original_ai_maint"] = ai_maint
 
-    return save_knowledge_base(payload, user_id=uid, show_errors=False)
+    return save_canonical_property(payload, user_id=uid, show_errors=False)
 
 
 def get_kb_context(user_id: str | None = None) -> str:
@@ -522,20 +755,37 @@ def get_market_pulse(user_id: str | None = None) -> dict[str, dict[str, Any]]:
 
 def get_telemetry_stats(user_id: str | None = None) -> dict[str, Any]:
     """
-    HITL accuracy: mean absolute error between original_ai_rent and final saved rent.
-    Rows flagged is_outlier are excluded.
+    HITL accuracy: mean absolute error between original_ai_rent and user override rent.
     """
-    rows = _fetch_properties(user_id)
+    uid = _resolve_user_id(user_id)
+    if not uid:
+        return {
+            "mae_rent": None,
+            "sample_count": 0,
+            "outlier_count": 0,
+            "skipped_no_baseline": 0,
+            "total_rows": 0,
+        }
+
+    canonical_by_id = {
+        str(row["id"]): row for row in _fetch_canonical_properties() if row.get("id")
+    }
+    overrides = _fetch_user_overrides_map(uid)
+
     errors: list[float] = []
     outlier_count = 0
     skipped_no_baseline = 0
 
-    for row in rows:
-        if row.get("is_outlier"):
+    for prop_id, override in overrides.items():
+        if override.get("is_outlier"):
             outlier_count += 1
             continue
-        ai_rent = row.get("original_ai_rent")
-        final_rent = row.get("rent")
+        canonical = canonical_by_id.get(prop_id)
+        if not canonical:
+            skipped_no_baseline += 1
+            continue
+        ai_rent = canonical.get("original_ai_rent")
+        final_rent = override.get("rent")
         if ai_rent is None or final_rent is None:
             skipped_no_baseline += 1
             continue
@@ -552,7 +802,7 @@ def get_telemetry_stats(user_id: str | None = None) -> dict[str, Any]:
         "sample_count": sample_count,
         "outlier_count": outlier_count,
         "skipped_no_baseline": skipped_no_baseline,
-        "total_rows": len(rows),
+        "total_rows": len(overrides),
     }
 
 
@@ -583,10 +833,16 @@ __all__ = [
     "get_official_rent",
     "get_effective_display_rent",
     "get_effective_display_maint",
+    "get_effective_display_vacancy",
+    "get_effective_display_management_fee",
+    "user_has_override_changes",
+    "get_property_id_by_address",
     "get_client",
     "get_admin_uid",
     "get_kb_raw_data",
     "lookup_property",
+    "save_canonical_property",
+    "save_user_property_override",
     "save_knowledge_base",
     "save_harvest_property",
     "get_kb_context",

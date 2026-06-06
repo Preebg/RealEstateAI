@@ -251,6 +251,17 @@ def generate_with_retry(
             return text
         except (errors.ClientError, errors.ServerError, errors.APIError) as e:
             last_error = e
+            if is_daily_quota_exhausted(e):
+                _log_retry(
+                    model=model,
+                    attempt=attempt,
+                    max_retries=max_retries,
+                    error=e,
+                    delay_sec=0.0,
+                    total_wait_sec=total_wait_sec,
+                    retriable=False,
+                )
+                raise
             will_retry = _is_retriable(e) and attempt < max_retries - 1
             if will_retry:
                 delay_sec = retry_delay_seconds(attempt)
@@ -562,6 +573,52 @@ def _sanitize_synthesis_numerics(data: dict[str, Any]) -> None:
 # Harvester pipeline (3 stages — single grounded discovery call)
 # ---------------------------------------------------------------------------
 
+_DISCOVERY_API_ERRORS = (
+    errors.ClientError,
+    errors.ServerError,
+    errors.APIError,
+    RuntimeError,
+)
+
+
+def _discover_listings_for_model(
+    *,
+    model: str,
+    max_price: float,
+    exclude_addresses: list[str] | None,
+) -> tuple[list[dict[str, Any]], str]:
+    """Run combined + per-market discovery attempts for one model."""
+    listings, last_raw = _run_discovery_attempt(
+        model=model,
+        max_price=max_price,
+        exclude_addresses=exclude_addresses,
+    )
+    if listings:
+        return listings, last_raw
+
+    _log.warning(
+        "discovery_empty_combined",
+        model=model,
+        raw_preview=last_raw[:400],
+    )
+    print(
+        f"[discovery] Combined search returned 0 listings on {model}; "
+        "retrying per market..."
+    )
+
+    split_listings: list[dict[str, Any]] = []
+    for market_name, _, _ in HOT_MARKETS:
+        market_listings, market_raw = _run_discovery_attempt(
+            model=model,
+            max_price=max_price,
+            split_market=market_name,
+            exclude_addresses=exclude_addresses,
+        )
+        last_raw = market_raw or last_raw
+        split_listings.extend(market_listings)
+
+    return _dedupe_discovery_listings(split_listings, max_price=max_price), last_raw
+
 
 def discover_hot_market_listings(
     max_price: float = MAX_DISCOVERY_PRICE,
@@ -580,50 +637,35 @@ def discover_hot_market_listings(
 
     last_raw = ""
     for active_model in models_to_try:
-        listings, last_raw = _run_discovery_attempt(
-            model=active_model,
-            max_price=max_price,
-            exclude_addresses=exclude_addresses,
-        )
+        try:
+            listings, last_raw = _discover_listings_for_model(
+                model=active_model,
+                max_price=max_price,
+                exclude_addresses=exclude_addresses,
+            )
+        except _DISCOVERY_API_ERRORS as exc:
+            fallback = models_to_try[-1]
+            if is_daily_quota_exhausted(exc) and active_model != fallback:
+                _log.warning(
+                    "discovery_quota_fallback",
+                    from_model=active_model,
+                    to_model=fallback,
+                    error=str(exc),
+                )
+                print(
+                    f"[discovery] {active_model} daily quota exhausted; "
+                    f"switching to {fallback}..."
+                )
+                continue
+            raise
+
         if listings:
             _log.info(
                 "discovery_success",
                 model=active_model,
-                strategy="combined",
                 count=len(listings),
             )
             return listings
-
-        _log.warning(
-            "discovery_empty_combined",
-            model=active_model,
-            raw_preview=last_raw[:400],
-        )
-        print(
-            f"[discovery] Combined search returned 0 listings on {active_model}; "
-            "retrying per market..."
-        )
-
-        split_listings: list[dict[str, Any]] = []
-        for market_name, _, _ in HOT_MARKETS:
-            market_listings, market_raw = _run_discovery_attempt(
-                model=active_model,
-                max_price=max_price,
-                split_market=market_name,
-                exclude_addresses=exclude_addresses,
-            )
-            last_raw = market_raw or last_raw
-            split_listings.extend(market_listings)
-
-        split_listings = _dedupe_discovery_listings(split_listings, max_price=max_price)
-        if split_listings:
-            _log.info(
-                "discovery_success",
-                model=active_model,
-                strategy="split_market",
-                count=len(split_listings),
-            )
-            return split_listings
 
         _log.warning(
             "discovery_empty_all_strategies",

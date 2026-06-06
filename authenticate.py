@@ -52,6 +52,21 @@ def _headless_mode() -> bool:
     return not os.environ.get("STREAMLIT_RUNTIME_ENV")
 
 
+def _get_optional_secret(name: str) -> str | None:
+    """Return a secret when set; None if missing (no error)."""
+    value = os.getenv(name)
+    if value and str(value).strip():
+        return str(value).strip()
+    if not _headless_mode():
+        try:
+            if name in st.secrets:
+                secret = str(st.secrets[name]).strip()
+                return secret or None
+        except Exception:
+            pass
+    return None
+
+
 def get_supabase() -> Client:
     """Return a Supabase client with Streamlit-backed auth storage."""
     url = _get_secret("SUPABASE_URL")
@@ -473,10 +488,29 @@ def get_authenticated_client() -> Client | None:
         return None
 
 
+def get_service_client() -> Client | None:
+    """
+    Service-role client for trusted headless jobs (harvester, backfill scripts).
+
+    Uses SUPABASE_SERVICE_ROLE_KEY — never expose this key in the Streamlit UI.
+    """
+    key = _get_optional_secret("SUPABASE_SERVICE_ROLE_KEY")
+    if not key:
+        return None
+    url = _get_secret("SUPABASE_URL")
+    return create_client(url, key)
+
+
 def get_db_client() -> Client:
-    """Prefer authenticated client; fall back to anon (RLS may block)."""
+    """Prefer authenticated session; in headless mode prefer service role; else anon."""
     auth_client = get_authenticated_client()
-    return auth_client if auth_client is not None else get_supabase()
+    if auth_client is not None:
+        return auth_client
+    if _headless_mode():
+        service_client = get_service_client()
+        if service_client is not None:
+            return service_client
+    return get_supabase()
 
 
 def get_signup_policy_text() -> str:

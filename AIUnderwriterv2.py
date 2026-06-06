@@ -13,11 +13,16 @@ from knowledge_base import (
     get_ai_baseline_maint,
     get_ai_baseline_rent,
     get_effective_display_maint,
+    get_effective_display_management_fee,
     get_effective_display_rent,
+    get_effective_display_vacancy,
+    get_property_id_by_address,
     is_rent_outlier,
     lookup_property,
     render_auth_page,
     save_knowledge_base,
+    save_user_property_override,
+    user_has_override_changes,
 )
 from market_pulse import render_market_pulse
 import matplotlib.pyplot as plt
@@ -140,20 +145,28 @@ if st.session_state.property_data:
     prediction_reasoning = property_info.get("prediction_reasoning", "No reasoning provided.")
     location_score = safe_float(property_info.get("location_score"))
     
-    ai_vacancy_rate = safe_float(property_info.get("ai_vacancy_rate"))
-    ai_mgmt_fee = safe_float(property_info.get("ai_management_fee"))
+    ai_vacancy_baseline = safe_float(property_info.get("ai_vacancy_rate"))
+    ai_mgmt_baseline = safe_float(property_info.get("ai_management_fee"))
     appreciation_forecast = safe_float(property_info.get("appreciation_forecast"))
     forecast_rate = safe_float(property_info.get("forecast_rate"))
     
     sources=property_info.get("sources", [])
+    from_kb = property_info.get("from_kb", False)
+    property_id = property_info.get("id") or get_property_id_by_address(address)
 
-    # We put it in the sidebar so you can tweak it while looking at the results
     st.sidebar.markdown("---")
-    st.sidebar.write("### 🛠️ Manual Override")
+    st.sidebar.write("### 🤖 AI Baselines (read-only)")
+    st.sidebar.caption(f"Rent: ${original_ai_rent:,.0f}/mo")
+    st.sidebar.caption(f"Maintenance: {original_ai_maint:.1f}%")
+    st.sidebar.caption(f"Vacancy: {ai_vacancy_baseline:.1f}%")
+    st.sidebar.caption(f"Management: {ai_mgmt_baseline:.1f}%")
+
+    # Personal assumptions — each user can adjust without changing shared AI data.
+    st.sidebar.markdown("---")
+    st.sidebar.write("### 🛠️ Your Assumptions")
     
-    # Clamp values to ensure they are within slider ranges to prevent Streamlit crashes
     rent_min, rent_max = 800.0, 4000.0
-    clamped_rent = max(rent_min, min(rent_max, float(monthly_rent)))
+    clamped_rent = max(rent_min, min(rent_max, float(get_effective_display_rent(property_info))))
     final_monthly_rent = st.sidebar.slider(
         "Adjust Monthly Rent ($)", 
         rent_min, rent_max, 
@@ -173,23 +186,23 @@ if st.session_state.property_data:
     )
 
     vac_min, vac_max = 1.0, 10.0
-    clamped_vac = max(vac_min, min(vac_max, ai_vacancy_rate))
+    clamped_vac = max(vac_min, min(vac_max, get_effective_display_vacancy(property_info)))
     user_vacancy_reserve = st.sidebar.slider(
-        "Adjust Vacancy Reserve %", 
+        "Your Vacancy Reserve %", 
         vac_min, vac_max, 
         value = clamped_vac,
         step=0.1,         
-        help="The AI set this at 5% of rent, but you can adjust it based on your market knowledge."
+        help="Your personal vacancy assumption (AI baseline shown above)."
     )
 
     mgmt_min, mgmt_max = 8.0, 12.0
-    clamped_mgmt = max(mgmt_min, min(mgmt_max, float(ai_mgmt_fee)))
+    clamped_mgmt = max(mgmt_min, min(mgmt_max, get_effective_display_management_fee(property_info)))
     user_management_fee = st.sidebar.slider(
-        "Adjust Management Fee %", 
+        "Your Management Fee %", 
         mgmt_min, mgmt_max, 
         value = clamped_mgmt,
         step=0.1,           
-        help="The AI set this at 10% of rent, but you can adjust it based on your market knowledge."
+        help="Your personal management fee assumption (AI baseline shown above)."
     )
 
     closing_min, closing_max = 0.0, 10.0
@@ -385,8 +398,30 @@ if st.session_state.property_data:
             mime="application/pdf"
         )
 
-    is_already_saved = property_info.get("from_kb", False)
-    if not is_already_saved:
+    has_assumption_changes = user_has_override_changes(
+        property_info,
+        rent=final_monthly_rent,
+        maint_percent=final_maint_percent,
+        vacancy_rate=user_vacancy_reserve,
+        management_fee=user_management_fee,
+    )
+
+    st.divider()
+    if from_kb:
+        st.subheader("💾 Your Saved Assumptions")
+        if property_info.get("has_user_override"):
+            st.info("You have saved personal assumptions for this property.")
+        else:
+            st.info(
+                "Shared AI property data is loaded. Adjust sliders and save "
+                "**your** rent, fees, and maintenance assumptions below."
+            )
+    else:
+        st.subheader("Improve the Algorithm")
+        st.info(
+            "Save this property to the shared catalog and store **your** "
+            "personal underwriting assumptions."
+        )
         sources = property_info.get("sources", [])
         with st.popover("View Data Sources 🔗"):
             if not sources:
@@ -395,56 +430,76 @@ if st.session_state.property_data:
                 for link in set(sources):
                     pretty_name = get_pretty_label(link)
                     st.markdown(f"- [{pretty_name}]({link})")
-        st.divider()
-        st.subheader("Improve the Algorithm")
-        st.info("This property is new to the database. Save your adjustments to help the AI learn.")
 
-        rent_deviation = compute_rent_deviation_pct(original_ai_rent, final_monthly_rent)
-        hitl_is_outlier = is_rent_outlier(original_ai_rent, final_monthly_rent)
-        if hitl_is_outlier:
-            st.warning(
-                f"Your rent (${final_monthly_rent:,.0f}) differs from the AI suggestion "
-                f"(${original_ai_rent:,.0f}) by **{rent_deviation:.0f}%**. "
-                "Please add a brief **Override Note** below so we can learn from expert judgment."
-            )
-        override_notes = st.text_area(
-            "Override Note (required for large rent changes)",
-            value=property_info.get("override_notes") or "",
-            placeholder="e.g. Section 8 contract, major renovation, or comp mismatch in AI research.",
-            disabled=not hitl_is_outlier,
-            help="Required when your rent override is more than 50% away from the AI estimate.",
+    rent_deviation = compute_rent_deviation_pct(original_ai_rent, final_monthly_rent)
+    hitl_is_outlier = is_rent_outlier(original_ai_rent, final_monthly_rent)
+    if hitl_is_outlier:
+        st.warning(
+            f"Your rent (${final_monthly_rent:,.0f}) differs from the AI suggestion "
+            f"(${original_ai_rent:,.0f}) by **{rent_deviation:.0f}%**. "
+            "Please add a brief **Override Note** below so we can learn from expert judgment."
         )
+    override_notes = st.text_area(
+        "Override Note (required for large rent changes)",
+        value=property_info.get("override_notes") or "",
+        placeholder="e.g. Section 8 contract, major renovation, or comp mismatch in AI research.",
+        disabled=not hitl_is_outlier,
+        help="Required when your rent override is more than 50% away from the AI estimate.",
+    )
 
-        if st.button("✅ Confirm & Save to Knowledge Base"):
-            if hitl_is_outlier and not str(override_notes).strip():
-                st.error("An override note is required when rent differs by more than 50% from the AI.")
+    save_label = (
+        "💾 Save My Assumptions"
+        if from_kb
+        else "✅ Save Property + My Assumptions"
+    )
+    if st.button(save_label, disabled=from_kb and not has_assumption_changes):
+        if hitl_is_outlier and not str(override_notes).strip():
+            st.error("An override note is required when rent differs by more than 50% from the AI.")
+            st.stop()
+
+        user = get_logged_in_user()
+        if not user:
+            st.error("You must be signed in to save.")
+            st.stop()
+
+        override_payload = {
+            "rent": final_monthly_rent,
+            "maint_percent": final_maint_percent,
+            "vacancy_rate": user_vacancy_reserve,
+            "management_fee": user_management_fee,
+            "is_outlier": hitl_is_outlier,
+            "override_notes": str(override_notes).strip(),
+        }
+
+        if from_kb:
+            pid = property_id or get_property_id_by_address(address)
+            if not pid:
+                st.error("Could not resolve property ID for this address.")
                 st.stop()
-
-            property_info["rent"] = final_monthly_rent
-            property_info["maint_percent"] = final_maint_percent
-            property_info["original_ai_rent"] = original_ai_rent
-            property_info["original_ai_maint"] = original_ai_maint
-            property_info["is_outlier"] = hitl_is_outlier
-            property_info["override_notes"] = str(override_notes).strip()
+            result = save_user_property_override(
+                user["id"], pid, override_payload
+            )
+        else:
             property_info["address"] = address
             property_info["from_kb"] = True
-
             property_info["location_score"] = location_score
             property_info["appreciation_forecast"] = appreciation_forecast
             property_info["property_category"] = branding_label
+            property_info.update(override_payload)
+            result = save_knowledge_base(property_info, user_id=user["id"])
 
-            user = get_logged_in_user()
-            if user:
-                save_knowledge_base(property_info, user_id=user["id"])
-            else:
-                st.error("You must be signed in to save to the knowledge base.")
-                st.stop()
-            st.cache_data.clear()
+        if result is None:
+            st.error("Save failed. Check your connection and try again.")
+            st.stop()
 
-            st.success(f"Saved {address} to the knowledge base!")
-            st.rerun()
-    else:
-        st.divider()
-        st.success("Verified Property: This data is being pulled from your Knowledge Base.")
+        st.cache_data.clear()
+        st.success(
+            f"Saved your assumptions for {address}."
+            if from_kb
+            else f"Saved {address} to the shared catalog with your assumptions."
+        )
+        st.rerun()
+    elif from_kb and not has_assumption_changes:
+        st.caption("Adjust a slider above to enable saving your personal assumptions.")
     
    

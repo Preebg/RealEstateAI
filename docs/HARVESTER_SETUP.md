@@ -97,10 +97,7 @@ Headless harvest uses the **anon** key without a Google JWT. Ensure Supabase pol
 
 ## Automate every 1.5 hours (Windows Task Scheduler)
 
-### Option A — PowerShell script (included)
-
-Script: `scripts/run_harvester.ps1`  
-Logs: `harvester_scheduled.log` in the project root
+Logs append to `harvester_scheduled.log` in the project root.
 
 **Create the scheduled task:**
 
@@ -112,19 +109,21 @@ Logs: `harvester_scheduled.log` in the project root
 3. **Triggers** → New → **Daily**, repeat every **1 hour 30 minutes** for duration **Indefinitely**
 4. **Actions** → New
    - Action: Start a program
-   - Program: `powershell.exe`
-   - Arguments: `-NoProfile -ExecutionPolicy Bypass -File "C:\RealEstateAI\scripts\run_harvester.ps1"`
+   - Program: `C:\RealEstateAI\venv\Scripts\python.exe`
+   - Arguments: `harvester.py`
    - Start in: `C:\RealEstateAI`
 5. **Conditions**: Uncheck “Start only on AC power” if on a laptop
 6. Save
 
-**Test the script manually:**
+**Test manually:**
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File C:\RealEstateAI\scripts\run_harvester.ps1
+cd C:\RealEstateAI
+.\venv\Scripts\Activate.ps1
+python harvester.py
 ```
 
-### Option B — macOS / Linux (cron)
+### macOS / Linux (cron)
 
 ```cron
 0 */1 * * * cd /path/to/RealEstateAI && /path/to/venv/bin/python harvester.py >> harvester_scheduled.log 2>&1

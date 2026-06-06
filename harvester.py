@@ -85,7 +85,9 @@ def execute_with_rpd_fallback(
 
     current_model = kwargs.get(model_kw)
     try:
-        return execute_with_backoff(func, *args, **kwargs)
+        # generate_with_retry already backs off on transient 429s; avoid nesting
+        # another retry loop here (that blocked RPD fallback for 15+ attempts).
+        return func(*args, **kwargs)
     except _HARVESTER_API_ERRORS as exc:
         if not engine.is_daily_quota_exhausted(exc):
             raise
@@ -109,7 +111,7 @@ def execute_with_rpd_fallback(
             _active_synthesis_model = fallback_model
 
         retry_kwargs = {**kwargs, model_kw: fallback_model}
-        return execute_with_backoff(func, *args, **retry_kwargs)
+        return func(*args, **retry_kwargs)
 
 
 def headless_cash_flow(property_data: dict[str, Any]) -> float:
@@ -207,6 +209,20 @@ def validate_harvest_config() -> str | None:
             "2. Add to .streamlit/secrets.toml: ADMIN_USER_ID = \"your-uuid-here\"\n"
             "   Watch for typos: letter 'l' vs digit '1', letter 'O' vs zero '0'.\n"
             f"   Current value: {raw_admin!r}"
+        )
+        return None
+
+    from authenticate import get_service_client
+
+    if get_service_client() is None:
+        log.error("harvest_service_role_missing")
+        print(
+            "SUPABASE_SERVICE_ROLE_KEY is required for headless harvest.\n"
+            "RLS blocks the anon key when no user session is present.\n"
+            "Supabase Dashboard -> Project Settings -> API -> service_role (secret)\n"
+            "Add to .streamlit/secrets.toml:\n"
+            "  SUPABASE_SERVICE_ROLE_KEY = \"your-service-role-key\"\n"
+            "Keep SUPABASE_KEY as the anon/public key for the Streamlit app."
         )
         return None
 
