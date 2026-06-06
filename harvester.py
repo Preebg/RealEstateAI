@@ -192,11 +192,14 @@ def validate_harvest_config() -> str | None:
 
     admin_uid = get_admin_uid()
     if not admin_uid:
-        log.error("harvest_admin_uid_missing")
+        raw_admin = _secret_from_env_or_streamlit("ADMIN_USER_ID") or ""
+        log.error("harvest_admin_uid_invalid", admin_user_id=raw_admin)
         print(
-            "ADMIN_USER_ID is not set.\n"
-            "1. Supabase Dashboard → Authentication → Users → copy your User UID\n"
-            "2. Add to .streamlit/secrets.toml: ADMIN_USER_ID = \"your-uuid-here\""
+            "ADMIN_USER_ID is missing or not a valid UUID.\n"
+            "1. Supabase Dashboard -> Authentication -> Users -> copy your User UID\n"
+            "2. Add to .streamlit/secrets.toml: ADMIN_USER_ID = \"your-uuid-here\"\n"
+            "   Watch for typos: letter 'l' vs digit '1', letter 'O' vs zero '0'.\n"
+            f"   Current value: {raw_admin!r}"
         )
         return None
 
@@ -244,7 +247,7 @@ def _process_listing(
         log.info("listing_skipped", address=address, reason=reason)
         return
 
-    print("  STAGE 3 — Synthesis + Quantum")
+    print("  STAGE 3 - Synthesis + Quantum")
     final_data = execute_with_rpd_fallback(
         engine.synthesize_harvest_property,
         address,

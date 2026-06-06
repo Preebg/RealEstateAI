@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 from typing import Any
+from uuid import UUID
 
 from postgrest.exceptions import APIError
 
@@ -15,6 +16,17 @@ try:
     import streamlit as st
 except ImportError:
     st = None  # type: ignore[misc, assignment]
+
+
+def is_valid_uuid(value: str | None) -> bool:
+    """Return True when value is a well-formed UUID (Supabase auth user id)."""
+    if not value or not str(value).strip():
+        return False
+    try:
+        UUID(str(value).strip())
+        return True
+    except (ValueError, AttributeError, TypeError):
+        return False
 
 
 def _get_secret(name: str) -> str:
@@ -36,9 +48,10 @@ def get_admin_uid() -> str | None:
     """
     uid = os.getenv("ADMIN_USER_ID", "").strip()
     if uid:
-        return uid
+        return uid if is_valid_uuid(uid) else None
     if st is not None and "ADMIN_USER_ID" in st.secrets:
-        return str(st.secrets["ADMIN_USER_ID"]).strip()
+        secret_uid = str(st.secrets["ADMIN_USER_ID"]).strip()
+        return secret_uid if is_valid_uuid(secret_uid) else None
     return None
 
 
@@ -48,10 +61,12 @@ def get_client():
 
 
 def _resolve_user_id(user_id: str | None) -> str | None:
-    if user_id:
-        return user_id
-    user = get_logged_in_user()
-    return user["id"] if user else None
+    if user_id and is_valid_uuid(user_id):
+        return str(user_id).strip()
+    if os.environ.get("STREAMLIT_RUNTIME_ENV"):
+        user = get_logged_in_user()
+        return user["id"] if user else None
+    return None
 
 
 def _fetch_properties(user_id: str | None = None) -> list[dict[str, Any]]:
@@ -143,6 +158,8 @@ def save_knowledge_base(
     """Saves or updates a property in Supabase for the given user."""
     if not user_id:
         raise ValueError("user_id is required to save a property.")
+    if not is_valid_uuid(user_id):
+        raise ValueError(f"user_id must be a valid UUID, got: {user_id!r}")
 
     supabase = get_client()
     payload = property_data.copy()
@@ -380,6 +397,7 @@ __all__ = [
     "RENT_OUTLIER_DEVIATION_PCT",
     "compute_rent_deviation_pct",
     "is_rent_outlier",
+    "is_valid_uuid",
     "get_client",
     "get_admin_uid",
     "get_kb_raw_data",

@@ -47,10 +47,18 @@ def _get_secret(name: str) -> str:
         ) from exc
 
 
+def _headless_mode() -> bool:
+    """True for CLI harvester and other non-Streamlit runs."""
+    return not os.environ.get("STREAMLIT_RUNTIME_ENV")
+
+
 def get_supabase() -> Client:
     """Return a Supabase client with Streamlit-backed auth storage."""
     url = _get_secret("SUPABASE_URL")
     key = _get_secret("SUPABASE_KEY")
+
+    if _headless_mode():
+        return create_client(url, key)
 
     try:
         from supabase.lib.client_options import ClientOptions
@@ -400,6 +408,8 @@ def sign_up_with_email(email: str, password: str) -> tuple[bool, str]:
 
 def get_logged_in_user() -> dict[str, str] | None:
     """Return {'id': uid, 'email': email} for the current session, or None."""
+    if _headless_mode():
+        return None
     user = st.session_state.get("user")
     if not user or not user.get("id"):
         return None
@@ -448,6 +458,8 @@ def restore_session_from_tokens() -> None:
 
 def get_authenticated_client() -> Client | None:
     """Supabase client with the logged-in user's JWT (required for RLS)."""
+    if _headless_mode():
+        return None
     access = st.session_state.get("sb_access_token")
     refresh = st.session_state.get("sb_refresh_token")
     if not access:

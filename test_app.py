@@ -341,5 +341,17 @@ class TestDiscoveryParsing(unittest.TestCase):
         self.assertGreater(calls["count"], 1)
 
 
+class TestUuidValidation(unittest.TestCase):
+    def test_rejects_typo_uuid_with_letter_l(self):
+        from knowledge_base import is_valid_uuid
+
+        self.assertFalse(is_valid_uuid("7f35bcel-9de5-484d-8f73-27fd3da733eb"))
+
+    def test_accepts_valid_uuid(self):
+        from knowledge_base import is_valid_uuid
+
+        self.assertTrue(is_valid_uuid("7f35bc1e-9de5-484d-8f73-27fd3da733eb"))
+
+
 if __name__ == "__main__":
     unittest.main()
