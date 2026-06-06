@@ -958,52 +958,75 @@ def _parse_quantum_inputs(
     return cash_flow, forecast_rate, location_score
 
 
-def _probabilities_from_measurement_counts(counts: dict[str, int]) -> dict[str, float]:
+def _success_targets(
+    cash_flow: float, forecast_rate: float, location_score: float
+) -> tuple[float, float, float]:
     """
-    Derive success probabilities from QAOA bitstrings.
-    Qubit 0 = cash flow, qubit 1 = appreciation (forecast), qubit 2 = location.
-    Bitstring order from measure_all: [q2, q1, q0].
+    Map investment inputs to [0, 1] success targets for each QAOA qubit.
+
+    Negative or zero cash flow targets 0 (cash-flow qubit should stay |0⟩).
+    """
+    if cash_flow <= 0:
+        cf_t = 0.0
+    else:
+        cf_t = min(cash_flow / 800.0, 1.0)
+
+    rate_t = min(max(forecast_rate / 8.0, 0.0), 1.0)
+    loc_t = min(max(location_score / 10.0, 0.0), 1.0)
+    return cf_t, rate_t, loc_t
+
+
+def _probabilities_from_measurement_counts(
+    counts: dict[str, int],
+    *,
+    cf_t: float,
+    rate_t: float,
+    loc_t: float,
+) -> dict[str, float]:
+    """
+    Derive interpretable success probabilities from QAOA bitstrings.
+
+    Qubit 0 = cash flow, qubit 1 = appreciation, qubit 2 = location.
+    Each score scales the measured |1⟩ probability by the input target so
+    negative cash flow cannot produce a high cash-flow success rate.
     """
     total = sum(counts.values()) or 1
-    cashflow = appreciation = location = combined_wealth = overall = 0.0
+    exp_x0 = exp_x1 = exp_x2 = 0.0
 
     for state_str, count in counts.items():
         prob = count / total
         bits = state_str.zfill(3)
-        x0 = bits[2] == "1"
-        x1 = bits[1] == "1"
-        x2 = bits[0] == "1"
-        if x0:
-            cashflow += prob
-        if x1:
-            appreciation += prob
-        if x2:
-            location += prob
-        if x0 and x1:
-            combined_wealth += prob
-        if x0 and x1 and x2:
-            overall += prob
+        exp_x0 += prob * (bits[2] == "1")
+        exp_x1 += prob * (bits[1] == "1")
+        exp_x2 += prob * (bits[0] == "1")
+
+    cf_pct = 100.0 * cf_t * exp_x0
+    app_pct = 100.0 * rate_t * exp_x1
+    loc_pct = 100.0 * loc_t * exp_x2
+    combined = 100.0 * cf_t * rate_t * exp_x0 * exp_x1
+    overall = 0.45 * cf_pct + 0.35 * app_pct + 0.20 * loc_pct
 
     return {
-        "cashflow_success_pct": min(max(cashflow * 100.0, 0.0), 100.0),
-        "appreciation_success_pct": min(max(appreciation * 100.0, 0.0), 100.0),
-        "location_success_pct": min(max(location * 100.0, 0.0), 100.0),
-        "combined_wealth_success_pct": min(max(combined_wealth * 100.0, 0.0), 100.0),
-        "overall_success_pct": min(max(overall * 100.0, 0.0), 100.0),
+        "cashflow_success_pct": min(max(cf_pct, 0.0), 100.0),
+        "appreciation_success_pct": min(max(app_pct, 0.0), 100.0),
+        "location_success_pct": min(max(loc_pct, 0.0), 100.0),
+        "combined_wealth_success_pct": min(max(combined, 0.0), 100.0),
+        "overall_success_pct": min(max(overall, 0.0), 100.0),
     }
 
 
 def calculate_quantum_risk(*args, **kwargs) -> dict[str, float]:
     """
     QAOA simulation returning cash-flow, appreciation, and combined wealth success odds.
+
+    Each qubit encodes whether a dimension (cash flow, appreciation, location) aligns
+    with investment success. Input targets drive the cost Hamiltonian; negative cash
+    flow forces the cash-flow qubit toward |0⟩ so success scores stay near 0%.
     """
     cash_flow, forecast_rate, location_score = _parse_quantum_inputs(*args, **kwargs)
+    cf_t, rate_t, loc_t = _success_targets(cash_flow, forecast_rate, location_score)
 
-    cf_norm = min(max(cash_flow / 1000.0, 0.0), 1.0)
-    rate_norm = min(max(forecast_rate / 10.0, 0.0), 1.0)
-    loc_norm = min(max(location_score / 10.0, 0.0), 1.0)
-
-    if cf_norm == 0.0 and rate_norm == 0.0 and loc_norm == 0.0:
+    if cf_t == 0.0 and rate_t == 0.0 and loc_t == 0.0:
         return {
             "cashflow_success_pct": 0.0,
             "appreciation_success_pct": 0.0,
@@ -1013,35 +1036,30 @@ def calculate_quantum_risk(*args, **kwargs) -> dict[str, float]:
         }
 
     # Legacy single-metric path (location score only)
-    if cf_norm == 0.0 and rate_norm == 0.0:
-        if loc_norm == 1.0:
-            overall = 100.0
-        elif loc_norm == 0.5:
-            overall = 50.0
-        elif loc_norm == 0.0:
-            overall = 0.0
-        else:
-            overall = loc_norm * 100.0
+    if cf_t == 0.0 and rate_t == 0.0 and location_score > 0:
+        loc_pct = loc_t * 100.0
         return {
-            "cashflow_success_pct": overall,
-            "appreciation_success_pct": overall,
-            "location_success_pct": overall,
-            "combined_wealth_success_pct": overall,
-            "overall_success_pct": overall,
+            "cashflow_success_pct": loc_pct,
+            "appreciation_success_pct": loc_pct,
+            "location_success_pct": loc_pct,
+            "combined_wealth_success_pct": loc_pct,
+            "overall_success_pct": loc_pct,
         }
 
     def compute_cost(x0: int, x1: int, x2: int) -> float:
-        utility = cf_norm * x0 + rate_norm * x1 + loc_norm * x2
-        penalty = 0.2 * ((x0 - x1) ** 2) + 0.2 * ((x1 - x2) ** 2)
-        return penalty - utility
+        misalignment = (
+            (cf_t - x0) ** 2 + (rate_t - x1) ** 2 + (loc_t - x2) ** 2
+        )
+        coupling = 0.15 * ((x0 - x1) ** 2 + (x1 - x2) ** 2)
+        return misalignment + coupling
 
     def build_qaoa_circuit(gamma: float, beta: float) -> QuantumCircuit:
         qc = QuantumCircuit(3)
         qc.h([0, 1, 2])
-        for i, w in enumerate([cf_norm, rate_norm, loc_norm]):
-            qc.rz(gamma * w, i)
-        qc.rzz(-0.2 * gamma, 0, 1)
-        qc.rzz(-0.2 * gamma, 1, 2)
+        for i, target in enumerate([cf_t, rate_t, loc_t]):
+            qc.rz(gamma * (2.0 * target - 1.0), i)
+        qc.rzz(-0.15 * gamma, 0, 1)
+        qc.rzz(-0.15 * gamma, 1, 2)
         for i in range(3):
             qc.rx(2 * beta, i)
         return qc
@@ -1111,12 +1129,14 @@ def calculate_quantum_risk(*args, **kwargs) -> dict[str, float]:
     compiled_circuit = transpile(opt_qc, simulator)
     job = simulator.run(compiled_circuit, shots=final_shots, seed_simulator=42)
     counts = job.result().get_counts()
-    return _probabilities_from_measurement_counts(counts)
+    return _probabilities_from_measurement_counts(
+        counts, cf_t=cf_t, rate_t=rate_t, loc_t=loc_t
+    )
 
 
 def calculate_quantum_probability(*args, **kwargs) -> float:
     """
-    Simulates investment success via QAOA. Returns overall quantum alignment (state |111⟩).
+    Simulates investment success via QAOA. Returns the weighted overall success score.
     Use calculate_quantum_risk() for cash-flow and appreciation breakdowns.
     """
     risk = calculate_quantum_risk(*args, **kwargs)

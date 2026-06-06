@@ -35,16 +35,16 @@ GOLDEN_PERFECT_RISK = {
     "cashflow_success_pct": 51.85546875,
     "appreciation_success_pct": 49.12109375,
     "location_success_pct": 48.6328125,
-    "combined_wealth_success_pct": 25.68359375,
-    "overall_success_pct": 10.9375,
+    "combined_wealth_success_pct": 25.471973419189453,
+    "overall_success_pct": 50.25390625,
 }
 
 GOLDEN_AVERAGE_RISK = {
-    "cashflow_success_pct": 51.85546875,
-    "appreciation_success_pct": 49.12109375,
-    "location_success_pct": 48.6328125,
-    "combined_wealth_success_pct": 25.68359375,
-    "overall_success_pct": 10.9375,
+    "cashflow_success_pct": 32.40966796875,
+    "appreciation_success_pct": 30.70068359375,
+    "location_success_pct": 24.31640625,
+    "combined_wealth_success_pct": 9.94998961687088,
+    "overall_success_pct": 30.19287109375,
 }
 
 
@@ -142,13 +142,13 @@ class TestAIUnderwriterEngine(unittest.TestCase):
         self.assertTrue(math.isfinite(opt_result.fun))
 
         assert_valid_quantum_risk(self, risk)
-        self.assertGreaterEqual(risk["combined_wealth_success_pct"], 20.0)
+        self.assertGreaterEqual(risk["overall_success_pct"], 40.0)
         self.assertGreaterEqual(risk["cashflow_success_pct"], 45.0)
         self.assertGreaterEqual(risk["appreciation_success_pct"], 45.0)
         self.assertGreater(
-            risk["combined_wealth_success_pct"],
             risk["overall_success_pct"],
-            "Marginal two-qubit success should exceed rare |111⟩ alignment",
+            risk["combined_wealth_success_pct"],
+            "Overall weighted score should exceed joint cash-flow + appreciation alignment",
         )
 
         for key, expected in GOLDEN_PERFECT_RISK.items():
@@ -229,10 +229,13 @@ class TestAIUnderwriterEngine(unittest.TestCase):
         self.assertEqual(first, second)
 
     def test_calculate_quantum_risk_clamps_negative_cash_flow(self):
-        """Negative cash flow is clamped to 0 before QAOA normalization."""
+        """Negative cash flow yields 0% cash-flow success; great inputs score higher."""
         negative = calculate_quantum_risk(-500.0, 5.0, 5.0)
-        zero_cf = calculate_quantum_risk(0.0, 5.0, 5.0)
-        self.assertEqual(negative, zero_cf)
+        great = calculate_quantum_risk(1000.0, 10.0, 10.0)
+        self.assertEqual(negative["cashflow_success_pct"], 0.0)
+        self.assertGreater(
+            great["overall_success_pct"], negative["overall_success_pct"]
+        )
 
 
 class TestDailyQuotaDetection(unittest.TestCase):
