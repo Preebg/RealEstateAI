@@ -1,17 +1,24 @@
 from __future__ import annotations
 
+import contextvars
 import json
 import os
+import random
 import time
+from dataclasses import dataclass
 from typing import Any
 
 from google import genai
 from google.genai import errors, types
 from qiskit import QuantumCircuit, transpile
 from qiskit_aer import AerSimulator
+from scipy.optimize import minimize
 
+from app_logging import get_logger, report_error
 from finance import calculate_10yr_appreciation
 from knowledge_base import get_kb_context, lookup_property
+
+_log = get_logger("engine")
 
 # --- Model routing (harvester + underwriter) ---
 DISCOVERY_MODEL = "gemini-2.5-flash"
@@ -28,10 +35,24 @@ HOT_MARKETS: list[tuple[str, str, int]] = [
 ]
 MAX_DISCOVERY_PRICE = 250_000
 MAX_SYNTHESIS_PRICE = 400_000
-RATE_LIMIT_BACKOFF_SEC = 60
 MAX_API_RETRIES = 5
+BACKOFF_BASE_SEC = 4.0
+BACKOFF_MAX_SEC = 60.0
+BACKOFF_MULTIPLIER = 2.0
+# Upper bound for fixed sleeps; prefer retry_delay_seconds() for retries.
+RATE_LIMIT_BACKOFF_SEC = BACKOFF_MAX_SEC
 
-_client: genai.Client | None = None
+
+@dataclass(frozen=True, slots=True)
+class GenaiSession:
+    """Gemini API client scoped to a unit of work (request, job, or test)."""
+
+    client: genai.Client
+
+
+_current_session: contextvars.ContextVar[GenaiSession | None] = contextvars.ContextVar(
+    "genai_session", default=None
+)
 
 
 def _get_api_key() -> str:
@@ -48,11 +69,66 @@ def _get_api_key() -> str:
         ) from exc
 
 
+def create_genai_session(api_key: str | None = None) -> GenaiSession:
+    """Build a new Gemini client session (factory entry point)."""
+    key = api_key if api_key is not None else _get_api_key()
+    return GenaiSession(client=genai.Client(api_key=key))
+
+
+def get_session() -> GenaiSession:
+    """Return the context-scoped session, creating one via the factory if needed."""
+    session = _current_session.get()
+    if session is None:
+        session = create_genai_session()
+        _current_session.set(session)
+    return session
+
+
+def set_session(session: GenaiSession | None) -> contextvars.Token[GenaiSession | None]:
+    """Bind a session for the current context (e.g. tests or explicit DI)."""
+    return _current_session.set(session)
+
+
 def get_client() -> genai.Client:
-    global _client
-    if _client is None:
-        _client = genai.Client(api_key=_get_api_key())
-    return _client
+    """Backward-compatible accessor for the active session client."""
+    return get_session().client
+
+
+def retry_delay_seconds(
+    attempt: int,
+    *,
+    base_sec: float = BACKOFF_BASE_SEC,
+    max_sec: float = BACKOFF_MAX_SEC,
+    multiplier: float = BACKOFF_MULTIPLIER,
+) -> float:
+    """Full-jitter exponential backoff for retry attempt index (0-based)."""
+    exp_cap = min(base_sec * (multiplier**attempt), max_sec)
+    return random.uniform(0.0, exp_cap)
+
+
+def _log_retry(
+    *,
+    model: str,
+    attempt: int,
+    max_retries: int,
+    error: Exception,
+    delay_sec: float,
+    total_wait_sec: float,
+    retriable: bool,
+) -> None:
+    code = getattr(error, "code", None)
+    print(
+        f"[gemini-retry] model={model} attempt={attempt + 1}/{max_retries} "
+        f"error={type(error).__name__} code={code} "
+        f"delay_sec={delay_sec:.2f} total_wait_sec={total_wait_sec:.2f} "
+        f"retriable={retriable}"
+    )
+
+
+def _is_retriable(error: Exception) -> bool:
+    if isinstance(error, errors.ClientError):
+        return error.code == 429
+    return isinstance(error, (errors.ServerError, errors.APIError))
 
 
 def generate_with_retry(
@@ -61,42 +137,64 @@ def generate_with_retry(
     *,
     use_search: bool = False,
     max_retries: int = MAX_API_RETRIES,
+    session: GenaiSession | None = None,
 ) -> str:
-    """Call Gemini with 60s backoff on HTTP 429."""
+    """Call Gemini with exponential backoff and full jitter on retriable errors."""
+    active = session or get_session()
     config = None
     if use_search:
         config = types.GenerateContentConfig(
             tools=[types.Tool(google_search=types.GoogleSearch())]
         )
 
-    last_error: Exception | None = None
+    last_error: BaseException | None = None
+    total_wait_sec = 0.0
+
     for attempt in range(max_retries):
         try:
-            response = get_client().models.generate_content(
+            response = active.client.models.generate_content(
                 model=model,
                 contents=contents,
                 config=config,
             )
-            return response.text or ""
-        except errors.ClientError as e:
-            last_error = e
-            if e.code == 429:
+            if attempt > 0:
                 print(
-                    f"429 rate limit on {model}. "
-                    f"Backing off {RATE_LIMIT_BACKOFF_SEC}s "
-                    f"(attempt {attempt + 1}/{max_retries})..."
+                    f"[gemini-retry] model={model} succeeded "
+                    f"after {attempt + 1} attempt(s), total_wait_sec={total_wait_sec:.2f}"
                 )
-                time.sleep(RATE_LIMIT_BACKOFF_SEC)
-                continue
-            raise
-        except (errors.ServerError, errors.APIError) as e:
+            return response.text or ""
+        except (errors.ClientError, errors.ServerError, errors.APIError) as e:
             last_error = e
-            if attempt < max_retries - 1:
-                time.sleep(RATE_LIMIT_BACKOFF_SEC)
+            will_retry = _is_retriable(e) and attempt < max_retries - 1
+            if will_retry:
+                delay_sec = retry_delay_seconds(attempt)
+                total_wait_sec += delay_sec
+                _log_retry(
+                    model=model,
+                    attempt=attempt,
+                    max_retries=max_retries,
+                    error=e,
+                    delay_sec=delay_sec,
+                    total_wait_sec=total_wait_sec,
+                    retriable=True,
+                )
+                time.sleep(delay_sec)
                 continue
+            _log_retry(
+                model=model,
+                attempt=attempt,
+                max_retries=max_retries,
+                error=e,
+                delay_sec=0.0,
+                total_wait_sec=total_wait_sec,
+                retriable=False,
+            )
             raise
 
-    raise RuntimeError(f"Max retries exceeded for {model}") from last_error
+    raise RuntimeError(
+        f"Max retries ({max_retries}) exceeded for model={model}, "
+        f"total_wait_sec={total_wait_sec:.2f}"
+    ) from last_error
 
 
 def _extract_json(text: str) -> dict[str, Any] | list[Any] | None:
@@ -624,40 +722,70 @@ def calculate_quantum_risk(*args, **kwargs) -> dict[str, float]:
             qc.rx(2 * beta, i)
         return qc
 
-    gamma_grid = [0.0, 1.04719, 2.09439, 3.14159]
-    beta_grid = [0.0, 0.52359, 1.04719, 1.57079]
-
-    best_cost = float("inf")
-    best_gamma = 0.0
-    best_beta = 0.0
+    gamma_bounds = (0.0, 3.14159)
+    beta_bounds = (0.0, 1.57079)
+    optimize_shots = 256
+    final_shots = 1024
     simulator = AerSimulator()
 
-    for g in gamma_grid:
-        for b in beta_grid:
-            qc_measure = build_qaoa_circuit(g, b).copy()
-            qc_measure.measure_all()
-            compiled_circuit = transpile(qc_measure, simulator)
-            job = simulator.run(compiled_circuit, shots=256, seed_simulator=42)
-            result = job.result().get_counts()
+    def clip_gamma_beta(params: list[float] | tuple[float, ...]) -> tuple[float, float]:
+        gamma = min(max(float(params[0]), gamma_bounds[0]), gamma_bounds[1])
+        beta = min(max(float(params[1]), beta_bounds[0]), beta_bounds[1])
+        return gamma, beta
 
-            expected_cost = 0.0
-            for state_str, count in result.items():
-                prob = count / 256
-                bits = state_str.zfill(3)
-                x2 = int(bits[0])
-                x1 = int(bits[1])
-                x0 = int(bits[2])
-                expected_cost += prob * compute_cost(x0, x1, x2)
+    def cost_function(params: list[float] | tuple[float, ...]) -> float:
+        gamma, beta = clip_gamma_beta(params)
+        qc_measure = build_qaoa_circuit(gamma, beta).copy()
+        qc_measure.measure_all()
+        compiled_circuit = transpile(qc_measure, simulator)
+        job = simulator.run(
+            compiled_circuit, shots=optimize_shots, seed_simulator=42
+        )
+        counts = job.result().get_counts()
+        total = sum(counts.values()) or 1
+        expected_cost = 0.0
+        for state_str, count in counts.items():
+            prob = count / total
+            bits = state_str.zfill(3)
+            x2 = int(bits[0])
+            x1 = int(bits[1])
+            x0 = int(bits[2])
+            expected_cost += prob * compute_cost(x0, x1, x2)
+        return expected_cost
 
-            if expected_cost < best_cost:
-                best_cost = expected_cost
-                best_gamma = g
-                best_beta = b
+    initial_params = [1.04719, 0.52359]
+    final_gamma, final_beta = clip_gamma_beta(initial_params)
 
-    opt_qc = build_qaoa_circuit(best_gamma, best_beta)
+    try:
+        opt_result = minimize(
+            cost_function,
+            x0=initial_params,
+            method="COBYLA",
+            options={"maxiter": 30, "rhobeg": 0.35},
+        )
+        final_gamma, final_beta = clip_gamma_beta(opt_result.x)
+        if not opt_result.success:
+            _log.warning(
+                "qaoa_optimizer_did_not_converge",
+                message=str(opt_result.message),
+                nit=getattr(opt_result, "nit", None),
+                final_cost=float(opt_result.fun),
+                gamma=final_gamma,
+                beta=final_beta,
+            )
+    except Exception as exc:
+        report_error(
+            _log,
+            "qaoa_optimizer_failed",
+            exc,
+            gamma=final_gamma,
+            beta=final_beta,
+        )
+
+    opt_qc = build_qaoa_circuit(final_gamma, final_beta)
     opt_qc.measure_all()
     compiled_circuit = transpile(opt_qc, simulator)
-    job = simulator.run(compiled_circuit, shots=1024, seed_simulator=42)
+    job = simulator.run(compiled_circuit, shots=final_shots, seed_simulator=42)
     counts = job.result().get_counts()
     return _probabilities_from_measurement_counts(counts)
 

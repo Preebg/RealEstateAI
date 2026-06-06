@@ -5,6 +5,7 @@ structlog>=24.0.0
 sentry-sdk>=2.0.0
 qiskit
 qiskit-aer
+scipy>=1.11.0
 pandas
 matplotlib
 tldextract

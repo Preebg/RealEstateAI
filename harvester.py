@@ -25,23 +25,31 @@ INVESTMENT_PARAMS = {
 
 
 def execute_with_backoff(func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
-    """Delegates to engine retry; 60s backoff on 429."""
-    retries = 0
-    while retries < engine.MAX_API_RETRIES:
+    """Wrap harvester stages with the same jittered exponential backoff as engine."""
+    total_wait_sec = 0.0
+    last_error: BaseException | None = None
+    for attempt in range(engine.MAX_API_RETRIES):
         try:
             return func(*args, **kwargs)
         except errors.ClientError as e:
-            if e.code == 429:
+            last_error = e
+            if e.code == 429 and attempt < engine.MAX_API_RETRIES - 1:
+                delay_sec = engine.retry_delay_seconds(attempt)
+                total_wait_sec += delay_sec
                 log.warning(
                     "rate_limit_backoff",
-                    backoff_seconds=engine.RATE_LIMIT_BACKOFF_SEC,
-                    attempt=retries + 1,
+                    attempt=attempt + 1,
+                    max_attempts=engine.MAX_API_RETRIES,
+                    delay_sec=round(delay_sec, 2),
+                    total_wait_sec=round(total_wait_sec, 2),
                 )
-                time.sleep(engine.RATE_LIMIT_BACKOFF_SEC)
-                retries += 1
-            else:
-                raise
-    raise RuntimeError("Max retries exceeded for API rate limits.")
+                time.sleep(delay_sec)
+                continue
+            raise
+    raise RuntimeError(
+        f"Max retries ({engine.MAX_API_RETRIES}) exceeded for API rate limits, "
+        f"total_wait_sec={total_wait_sec:.2f}"
+    ) from last_error
 
 
 def headless_cash_flow(property_data: dict[str, Any]) -> float:
