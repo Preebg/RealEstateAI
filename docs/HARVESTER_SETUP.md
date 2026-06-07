@@ -135,11 +135,14 @@ For every 90 minutes, use a loop script or systemd timer with `OnUnitActiveSec=9
 
 ## API quota reminder (per run)
 
-| Stage | Model | Calls per run |
-|-------|--------|----------------|
-| Discovery | gemini-2.5-flash + grounding | **1** |
-| Research | gemma-4-31b-it | up to ~20 |
-| Synthesis | gemini-3.1-flash-lite-preview | up to ~20 |
+| Stage | Model | Calls per run | Concurrency |
+|-------|--------|----------------|-------------|
+| Discovery | gemini-2.5-flash + grounding | **1** | Sequential |
+| Research | gemma-4-31b-it | up to ~25 | **Parallel** (≤10 calls/min) |
+| Synthesis | gemini-3.1-flash-lite-preview | up to ~25 | **Parallel** (≤10 calls/min) |
+
+Stages 2 and 3 run all listings concurrently via `asyncio`, with a per-model sliding-window
+rate limiter (10 requests per 60 seconds) to stay under the ~15 RPM account cap.
 
 Every **1.5 hours** ≈ **16 runs/day** → plan Gemini/Supabase limits accordingly.
 

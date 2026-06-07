@@ -1,9 +1,11 @@
 # harvester.py — 3-Stage Hot Market Harvester (multi-market discovery)
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
@@ -33,6 +35,29 @@ INVESTMENT_PARAMS = {
 # Active models for this run (updated when RPD fallback triggers).
 _active_discovery_model = engine.DISCOVERY_MODEL
 _active_synthesis_model = engine.SYNTHESIS_MODEL
+
+
+@dataclass
+class _SynthesisJob:
+    address: str
+    market_city: str
+    research: dict[str, Any]
+
+
+@dataclass
+class _HarvesterModelState:
+    synthesis_model: str = field(default_factory=lambda: engine.SYNTHESIS_MODEL)
+    _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+    async def get_synthesis_model(self) -> str:
+        async with self._lock:
+            return self.synthesis_model
+
+    async def set_synthesis_fallback(self, fallback_model: str) -> None:
+        global _active_synthesis_model
+        async with self._lock:
+            self.synthesis_model = fallback_model
+            _active_synthesis_model = fallback_model
 
 _HARVESTER_API_ERRORS = (
     errors.ClientError,
@@ -239,63 +264,155 @@ def require_harvest_config() -> str:
     return admin_uid
 
 
-def _process_listing(
-    listing: dict[str, Any],
-    admin_user_id: str,
-    report: dict[str, Any],
-) -> None:
-    """Run stages 2-3 for one listing; record outcome in report."""
+def _validate_listing(listing: dict[str, Any]) -> tuple[str, str]:
     address = str(listing.get("address", "")).strip()
     market_city = str(listing.get("city", "")).strip()
     if not address:
         raise ValueError("Listing is missing a valid address")
     if market_city not in engine.DISCOVERY_MARKET_KEYS:
         raise ValueError(f"Listing has unsupported market city: {market_city!r}")
+    return address, market_city
 
-    if is_property_already_scanned(address, user_id=admin_user_id):
-        print("  SKIP - Already scanned (in knowledge base)")
-        report["already_scanned"].append({"address": address, "reason": "Already in KB"})
+
+async def _research_listing(
+    listing: dict[str, Any],
+    admin_user_id: str,
+    report: dict[str, Any],
+    report_lock: asyncio.Lock,
+    rate_limiter: engine.ModelRateLimiter,
+    session: engine.GenaiSession,
+) -> _SynthesisJob | None:
+    """Stage 2 for one listing; returns a synthesis job or None when skipped."""
+    address, market_city = _validate_listing(listing)
+
+    already_scanned = await asyncio.to_thread(
+        is_property_already_scanned, address, user_id=admin_user_id
+    )
+    if already_scanned:
+        print(f"  [research] SKIP {address} — already in knowledge base")
+        async with report_lock:
+            report["already_scanned"].append(
+                {"address": address, "reason": "Already in KB"}
+            )
         log.info("listing_already_scanned", address=address)
-        return
+        return None
 
-    log.info("listing_start", address=address, market_city=market_city)
-    print("  STAGE 2 - Research (gemma)")
-    research = execute_with_backoff(engine.research_property, address)
-    report["researched"] += 1
+    log.info("listing_research_start", address=address, market_city=market_city)
+    print(f"  [research] START {address} ({market_city})")
+    research = await engine.research_property_async(
+        address,
+        rate_limiter=rate_limiter,
+        session=session,
+    )
+    async with report_lock:
+        report["researched"] += 1
 
     skip_reason = engine.synthesis_skip_reason(research)
     if skip_reason:
-        print(f"  SKIP Stage 3 - {skip_reason}")
-        report["skipped"].append({"address": address, "reason": skip_reason})
+        print(f"  [research] SKIP {address} — {skip_reason}")
+        async with report_lock:
+            report["skipped"].append({"address": address, "reason": skip_reason})
         log.info("listing_skipped", address=address, reason=skip_reason)
-        return
+        return None
 
-    print("  STAGE 3 - Synthesis + Quantum")
-    final_data = execute_with_rpd_fallback(
-        engine.synthesize_harvest_property,
+    print(f"  [research] DONE {address}")
+    return _SynthesisJob(address=address, market_city=market_city, research=research)
+
+
+async def _synthesize_harvest_property_with_fallback(
+    address: str,
+    research: dict[str, Any],
+    market_city: str,
+    admin_user_id: str,
+    model_state: _HarvesterModelState,
+    rate_limiter: engine.ModelRateLimiter,
+    session: engine.GenaiSession,
+) -> dict[str, Any]:
+    model = await model_state.get_synthesis_model()
+    try:
+        return await engine.synthesize_harvest_property_async(
+            address,
+            research,
+            market_city,
+            model=model,
+            user_id=admin_user_id,
+            rate_limiter=rate_limiter,
+            session=session,
+        )
+    except _HARVESTER_API_ERRORS as exc:
+        if (
+            engine.is_daily_quota_exhausted(exc)
+            and model != engine.SYNTHESIS_FALLBACK_MODEL
+        ):
+            log.warning(
+                "rpd_model_fallback",
+                stage="synthesis",
+                from_model=model,
+                to_model=engine.SYNTHESIS_FALLBACK_MODEL,
+                error=str(exc),
+            )
+            print(
+                f"  [synthesis] daily quota exhausted for {model} "
+                f"— switching to {engine.SYNTHESIS_FALLBACK_MODEL}"
+            )
+            await model_state.set_synthesis_fallback(engine.SYNTHESIS_FALLBACK_MODEL)
+            return await engine.synthesize_harvest_property_async(
+                address,
+                research,
+                market_city,
+                model=engine.SYNTHESIS_FALLBACK_MODEL,
+                user_id=admin_user_id,
+                rate_limiter=rate_limiter,
+                session=session,
+            )
+        raise
+
+
+async def _synthesize_listing(
+    job: _SynthesisJob,
+    admin_user_id: str,
+    report: dict[str, Any],
+    report_lock: asyncio.Lock,
+    model_state: _HarvesterModelState,
+    rate_limiter: engine.ModelRateLimiter,
+    session: engine.GenaiSession,
+) -> None:
+    """Stage 3 + finance + quantum + KB save for one property."""
+    address = job.address
+    market_city = job.market_city
+    print(f"  [synthesis] START {address} ({market_city})")
+
+    final_data = await _synthesize_harvest_property_with_fallback(
         address,
-        research,
+        job.research,
         market_city,
-        stage="synthesis",
-        fallback_model=engine.SYNTHESIS_FALLBACK_MODEL,
-        model=_active_synthesis_model,
-        user_id=admin_user_id,
+        admin_user_id,
+        model_state,
+        rate_limiter,
+        session,
     )
-    report["synthesized"] += 1
+    async with report_lock:
+        report["synthesized"] += 1
 
-    cash_flow = headless_cash_flow(final_data)
-    quantum = engine.run_harvest_quantum(final_data, cash_flow)
+    cash_flow = await asyncio.to_thread(headless_cash_flow, final_data)
+    quantum = await asyncio.to_thread(
+        engine.run_harvest_quantum, final_data, cash_flow
+    )
     final_data["monthly_net_cash_flow"] = cash_flow
 
-    save_result = save_harvest_property(final_data, user_id=admin_user_id)
+    save_result = await asyncio.to_thread(
+        save_harvest_property, final_data, user_id=admin_user_id
+    )
     if save_result is None:
         raise RuntimeError("Failed to save property to Supabase")
-    report["saved"].append(address)
-    bucket = market_city.lower()
-    if bucket in report:
-        report[bucket].append(
-            {"address": address, "quantum": quantum, "cash_flow": cash_flow}
-        )
+
+    async with report_lock:
+        report["saved"].append(address)
+        bucket = market_city.lower()
+        if bucket in report:
+            report[bucket].append(
+                {"address": address, "quantum": quantum, "cash_flow": cash_flow}
+            )
 
     log.info(
         "listing_saved",
@@ -303,16 +420,20 @@ def _process_listing(
         quantum=round(quantum, 1),
         cash_flow=round(cash_flow, 2),
     )
-    print(f"  Saved - Quantum: {quantum:.1f}% | Cash Flow: ${cash_flow:,.2f}")
+    print(
+        f"  [synthesis] SAVED {address} — "
+        f"Quantum: {quantum:.1f}% | Cash Flow: ${cash_flow:,.2f}"
+    )
 
 
-def run_harvester_pipeline(admin_user_id: str) -> dict[str, Any]:
+async def run_harvester_pipeline_async(admin_user_id: str) -> dict[str, Any]:
     """
     Execute the full 3-stage harvester once per run.
 
     Stage 1: Single grounded discovery (gemini-2.5-flash) — up to 25 listings per run.
-    Stage 2: Per-address research (gemma-4-31b-it).
-    Stage 3: Synthesis + quantum + KB save (gemini-3.1-flash-lite-preview).
+    Stage 2: Parallel per-address research (gemma-4-31b-it), capped at 10 RPM.
+    Stage 3: Parallel synthesis + quantum + KB save (gemini-3.1-flash-lite-preview),
+    capped at 10 RPM.
 
     On daily quota exhaustion, discovery and synthesis switch to their
     configured fallback models for the remainder of the run.
@@ -364,19 +485,85 @@ def run_harvester_pipeline(admin_user_id: str) -> dict[str, Any]:
         )
         return report
 
-    for idx, listing in enumerate(listings):
-        address = str(listing.get("address", "")).strip()
-        market_city = str(listing.get("city", "")).strip()
-        print(f"\n[{idx + 1}/{len(listings)}] {address or '(missing address)'} ({market_city})")
+    session = engine.create_genai_session()
+    rate_limiter = engine.ModelRateLimiter(requests_per_minute=engine.HARVESTER_RPM_PER_MODEL)
+    report_lock = asyncio.Lock()
+    model_state = _HarvesterModelState(synthesis_model=engine.SYNTHESIS_MODEL)
 
-        try:
-            _process_listing(listing, admin_user_id, report)
-        except Exception as exc:
-            if isinstance(exc, KeyboardInterrupt):
-                raise
-            report_error(log, "listing_failed", exc, address=address)
-            print(f"  FAILED - {exc}")
-            report["failed"].append({"address": address, "error": str(exc)})
+    print("\n" + "=" * 60)
+    print(
+        f"STAGE 2 - Parallel research ({len(listings)} listings, "
+        f"max {engine.HARVESTER_RPM_PER_MODEL} calls/min per model)"
+    )
+    print("=" * 60)
+
+    research_tasks = [
+        asyncio.create_task(
+            _research_listing(
+                listing,
+                admin_user_id,
+                report,
+                report_lock,
+                rate_limiter,
+                session,
+            ),
+            name=f"research:{listing.get('address', idx)}",
+        )
+        for idx, listing in enumerate(listings)
+    ]
+    research_outcomes = await asyncio.gather(*research_tasks, return_exceptions=True)
+
+    synthesis_jobs: list[_SynthesisJob] = []
+    for listing, outcome in zip(listings, research_outcomes):
+        address = str(listing.get("address", "")).strip() or "(missing address)"
+        if isinstance(outcome, BaseException):
+            if isinstance(outcome, KeyboardInterrupt):
+                raise outcome
+            report_error(log, "listing_research_failed", outcome, address=address)
+            print(f"  [research] FAILED {address} — {outcome}")
+            async with report_lock:
+                report["failed"].append({"address": address, "error": str(outcome)})
+            continue
+        if outcome is not None:
+            synthesis_jobs.append(outcome)
+
+    if synthesis_jobs:
+        print("\n" + "=" * 60)
+        print(
+            f"STAGE 3 - Parallel synthesis ({len(synthesis_jobs)} listings, "
+            f"max {engine.HARVESTER_RPM_PER_MODEL} calls/min per model)"
+        )
+        print("=" * 60)
+
+        synthesis_tasks = [
+            asyncio.create_task(
+                _synthesize_listing(
+                    job,
+                    admin_user_id,
+                    report,
+                    report_lock,
+                    model_state,
+                    rate_limiter,
+                    session,
+                ),
+                name=f"synthesis:{job.address}",
+            )
+            for job in synthesis_jobs
+        ]
+        synthesis_outcomes = await asyncio.gather(*synthesis_tasks, return_exceptions=True)
+
+        for job, outcome in zip(synthesis_jobs, synthesis_outcomes):
+            if isinstance(outcome, BaseException):
+                if isinstance(outcome, KeyboardInterrupt):
+                    raise outcome
+                report_error(
+                    log, "listing_synthesis_failed", outcome, address=job.address
+                )
+                print(f"  [synthesis] FAILED {job.address} — {outcome}")
+                async with report_lock:
+                    report["failed"].append(
+                        {"address": job.address, "error": str(outcome)}
+                    )
 
     print("\n" + "=" * 60)
     print("HARVEST COMPLETE")
@@ -399,6 +586,11 @@ def run_harvester_pipeline(admin_user_id: str) -> dict[str, Any]:
         saved=len(report["saved"]),
     )
     return report
+
+
+def run_harvester_pipeline(admin_user_id: str) -> dict[str, Any]:
+    """Sync entry point for CLI and Streamlit."""
+    return asyncio.run(run_harvester_pipeline_async(admin_user_id))
 
 
 def _configure_stdio() -> None:
@@ -431,7 +623,8 @@ def _render_streamlit_app() -> None:
     st.title("🌾 Hot Market Harvester")
     st.caption(
         "Upstate NY (priority) → Charlotte, Raleigh, Charleston, Ohio, DFW, Austin • "
-        "Stage 1: grounded discovery • Stage 2: Gemma research • Stage 3: Synthesis + Quantum"
+        "Stage 1: grounded discovery • Stages 2–3: parallel research & synthesis "
+        f"(≤{engine.HARVESTER_RPM_PER_MODEL} API calls/min per model)"
     )
 
     render_market_pulse()
@@ -454,7 +647,9 @@ def _render_streamlit_app() -> None:
 
     st.info(
         f"Stage 1 uses Search Grounding (≤{engine.MAX_DISCOVERY_LISTINGS} listings under "
-        f"${engine.MAX_DISCOVERY_PRICE:,}, suburbs included). Stage 3 skips Poor condition or "
+        f"${engine.MAX_DISCOVERY_PRICE:,}, suburbs included). After discovery, all listings are "
+        f"researched in parallel, then synthesized in parallel (rate-limited to "
+        f"{engine.HARVESTER_RPM_PER_MODEL} calls/min per model). Stage 3 skips Poor condition or "
         f"price > ${engine.MAX_SYNTHESIS_PRICE:,}."
     )
 

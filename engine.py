@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import contextvars
 import json
 import os
 import random
 import re
 import time
+from collections import defaultdict, deque
 from dataclasses import dataclass
 from datetime import date
 from typing import Any, cast
@@ -104,6 +106,9 @@ BACKOFF_MAX_SEC = 60.0
 BACKOFF_MULTIPLIER = 2.0
 # Upper bound for fixed sleeps; prefer retry_delay_seconds() for retries.
 RATE_LIMIT_BACKOFF_SEC = BACKOFF_MAX_SEC
+# Harvester parallel pipeline: stay under 15 RPM account cap (~10 per model).
+HARVESTER_RPM_PER_MODEL = 10
+HARVESTER_RPM_WINDOW_SEC = 60.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,6 +172,33 @@ def retry_delay_seconds(
     """Full-jitter exponential backoff for retry attempt index (0-based)."""
     exp_cap = min(base_sec * (multiplier**attempt), max_sec)
     return random.uniform(0.0, exp_cap)
+
+
+class ModelRateLimiter:
+    """Sliding-window limiter: at most N API calls per model per minute."""
+
+    def __init__(
+        self,
+        requests_per_minute: int = HARVESTER_RPM_PER_MODEL,
+        window_sec: float = HARVESTER_RPM_WINDOW_SEC,
+    ) -> None:
+        self._rpm = requests_per_minute
+        self._window_sec = window_sec
+        self._timestamps: dict[str, deque[float]] = defaultdict(deque)
+        self._locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+
+    async def acquire(self, model: str) -> None:
+        async with self._locks[model]:
+            while True:
+                now = time.monotonic()
+                window = self._timestamps[model]
+                while window and now - window[0] >= self._window_sec:
+                    window.popleft()
+                if len(window) < self._rpm:
+                    window.append(now)
+                    return
+                wait_sec = self._window_sec - (now - window[0])
+                await asyncio.sleep(max(wait_sec, 0.05))
 
 
 def _log_retry(
@@ -331,6 +363,101 @@ def generate_with_retry(
                     retriable=True,
                 )
                 time.sleep(delay_sec)
+                continue
+            _log_retry(
+                model=model,
+                attempt=attempt,
+                max_retries=max_retries,
+                error=e,
+                delay_sec=0.0,
+                total_wait_sec=total_wait_sec,
+                retriable=False,
+            )
+            raise
+
+    raise RuntimeError(
+        f"Max retries ({max_retries}) exceeded for model={model}, "
+        f"total_wait_sec={total_wait_sec:.2f}"
+    ) from last_error
+
+
+async def generate_with_retry_async(
+    model: str,
+    contents: str,
+    *,
+    use_search: bool = False,
+    max_retries: int = MAX_API_RETRIES,
+    session: GenaiSession | None = None,
+    rate_limiter: ModelRateLimiter | None = None,
+) -> str:
+    """Async Gemini call with optional per-model RPM limiting and backoff."""
+    active = session or get_session()
+    config = None
+    if use_search:
+        config = types.GenerateContentConfig(
+            tools=[types.Tool(google_search=types.GoogleSearch())]
+        )
+
+    last_error: BaseException | None = None
+    total_wait_sec = 0.0
+
+    for attempt in range(max_retries):
+        try:
+            if rate_limiter is not None:
+                await rate_limiter.acquire(model)
+            response = await active.client.aio.models.generate_content(
+                model=model,
+                contents=contents,
+                config=config,
+            )
+            text = _extract_response_text(response)
+            if not text.strip() and attempt < max_retries - 1:
+                delay_sec = retry_delay_seconds(attempt)
+                total_wait_sec += delay_sec
+                _log_retry(
+                    model=model,
+                    attempt=attempt,
+                    max_retries=max_retries,
+                    error=RuntimeError("empty response text"),
+                    delay_sec=delay_sec,
+                    total_wait_sec=total_wait_sec,
+                    retriable=True,
+                )
+                await asyncio.sleep(delay_sec)
+                continue
+            if attempt > 0:
+                print(
+                    f"[gemini-retry] model={model} succeeded "
+                    f"after {attempt + 1} attempt(s), total_wait_sec={total_wait_sec:.2f}"
+                )
+            return text
+        except (errors.ClientError, errors.ServerError, errors.APIError) as e:
+            last_error = e
+            if is_daily_quota_exhausted(e):
+                _log_retry(
+                    model=model,
+                    attempt=attempt,
+                    max_retries=max_retries,
+                    error=e,
+                    delay_sec=0.0,
+                    total_wait_sec=total_wait_sec,
+                    retriable=False,
+                )
+                raise
+            will_retry = _is_retriable(e) and attempt < max_retries - 1
+            if will_retry:
+                delay_sec = retry_delay_seconds(attempt)
+                total_wait_sec += delay_sec
+                _log_retry(
+                    model=model,
+                    attempt=attempt,
+                    max_retries=max_retries,
+                    error=e,
+                    delay_sec=delay_sec,
+                    total_wait_sec=total_wait_sec,
+                    retriable=True,
+                )
+                await asyncio.sleep(delay_sec)
                 continue
             _log_retry(
                 model=model,
@@ -903,11 +1030,8 @@ def discover_hot_market_listings(
     return []
 
 
-def research_property(address: str) -> dict[str, Any]:
-    """
-    Stage 2 (Research): Gemma extraction with Search Grounding.
-    """
-    prompt = f"""Research the residential property at: {address}
+def _research_prompt(address: str) -> str:
+    return f"""Research the residential property at: {address}
 
 Use live listing search results (Zillow, Redfin, Realtor.com, MLS, county records).
 Read the FULL listing description and agent remarks — not just headline stats or Rent Zestimate.
@@ -939,12 +1063,8 @@ Return ONLY JSON:
   "listing_rent_notes": ""
 }}"""
 
-    raw = generate_with_retry(
-        RESEARCH_MODEL,
-        prompt,
-        use_search=_model_supports_grounding(RESEARCH_MODEL),
-    )
-    data = _extract_json(raw)
+
+def _normalize_research_payload(address: str, data: Any) -> dict[str, Any]:
     if not isinstance(data, dict):
         return {
             "address": address,
@@ -969,6 +1089,35 @@ Return ONLY JSON:
     data["stated_gross_monthly_rent"] = safe_float(data.get("stated_gross_monthly_rent"))
     data["listing_rent_notes"] = str(data.get("listing_rent_notes", "")).strip()
     return data
+
+
+def research_property(address: str) -> dict[str, Any]:
+    """
+    Stage 2 (Research): Gemma extraction with Search Grounding.
+    """
+    raw = generate_with_retry(
+        RESEARCH_MODEL,
+        _research_prompt(address),
+        use_search=_model_supports_grounding(RESEARCH_MODEL),
+    )
+    return _normalize_research_payload(address, _extract_json(raw))
+
+
+async def research_property_async(
+    address: str,
+    *,
+    rate_limiter: ModelRateLimiter | None = None,
+    session: GenaiSession | None = None,
+) -> dict[str, Any]:
+    """Async Stage 2 research for parallel harvester workers."""
+    raw = await generate_with_retry_async(
+        RESEARCH_MODEL,
+        _research_prompt(address),
+        use_search=_model_supports_grounding(RESEARCH_MODEL),
+        rate_limiter=rate_limiter,
+        session=session,
+    )
+    return _normalize_research_payload(address, _extract_json(raw))
 
 
 _DISALLOWED_PROPERTY_TYPE_RE = re.compile(
@@ -1023,19 +1172,14 @@ def should_skip_synthesis(research: dict[str, Any]) -> bool:
     return synthesis_skip_reason(research) is not None
 
 
-def synthesize_harvest_property(
-    address: str,
+def _synthesis_prompt(
     research: dict[str, Any],
     market_city: str,
     *,
-    model: str | None = None,
     user_id: str | None = None,
-) -> dict[str, Any]:
-    """
-    Stage 3 (Synthesis): Investment summary from research data only.
-    """
+) -> str:
     kb_context = get_kb_context(user_id)
-    prompt = f"""You are an expert real estate underwriter for {market_city} hot market investments.
+    return f"""You are an expert real estate underwriter for {market_city} hot market investments.
 
 CONTEXT FROM DATABASE:
 {kb_context}
@@ -1074,30 +1218,39 @@ Return ONLY JSON with these keys:
 
 No currency symbols or commas outside JSON."""
 
-    raw = generate_with_retry(model or SYNTHESIS_MODEL, prompt, use_search=False)
-    data = _extract_json(raw)
+
+def _synthesis_fallback_payload(research: dict[str, Any]) -> dict[str, Any]:
+    price = safe_float(research.get("price"))
+    taxes = safe_float(research.get("taxes"))
+    return {
+        "price": price,
+        "year": 1980,
+        "rent": 0.0,
+        "tax_rate": (taxes / price * 100) if price > 0 else 0.0,
+        "hoa": safe_float(research.get("hoa")),
+        "insurance": 100.0,
+        "summary": "Synthesis failed; partial record from research.",
+        "maint_percent": 4.0,
+        "predicted_value": price,
+        "prediction_reasoning": "Research-only fallback.",
+        "location_score": 5.0,
+        "vacancy_rate": 5.0,
+        "management_fee": 10.0,
+        "property_label": "Needs Review",
+        "square_footage": research.get("square_footage", 0),
+        "property_condition": research.get("property_condition", "Unknown"),
+        "sources": [],
+    }
+
+
+def _finalize_synthesis_payload(
+    address: str,
+    research: dict[str, Any],
+    market_city: str,
+    data: Any,
+) -> dict[str, Any]:
     if not isinstance(data, dict):
-        price = safe_float(research.get("price"))
-        taxes = safe_float(research.get("taxes"))
-        data = {
-            "price": price,
-            "year": 1980,
-            "rent": 0.0,
-            "tax_rate": (taxes / price * 100) if price > 0 else 0.0,
-            "hoa": safe_float(research.get("hoa")),
-            "insurance": 100.0,
-            "summary": "Synthesis failed; partial record from research.",
-            "maint_percent": 4.0,
-            "predicted_value": price,
-            "prediction_reasoning": "Research-only fallback.",
-            "location_score": 5.0,
-            "vacancy_rate": 5.0,
-            "management_fee": 10.0,
-            "property_label": "Needs Review",
-            "square_footage": research.get("square_footage", 0),
-            "property_condition": research.get("property_condition", "Unknown"),
-            "sources": [],
-        }
+        data = _synthesis_fallback_payload(research)
 
     data["address"] = address
     data["market_city"] = market_city
@@ -1108,6 +1261,52 @@ No currency symbols or commas outside JSON."""
     _sanitize_synthesis_numerics(data)
     enriched = enrich_with_forecast(data)
     return attach_data_provenance(enriched, research, pipeline="harvester")
+
+
+def synthesize_harvest_property(
+    address: str,
+    research: dict[str, Any],
+    market_city: str,
+    *,
+    model: str | None = None,
+    user_id: str | None = None,
+) -> dict[str, Any]:
+    """
+    Stage 3 (Synthesis): Investment summary from research data only.
+    """
+    active_model = model or SYNTHESIS_MODEL
+    raw = generate_with_retry(
+        active_model,
+        _synthesis_prompt(research, market_city, user_id=user_id),
+        use_search=False,
+    )
+    return _finalize_synthesis_payload(
+        address, research, market_city, _extract_json(raw)
+    )
+
+
+async def synthesize_harvest_property_async(
+    address: str,
+    research: dict[str, Any],
+    market_city: str,
+    *,
+    model: str | None = None,
+    user_id: str | None = None,
+    rate_limiter: ModelRateLimiter | None = None,
+    session: GenaiSession | None = None,
+) -> dict[str, Any]:
+    """Async Stage 3 synthesis for parallel harvester workers."""
+    active_model = model or SYNTHESIS_MODEL
+    raw = await generate_with_retry_async(
+        active_model,
+        _synthesis_prompt(research, market_city, user_id=user_id),
+        use_search=False,
+        rate_limiter=rate_limiter,
+        session=session,
+    )
+    return _finalize_synthesis_payload(
+        address, research, market_city, _extract_json(raw)
+    )
 
 
 def enrich_with_forecast(property_data: dict[str, Any]) -> dict[str, Any]:
