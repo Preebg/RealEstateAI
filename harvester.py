@@ -427,14 +427,91 @@ async def _synthesize_listing(
     )
 
 
+async def _run_synthesis_safe(
+    job: _SynthesisJob,
+    admin_user_id: str,
+    report: dict[str, Any],
+    report_lock: asyncio.Lock,
+    model_state: _HarvesterModelState,
+    rate_limiter: engine.ModelRateLimiter,
+    session: engine.GenaiSession,
+) -> None:
+    """Stage 3 wrapper that records synthesis failures in the harvest report."""
+    try:
+        await _synthesize_listing(
+            job,
+            admin_user_id,
+            report,
+            report_lock,
+            model_state,
+            rate_limiter,
+            session,
+        )
+    except Exception as exc:
+        if isinstance(exc, KeyboardInterrupt):
+            raise
+        report_error(log, "listing_synthesis_failed", exc, address=job.address)
+        print(f"  [synthesis] FAILED {job.address} — {exc}")
+        async with report_lock:
+            report["failed"].append({"address": job.address, "error": str(exc)})
+
+
+async def _research_and_schedule_synthesis(
+    listing: dict[str, Any],
+    admin_user_id: str,
+    report: dict[str, Any],
+    report_lock: asyncio.Lock,
+    model_state: _HarvesterModelState,
+    rate_limiter: engine.ModelRateLimiter,
+    session: engine.GenaiSession,
+    synthesis_tasks: list[asyncio.Task[None]],
+) -> None:
+    """Run research for one listing; start synthesis immediately when it passes filters."""
+    address = str(listing.get("address", "")).strip() or "(missing address)"
+    try:
+        job = await _research_listing(
+            listing,
+            admin_user_id,
+            report,
+            report_lock,
+            rate_limiter,
+            session,
+        )
+    except Exception as exc:
+        if isinstance(exc, KeyboardInterrupt):
+            raise
+        report_error(log, "listing_research_failed", exc, address=address)
+        print(f"  [research] FAILED {address} — {exc}")
+        async with report_lock:
+            report["failed"].append({"address": address, "error": str(exc)})
+        return
+
+    if job is None:
+        return
+
+    synthesis_tasks.append(
+        asyncio.create_task(
+            _run_synthesis_safe(
+                job,
+                admin_user_id,
+                report,
+                report_lock,
+                model_state,
+                rate_limiter,
+                session,
+            ),
+            name=f"synthesis:{job.address}",
+        )
+    )
+
+
 async def run_harvester_pipeline_async(admin_user_id: str) -> dict[str, Any]:
     """
     Execute the full 3-stage harvester once per run.
 
     Stage 1: Grounded discovery (flash -> flash-lite -> gemma) — up to 25 listings.
-    Stage 2: Parallel per-address research (gemma-4-31b-it), capped at 10 RPM.
-    Stage 3: Parallel synthesis + quantum + KB save (gemini-3.1-flash-lite-preview),
-    capped at 10 RPM.
+    Stages 2–3: Pipelined research -> synthesis (each property synthesizes as soon as
+    research finishes; gemma research + flash-lite synthesis, capped at 10 RPM per model).
 
     On daily quota exhaustion, discovery and synthesis switch to their
     configured fallback models for the remainder of the run.
@@ -493,78 +570,32 @@ async def run_harvester_pipeline_async(admin_user_id: str) -> dict[str, Any]:
 
     print("\n" + "=" * 60)
     print(
-        f"STAGE 2 - Parallel research ({len(listings)} listings, "
+        f"STAGES 2–3 - Pipelined research -> synthesis ({len(listings)} listings, "
         f"max {engine.HARVESTER_RPM_PER_MODEL} calls/min per model)"
     )
     print("=" * 60)
 
+    synthesis_tasks: list[asyncio.Task[None]] = []
     research_tasks = [
         asyncio.create_task(
-            _research_listing(
+            _research_and_schedule_synthesis(
                 listing,
                 admin_user_id,
                 report,
                 report_lock,
+                model_state,
                 rate_limiter,
                 session,
+                synthesis_tasks,
             ),
             name=f"research:{listing.get('address', idx)}",
         )
         for idx, listing in enumerate(listings)
     ]
-    research_outcomes = await asyncio.gather(*research_tasks, return_exceptions=True)
+    await asyncio.gather(*research_tasks)
 
-    synthesis_jobs: list[_SynthesisJob] = []
-    for listing, outcome in zip(listings, research_outcomes):
-        address = str(listing.get("address", "")).strip() or "(missing address)"
-        if isinstance(outcome, BaseException):
-            if isinstance(outcome, KeyboardInterrupt):
-                raise outcome
-            report_error(log, "listing_research_failed", outcome, address=address)
-            print(f"  [research] FAILED {address} — {outcome}")
-            async with report_lock:
-                report["failed"].append({"address": address, "error": str(outcome)})
-            continue
-        if outcome is not None:
-            synthesis_jobs.append(outcome)
-
-    if synthesis_jobs:
-        print("\n" + "=" * 60)
-        print(
-            f"STAGE 3 - Parallel synthesis ({len(synthesis_jobs)} listings, "
-            f"max {engine.HARVESTER_RPM_PER_MODEL} calls/min per model)"
-        )
-        print("=" * 60)
-
-        synthesis_tasks = [
-            asyncio.create_task(
-                _synthesize_listing(
-                    job,
-                    admin_user_id,
-                    report,
-                    report_lock,
-                    model_state,
-                    rate_limiter,
-                    session,
-                ),
-                name=f"synthesis:{job.address}",
-            )
-            for job in synthesis_jobs
-        ]
-        synthesis_outcomes = await asyncio.gather(*synthesis_tasks, return_exceptions=True)
-
-        for job, outcome in zip(synthesis_jobs, synthesis_outcomes):
-            if isinstance(outcome, BaseException):
-                if isinstance(outcome, KeyboardInterrupt):
-                    raise outcome
-                report_error(
-                    log, "listing_synthesis_failed", outcome, address=job.address
-                )
-                print(f"  [synthesis] FAILED {job.address} — {outcome}")
-                async with report_lock:
-                    report["failed"].append(
-                        {"address": job.address, "error": str(outcome)}
-                    )
+    if synthesis_tasks:
+        await asyncio.gather(*synthesis_tasks)
 
     print("\n" + "=" * 60)
     print("HARVEST COMPLETE")
@@ -624,7 +655,7 @@ def _render_streamlit_app() -> None:
     st.title("🌾 Hot Market Harvester")
     st.caption(
         "Upstate NY (priority) → Charlotte, Raleigh, Charleston, Ohio, DFW, Austin • "
-        "Stage 1: grounded discovery • Stages 2–3: parallel research & synthesis "
+        "Stage 1: grounded discovery • Stages 2–3: pipelined research → synthesis "
         f"(≤{engine.HARVESTER_RPM_PER_MODEL} API calls/min per model)"
     )
 
@@ -648,10 +679,10 @@ def _render_streamlit_app() -> None:
 
     st.info(
         f"Stage 1 uses Search Grounding (≤{engine.MAX_DISCOVERY_LISTINGS} listings under "
-        f"${engine.MAX_DISCOVERY_PRICE:,}, suburbs included). After discovery, all listings are "
-        f"researched in parallel, then synthesized in parallel (rate-limited to "
-        f"{engine.HARVESTER_RPM_PER_MODEL} calls/min per model). Stage 3 skips Poor condition or "
-        f"price > ${engine.MAX_SYNTHESIS_PRICE:,}."
+        f"${engine.MAX_DISCOVERY_PRICE:,}, suburbs included). After discovery, each listing is "
+        f"researched in parallel and sent to synthesis as soon as research finishes "
+        f"(rate-limited to {engine.HARVESTER_RPM_PER_MODEL} calls/min per model). "
+        f"Synthesis skips Poor condition or price > ${engine.MAX_SYNTHESIS_PRICE:,}."
     )
 
     if st.button("🚀 Run Full Harvest", type="primary"):

@@ -141,8 +141,9 @@ For every 90 minutes, use a loop script or systemd timer with `OnUnitActiveSec=9
 | Research | gemma-4-31b-it | up to ~25 | **Parallel** (≤10 calls/min) |
 | Synthesis | gemini-3.1-flash-lite-preview | up to ~25 | **Parallel** (≤10 calls/min) |
 
-Stages 2 and 3 run all listings concurrently via `asyncio`, with a per-model sliding-window
-rate limiter (10 requests per 60 seconds) to stay under the ~15 RPM account cap.
+Stages 2 and 3 are pipelined via `asyncio`: research runs in parallel, and each property
+is sent to synthesis as soon as its research finishes (no wait for the full research batch).
+A per-model sliding-window rate limiter (10 requests per 60 seconds) stays under the ~15 RPM cap.
 
 Every **1.5 hours** ≈ **16 runs/day** → plan Gemini/Supabase limits accordingly.
 
