@@ -114,6 +114,31 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def _normalize_zip_code(zip_code: Any, address: str | None = None) -> str:
+    """Coerce zip_code from DB/DataFrame (float, NaN, int, str) to a 5-digit string."""
+    if zip_code is not None:
+        try:
+            if pd.isna(zip_code):
+                zip_code = None
+        except (TypeError, ValueError):
+            pass
+
+    if zip_code not in (None, ""):
+        text = str(zip_code).strip()
+        if text:
+            try:
+                return f"{int(float(text)):05d}"
+            except (TypeError, ValueError):
+                if len(text) >= 5 and text[:5].isdigit():
+                    return text[:5]
+
+    if address:
+        parsed = parse_zipcode_from_address(str(address).strip())
+        if parsed:
+            return parsed
+    return ""
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def load_global_portfolio_properties() -> list[dict[str, Any]]:
     """
@@ -165,7 +190,7 @@ def build_portfolio_dataframe(properties: list[dict[str, Any]]) -> pd.DataFrame:
             or "—"
         )
         market_city = prop.get("market_city") or _infer_market_city(address) or "—"
-        zip_code = str(prop.get("zip_code") or "").strip() or parse_zipcode_from_address(address)
+        zip_code = _normalize_zip_code(prop.get("zip_code"), address)
 
         records.append(
             {
@@ -220,20 +245,21 @@ def _coords_from_market_center(address: str, market_key: str) -> tuple[float, fl
 
 
 def resolve_coordinates_local(
-    address: str,
-    zip_code: str | None,
-    market_city: str,
+    address: Any,
+    zip_code: Any,
+    market_city: Any,
 ) -> tuple[float | None, float | None]:
     """
     Instant coordinate resolution — no network I/O.
 
     Priority: known ZIP centroid → ZIP prefix market → address/market text.
     """
-    normalized = (address or "").strip()
+    normalized = str(address or "").strip()
     if not normalized:
         return None, None
 
-    zip_val = (zip_code or "").strip() or parse_zipcode_from_address(normalized) or ""
+    zip_val = _normalize_zip_code(zip_code, normalized)
+    market_city_text = str(market_city or "").strip()
 
     if zip_val in ZIP_CENTROIDS:
         base_lat, base_lon = ZIP_CENTROIDS[zip_val]
@@ -245,7 +271,7 @@ def resolve_coordinates_local(
     if zip_val.startswith("132"):
         return _coords_from_market_center(normalized, "Syracuse, NY")
 
-    market_key = _market_key_from_city(market_city) or _infer_market_city(normalized)
+    market_key = _market_key_from_city(market_city_text) or _infer_market_city(normalized)
     if market_key:
         return _coords_from_market_center(normalized, market_key)
 
@@ -300,10 +326,11 @@ def apply_map_colors(df: pd.DataFrame) -> pd.DataFrame:
         return df
 
     colored = df.copy()
-    min_p = colored["profitability_index"].min()
-    max_p = colored["profitability_index"].max()
-    colored["color"] = colored["profitability_index"].apply(
-        lambda v: _profitability_to_color(v, min_p, max_p)
+    profitability = colored["profitability_index"].fillna(0.0)
+    min_p = float(profitability.min())
+    max_p = float(profitability.max())
+    colored["color"] = profitability.apply(
+        lambda v: _profitability_to_color(float(v), min_p, max_p)
     )
     return colored
 
