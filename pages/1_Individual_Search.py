@@ -32,8 +32,12 @@ from knowledge_base import (
     is_rent_outlier,
     lookup_property,
     render_auth_page,
+    is_property_saved_for_user,
+    render_user_saved_properties_sidebar,
     save_knowledge_base,
+    save_property_to_user_account,
     save_user_property_override,
+    unsave_property_from_user_account,
     user_has_override_changes,
 )
 from market_pulse import render_market_pulse
@@ -86,6 +90,7 @@ with st.sidebar:
         render_guest_sidebar()
     else:
         render_auth_sidebar()
+        render_user_saved_properties_sidebar()
     st.divider()
     render_market_pulse()
     st.divider()
@@ -524,6 +529,74 @@ if st.session_state.property_data:
         disabled=not hitl_is_outlier,
         help="Required when your rent override is more than 50% away from the AI estimate.",
     )
+
+    _logged_in_user = get_logged_in_user()
+    _account_property_id = (
+        str(property_id) if property_id else get_property_id_by_address(address)
+    )
+    _is_saved_to_account = (
+        is_property_saved_for_user(_logged_in_user["id"], _account_property_id)
+        if _logged_in_user and _account_property_id
+        else False
+    )
+
+    if not _guest_mode:
+        st.subheader("⭐ My Account")
+        if _is_saved_to_account:
+            st.success("This property is saved to your account.")
+            if st.button("Remove from My Account", key="unsave_account_btn"):
+                if _logged_in_user and _account_property_id:
+                    if unsave_property_from_user_account(
+                        _logged_in_user["id"], _account_property_id
+                    ):
+                        st.cache_data.clear()
+                        st.success(f"Removed {address} from your saved properties.")
+                        st.rerun()
+        elif st.button("⭐ Save to My Account", type="primary", key="save_account_btn"):
+            if hitl_is_outlier and not str(override_notes).strip():
+                st.error(
+                    "An override note is required when rent differs by more than 50% from the AI."
+                )
+                st.stop()
+
+            if not _logged_in_user:
+                st.error("You must be signed in to save.")
+                st.stop()
+
+            account_override_payload = {
+                "rent": final_monthly_rent,
+                "maint_percent": final_maint_percent,
+                "vacancy_rate": user_vacancy_reserve,
+                "management_fee": user_management_fee,
+                "is_outlier": hitl_is_outlier,
+                "override_notes": str(override_notes).strip(),
+            }
+
+            save_payload = None
+            if not from_kb:
+                save_payload = dict(property_info)
+                save_payload["address"] = address
+                save_payload["from_kb"] = True
+                save_payload["location_score"] = location_score
+                save_payload["appreciation_forecast"] = appreciation_forecast
+                save_payload["property_category"] = branding_label
+                save_payload.update(account_override_payload)
+
+            result_id = save_property_to_user_account(
+                _logged_in_user["id"],
+                property_id=_account_property_id,
+                property_data=save_payload,
+                override_payload=account_override_payload if from_kb else None,
+            )
+            if result_id is None:
+                st.error("Save failed. Check your connection and try again.")
+                st.stop()
+
+            st.cache_data.clear()
+            st.success(f"Saved {address} to your account.")
+            st.rerun()
+    else:
+        st.caption("Sign in to save properties to your personal account.")
 
     save_label = (
         "💾 Save My Assumptions"

@@ -680,6 +680,58 @@ class TestZipcodeParsing(unittest.TestCase):
         self.assertNotIn("rent", payload)
 
 
+class TestUserSavedProperties(unittest.TestCase):
+    def test_save_property_to_user_account_bookmarks_existing_property(self):
+        from unittest.mock import MagicMock, patch
+
+        from knowledge_base import save_property_to_user_account
+
+        mock_client = MagicMock()
+        mock_saved = MagicMock()
+        mock_client.table.return_value = mock_saved
+        mock_saved.upsert.return_value.execute.return_value = MagicMock(data=[{}])
+
+        user_id = "7f35bc1e-9de5-484d-8f73-27fd3da733eb"
+        property_id = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+
+        with patch("knowledge_base.get_client", return_value=mock_client):
+            with patch(
+                "knowledge_base.save_user_property_override",
+                return_value=MagicMock(),
+            ) as mock_override:
+                result = save_property_to_user_account(
+                    user_id,
+                    property_id=property_id,
+                    override_payload={"rent": 1500.0},
+                )
+
+        self.assertEqual(result, property_id)
+        mock_override.assert_called_once()
+        mock_client.table.assert_called_with("user_saved_properties")
+        bookmark_payload = mock_saved.upsert.call_args.args[0]
+        self.assertEqual(bookmark_payload["user_id"], user_id)
+        self.assertEqual(bookmark_payload["property_id"], property_id)
+
+    def test_is_property_saved_for_user(self):
+        from unittest.mock import MagicMock, patch
+
+        from knowledge_base import is_property_saved_for_user
+
+        mock_client = MagicMock()
+        mock_table = MagicMock()
+        mock_client.table.return_value = mock_table
+        mock_table.select.return_value.eq.return_value.eq.return_value.limit.return_value.execute.return_value = MagicMock(
+            data=[{"id": "bookmark-id"}]
+        )
+
+        user_id = "7f35bc1e-9de5-484d-8f73-27fd3da733eb"
+        property_id = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+
+        with patch("knowledge_base.get_client", return_value=mock_client):
+            self.assertTrue(is_property_saved_for_user(user_id, property_id))
+            self.assertFalse(is_property_saved_for_user(user_id, None))
+
+
 class TestUuidValidation(unittest.TestCase):
     def test_rejects_typo_uuid_with_letter_l(self):
         from knowledge_base import is_valid_uuid

@@ -679,6 +679,250 @@ def save_knowledge_base(
     return override_response or canonical_response
 
 
+def _fetch_user_saved_rows(user_id: str) -> list[dict[str, Any]]:
+    """Return bookmark rows for the user, newest first."""
+    if not is_valid_uuid(user_id):
+        return []
+    supabase = get_client()
+    try:
+        response = (
+            supabase.table("user_saved_properties")
+            .select("*")
+            .eq("user_id", user_id)
+            .order("saved_at", desc=True)
+            .execute()
+        )
+    except APIError as exc:
+        report_error(log, "kb_saved_fetch_failed", exc, user_id=user_id)
+        return []
+    return response.data or []
+
+
+def is_property_saved_for_user(user_id: str, property_id: str | None) -> bool:
+    """True when the user has bookmarked this canonical property."""
+    if not is_valid_uuid(user_id) or not property_id or not is_valid_uuid(property_id):
+        return False
+    supabase = get_client()
+    try:
+        response = (
+            supabase.table("user_saved_properties")
+            .select("id")
+            .eq("user_id", user_id)
+            .eq("property_id", property_id)
+            .limit(1)
+            .execute()
+        )
+    except APIError as exc:
+        report_error(
+            log,
+            "kb_saved_lookup_failed",
+            exc,
+            user_id=user_id,
+            property_id=property_id,
+        )
+        return False
+    return bool(response.data)
+
+
+def save_property_to_user_account(
+    user_id: str,
+    *,
+    property_id: str | None = None,
+    property_data: dict[str, Any] | None = None,
+    override_payload: dict[str, Any] | None = None,
+    show_errors: bool = True,
+) -> str | None:
+    """
+    Bookmark a property on the user's account for later revisit.
+
+    Ensures a canonical KB row exists when property_data is supplied.
+    Optionally persists underwriting overrides. Returns property_id on success.
+    """
+    if in_streamlit_app():
+        from share_access import is_guest_viewer
+
+        if is_guest_viewer():
+            if show_errors and st is not None:
+                st.error("Sign in to save properties to your account.")
+            return None
+
+    if not user_id or not is_valid_uuid(user_id):
+        raise ValueError(f"user_id must be a valid UUID, got: {user_id!r}")
+
+    resolved_id = str(property_id).strip() if property_id else None
+    if resolved_id and not is_valid_uuid(resolved_id):
+        resolved_id = None
+
+    if property_data and not resolved_id:
+        payload = dict(property_data)
+        if override_payload:
+            payload.update(override_payload)
+        kb_result = save_knowledge_base(
+            payload,
+            user_id,
+            show_errors=show_errors,
+            save_override=bool(override_payload),
+        )
+        if kb_result is None:
+            return None
+        address = payload.get("address")
+        resolved_id = get_property_id_by_address(str(address or ""))
+        if not resolved_id and getattr(kb_result, "data", None):
+            row = kb_result.data[0]
+            if row.get("id"):
+                resolved_id = str(row["id"])
+    elif resolved_id and override_payload:
+        if save_user_property_override(
+            user_id,
+            resolved_id,
+            override_payload,
+            show_errors=show_errors,
+        ) is None:
+            return None
+
+    if not resolved_id and property_data:
+        resolved_id = get_property_id_by_address(str(property_data.get("address") or ""))
+
+    if not resolved_id:
+        if show_errors and st is not None:
+            st.error("Could not resolve property ID for this address.")
+        return None
+
+    supabase = get_client()
+    try:
+        supabase.table("user_saved_properties").upsert(
+            {"user_id": user_id, "property_id": resolved_id},
+            on_conflict="user_id,property_id",
+        ).execute()
+    except APIError as exc:
+        report_error(
+            log,
+            "kb_saved_upsert_failed",
+            exc,
+            user_id=user_id,
+            property_id=resolved_id,
+        )
+        if show_errors and st is not None:
+            st.error(f"Failed to save property to your account: {exc}")
+        return None
+
+    log.info(
+        "kb_saved_upsert_success",
+        user_id=user_id,
+        property_id=resolved_id,
+    )
+    return resolved_id
+
+
+def unsave_property_from_user_account(
+    user_id: str,
+    property_id: str,
+    *,
+    show_errors: bool = True,
+) -> bool:
+    """Remove a bookmarked property from the user's account."""
+    if in_streamlit_app():
+        from share_access import is_guest_viewer
+
+        if is_guest_viewer():
+            if show_errors and st is not None:
+                st.error("Sign in to manage saved properties.")
+            return False
+
+    if not user_id or not is_valid_uuid(user_id):
+        raise ValueError(f"user_id must be a valid UUID, got: {user_id!r}")
+    if not property_id or not is_valid_uuid(property_id):
+        raise ValueError(f"property_id must be a valid UUID, got: {property_id!r}")
+
+    supabase = get_client()
+    try:
+        supabase.table("user_saved_properties").delete().eq(
+            "user_id", user_id
+        ).eq("property_id", property_id).execute()
+    except APIError as exc:
+        report_error(
+            log,
+            "kb_saved_delete_failed",
+            exc,
+            user_id=user_id,
+            property_id=property_id,
+        )
+        if show_errors and st is not None:
+            st.error(f"Failed to remove saved property: {exc}")
+        return False
+
+    log.info(
+        "kb_saved_delete_success",
+        user_id=user_id,
+        property_id=property_id,
+    )
+    return True
+
+
+def get_user_saved_properties(user_id: str | None = None) -> list[dict[str, Any]]:
+    """Bookmarked properties merged with the user's underwriting overrides."""
+    uid = _resolve_user_id(user_id)
+    if not uid:
+        return []
+
+    saved_rows = _fetch_user_saved_rows(uid)
+    if not saved_rows:
+        return []
+
+    props_by_id = {
+        str(row["id"]): row for row in _fetch_properties(uid) if row.get("id")
+    }
+    results: list[dict[str, Any]] = []
+    for saved in saved_rows:
+        prop_id = str(saved.get("property_id") or "")
+        canonical = props_by_id.get(prop_id)
+        if not canonical:
+            continue
+        enriched = dict(canonical)
+        enriched["saved_at"] = saved.get("saved_at")
+        enriched["user_saved_id"] = saved.get("id")
+        results.append(enriched)
+    return results
+
+
+def render_user_saved_properties_sidebar() -> None:
+    """Sidebar list of bookmarked properties — click to reload analysis."""
+    if not in_streamlit_app() or st is None:
+        return
+
+    from property_nav import load_property_from_kb
+
+    user = get_logged_in_user()
+    if not user:
+        return
+
+    saved = get_user_saved_properties(user["id"])
+    with st.expander("⭐ My Saved Properties", expanded=bool(saved)):
+        if not saved:
+            st.caption("Analyze a property and use **Save to My Account** to revisit it later.")
+            return
+
+        for prop in saved:
+            addr = str(prop.get("address") or "Unknown address")
+            price = prop.get("price")
+            label = f"{addr}"
+            if price is not None:
+                try:
+                    label = f"{addr} — ${float(price):,.0f}"
+                except (TypeError, ValueError):
+                    pass
+            key = f"saved_prop_{prop.get('user_saved_id') or prop.get('id')}"
+            if st.button(label, key=key, use_container_width=True):
+                st.session_state["address_input"] = addr
+                loaded = load_property_from_kb(addr)
+                if loaded:
+                    st.session_state["property_data"] = loaded
+                    st.toast(f"Loaded {addr}", icon="⭐")
+                else:
+                    st.warning(f"Could not load saved data for **{addr}**.")
+                st.rerun()
+
+
 def save_harvest_property(
     property_data: dict[str, Any], user_id: str | None = None
 ) -> Any:
@@ -868,6 +1112,11 @@ __all__ = [
     "save_canonical_property",
     "save_user_property_override",
     "save_knowledge_base",
+    "is_property_saved_for_user",
+    "save_property_to_user_account",
+    "unsave_property_from_user_account",
+    "get_user_saved_properties",
+    "render_user_saved_properties_sidebar",
     "save_harvest_property",
     "get_kb_context",
     "get_market_pulse",
