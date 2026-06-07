@@ -263,17 +263,11 @@ def _process_listing(
     research = execute_with_backoff(engine.research_property, address)
     report["researched"] += 1
 
-    if engine.should_skip_synthesis(research):
-        reason = (
-            "Poor condition"
-            if str(research.get("property_condition", "")).lower() == "poor"
-            else "Missing or zero price"
-            if engine.safe_float(research.get("price")) <= 0
-            else f"Price > ${engine.MAX_SYNTHESIS_PRICE:,}"
-        )
-        print(f"  SKIP Stage 3 - {reason}")
-        report["skipped"].append({"address": address, "reason": reason})
-        log.info("listing_skipped", address=address, reason=reason)
+    skip_reason = engine.synthesis_skip_reason(research)
+    if skip_reason:
+        print(f"  SKIP Stage 3 - {skip_reason}")
+        report["skipped"].append({"address": address, "reason": skip_reason})
+        log.info("listing_skipped", address=address, reason=skip_reason)
         return
 
     print("  STAGE 3 - Synthesis + Quantum")

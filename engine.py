@@ -660,6 +660,12 @@ Rules:
 - Include suburbs and townships — not just the core city (e.g. Henrietta/Penfield/Fairport
   count as Rochester; Cicero/Clay/Liverpool/North Syracuse count as Syracuse).
 - You MUST return {MAX_DISCOVERY_LISTINGS} distinct listings when possible. Do not stop at 7–13.
+- ONLY include: single-family detached homes, townhomes/townhouses, and small multifamily
+  (duplex, triplex, or fourplex — at most 4 units total).
+- EXCLUDE manufactured homes, mobile homes, modular homes, trailers, park-model homes,
+  apartment buildings, and any multifamily with 5+ units. Skip "Manufactured" listing filters
+  entirely; on Zillow/Redfin/Realtor use property-type filters for Single Family, Townhouse,
+  and small Multi-Family only.
 - Prefer homes built in {MIN_PREFERRED_YEAR_BUILT} or later when year built is visible on the listing.
   If choosing between similar listings, pick newer construction over pre-{MIN_PREFERRED_YEAR_BUILT}.
 - Use real street addresses with city/town, state, and ZIP when available.
@@ -912,7 +918,8 @@ Extract ONLY these fields:
 - hoa (monthly HOA fee USD, 0 if none)
 - square_footage (integer)
 - property_condition: exactly one of "Excellent", "Good", "Fair", "Poor"
-- property_type: e.g. "Single Family", "Duplex", "Triplex", "Multi-Family", "Mixed Use"
+- property_type: e.g. "Single Family", "Townhome", "Duplex", "Triplex", "Fourplex",
+  "Multi-Family (3 units)". Do NOT label manufactured/mobile/modular homes as allowed types.
 - stated_gross_monthly_rent: TOTAL monthly gross rent for the entire property if explicitly
   stated in the listing description (sum all units). Use 0 if not stated. If the listing gives
   ANNUAL rent/income, divide by 12. If it gives per-unit rent, multiply by unit count.
@@ -964,11 +971,56 @@ Return ONLY JSON:
     return data
 
 
-def should_skip_synthesis(research: dict[str, Any]) -> bool:
-    """Skip Stage 3 if condition is Poor, price is missing, or price exceeds cap."""
+_DISALLOWED_PROPERTY_TYPE_RE = re.compile(
+    r"\b(?:"
+    r"manufactured(?:\s+home)?|mobile\s+home|modular\s+home|trailer(?:\s+home)?|"
+    r"park[\s-]?model|prefab(?:ricated)?|manufactured\s+housing"
+    r")\b",
+    re.IGNORECASE,
+)
+_LARGE_MULTIFAMILY_RE = re.compile(
+    r"\b(?:apartment(?:\s+building|\s+complex)?|"
+    r"(?:multi[\s-]?family|multifamily).*(?:5|6|7|8|9|\d{2,})\s*units?|"
+    r"(?:5|6|7|8|9|\d{2,})\s*units?.*(?:multi[\s-]?family|multifamily)|"
+    r"(?:5|6|7|8|9|\d{2,})[\s-]?unit)\b",
+    re.IGNORECASE,
+)
+
+
+def is_disallowed_property_type(property_type: str) -> bool:
+    """True for manufactured homes and multifamily with 5+ units."""
+    normalized = property_type.strip()
+    if not normalized or normalized.lower() == "unknown":
+        return False
+    if _DISALLOWED_PROPERTY_TYPE_RE.search(normalized):
+        return True
+    if _LARGE_MULTIFAMILY_RE.search(normalized):
+        return True
+    for match in re.finditer(r"\b(\d+)\s*units?\b", normalized, flags=re.IGNORECASE):
+        if int(match.group(1)) >= 5:
+            return True
+    return False
+
+
+def synthesis_skip_reason(research: dict[str, Any]) -> str | None:
+    """Human-readable reason to skip Stage 3, or None if synthesis should run."""
     condition = str(research.get("property_condition", "")).strip().lower()
+    if condition == "poor":
+        return "Poor condition"
     price = safe_float(research.get("price"))
-    return condition == "poor" or price <= 0 or price > MAX_SYNTHESIS_PRICE
+    if price <= 0:
+        return "Missing or zero price"
+    if price > MAX_SYNTHESIS_PRICE:
+        return f"Price > ${MAX_SYNTHESIS_PRICE:,}"
+    property_type = str(research.get("property_type", "")).strip()
+    if is_disallowed_property_type(property_type):
+        return f"Excluded property type: {property_type}"
+    return None
+
+
+def should_skip_synthesis(research: dict[str, Any]) -> bool:
+    """Skip Stage 3 if condition, price, or property type fails investment filters."""
+    return synthesis_skip_reason(research) is not None
 
 
 def synthesize_harvest_property(

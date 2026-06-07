@@ -21,7 +21,9 @@ with patch("streamlit.secrets", {"GEMINI_API_KEY": "fake_key"}):
         discover_hot_market_listings,
         is_daily_quota_exhausted,
         research_property,
+        is_disallowed_property_type,
         should_skip_synthesis,
+        synthesis_skip_reason,
     )
     from finance import (
         DEFAULT_METRO_CAGR,
@@ -487,6 +489,31 @@ class TestHarvestSkipLogic(unittest.TestCase):
     def test_skip_synthesis_on_zero_price(self):
         self.assertTrue(
             should_skip_synthesis({"property_condition": "Good", "price": 0})
+        )
+
+    def test_disallowed_property_types(self):
+        self.assertTrue(is_disallowed_property_type("Manufactured Home"))
+        self.assertTrue(is_disallowed_property_type("Mobile Home"))
+        self.assertTrue(is_disallowed_property_type("Multi-Family (6 units)"))
+        self.assertTrue(is_disallowed_property_type("Apartment Building"))
+        self.assertFalse(is_disallowed_property_type("Single Family"))
+        self.assertFalse(is_disallowed_property_type("Townhome"))
+        self.assertFalse(is_disallowed_property_type("Duplex"))
+        self.assertFalse(is_disallowed_property_type("Triplex"))
+        self.assertFalse(is_disallowed_property_type("Fourplex"))
+        self.assertFalse(is_disallowed_property_type("Multi-Family (4 units)"))
+        self.assertFalse(is_disallowed_property_type("Unknown"))
+
+    def test_skip_synthesis_on_excluded_property_type(self):
+        research = {
+            "property_condition": "Good",
+            "price": 200_000,
+            "property_type": "Manufactured Home",
+        }
+        self.assertTrue(should_skip_synthesis(research))
+        self.assertEqual(
+            synthesis_skip_reason(research),
+            "Excluded property type: Manufactured Home",
         )
 
 

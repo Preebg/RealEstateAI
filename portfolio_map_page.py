@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from typing import Any
 
 import folium
@@ -141,6 +142,9 @@ JITTER_SCALE_DEGREES = 0.025
 # Labeled basemap — no API key required (unlike Mapbox dark-v9 in pydeck).
 FOLIUM_TILES = "CartoDB voyager"
 NY_STATE_OVERVIEW = (42.75, -76.0, 7)
+MAP_VIEW_WIDTH_PX = 960
+MAP_VIEW_HEIGHT_PX = 520
+VIEWPORT_FILTER_MIN_ZOOM = 9
 
 
 def _infer_market_city(address: str) -> str | None:
@@ -464,22 +468,134 @@ def _match_click_to_address(
     return str(mappable.loc[nearest_idx, "address"])
 
 
-def _parse_map_bounds(bounds: dict[str, Any] | None) -> tuple[float, float, float, float] | None:
+def _parse_map_bounds(bounds: Any) -> tuple[float, float, float, float] | None:
     """Return (south, west, north, east) from an st_folium bounds payload."""
     if not bounds:
         return None
+
+    if isinstance(bounds, (list, tuple)) and len(bounds) == 2:
+        try:
+            sw, ne = bounds
+            if isinstance(sw, dict):
+                south = float(sw["lat"])
+                west = float(sw.get("lng", sw.get("lon")))
+                north = float(ne["lat"])
+                east = float(ne.get("lng", ne.get("lon")))
+            else:
+                south = float(sw[0])
+                west = float(sw[1])
+                north = float(ne[0])
+                east = float(ne[1])
+            return south, west, north, east
+        except (KeyError, IndexError, TypeError, ValueError):
+            pass
+
+    if not isinstance(bounds, dict):
+        return None
+
     sw = bounds.get("_southWest") or bounds.get("southWest")
     ne = bounds.get("_northEast") or bounds.get("northEast")
     if not sw or not ne:
         return None
     try:
-        return float(sw["lat"]), float(sw["lng"]), float(ne["lat"]), float(ne["lng"])
+        return (
+            float(sw["lat"]),
+            float(sw.get("lng", sw.get("lon"))),
+            float(ne["lat"]),
+            float(ne.get("lng", ne.get("lon"))),
+        )
     except (KeyError, TypeError, ValueError):
         return None
 
 
+def _safe_map_zoom(zoom: Any) -> int | None:
+    try:
+        if zoom is None or isinstance(zoom, dict):
+            return None
+        return int(zoom)
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_map_center(center: Any) -> tuple[float, float] | None:
+    if not center or not isinstance(center, dict):
+        return None
+    try:
+        lat = center.get("lat")
+        lng = center.get("lng", center.get("lon"))
+        if lat is None or lng is None:
+            return None
+        return float(lat), float(lng)
+    except (TypeError, ValueError):
+        return None
+
+
+def _approximate_viewport_bounds(
+    center: Any,
+    zoom: Any,
+    *,
+    width_px: int = MAP_VIEW_WIDTH_PX,
+    height_px: int = MAP_VIEW_HEIGHT_PX,
+) -> dict[str, dict[str, float]] | None:
+    """Estimate visible bounds from map center and zoom (Leaflet tile math)."""
+    parsed_center = _parse_map_center(center)
+    parsed_zoom = _safe_map_zoom(zoom)
+    if parsed_center is None or parsed_zoom is None:
+        return None
+
+    lat, lng = parsed_center
+    world_px = 256 * (2**parsed_zoom)
+    lon_span = 360.0 * width_px / world_px
+    cos_lat = max(math.cos(math.radians(lat)), 0.05)
+    lat_span = 360.0 * height_px / world_px / cos_lat
+
+    return {
+        "_southWest": {"lat": lat - lat_span / 2, "lng": lng - lon_span / 2},
+        "_northEast": {"lat": lat + lat_span / 2, "lng": lng + lon_span / 2},
+    }
+
+
+def _should_filter_viewport(
+    bounds: dict[str, Any] | None,
+    center: Any,
+    zoom: Any,
+) -> bool:
+    """Only filter the ledger once the user has zoomed into a metro-sized view."""
+    parsed_zoom = _safe_map_zoom(zoom)
+    if parsed_zoom is not None and parsed_zoom >= VIEWPORT_FILTER_MIN_ZOOM:
+        return True
+
+    parsed = _parse_map_bounds(bounds)
+    if parsed is None:
+        return False
+
+    south, west, north, east = parsed
+    return (north - south) < 5.0 and (east - west) < 7.0
+
+
+def _effective_viewport_bounds(viewport: dict[str, Any]) -> dict[str, Any] | None:
+    center = viewport.get("center")
+    zoom = viewport.get("zoom")
+    bounds = viewport.get("bounds")
+    parsed_zoom = _safe_map_zoom(zoom)
+
+    if parsed_zoom is not None and parsed_zoom >= VIEWPORT_FILTER_MIN_ZOOM:
+        approx = _approximate_viewport_bounds(center, zoom)
+        if approx:
+            return approx
+
+    parsed = _parse_map_bounds(bounds)
+    if parsed is not None:
+        south, west, north, east = parsed
+        if (north - south) < 5.0 and (east - west) < 7.0:
+            return bounds
+
+    approx = _approximate_viewport_bounds(center, zoom)
+    return approx or bounds
+
+
 def filter_df_by_map_bounds(df: pd.DataFrame, bounds: dict[str, Any] | None) -> pd.DataFrame:
-    """Keep geocoded rows whose coordinates fall inside the current map viewport."""
+    """Keep geocoded rows whose coordinates fall inside the given bounds."""
     parsed = _parse_map_bounds(bounds)
     if parsed is None or df.empty:
         return df
@@ -495,6 +611,21 @@ def filter_df_by_map_bounds(df: pd.DataFrame, bounds: dict[str, Any] | None) -> 
     return df[in_view].copy()
 
 
+def filter_df_by_map_viewport(df: pd.DataFrame, viewport: dict[str, Any] | None) -> pd.DataFrame:
+    """Filter the ledger to properties visible in the current map viewport."""
+    if df.empty or not viewport:
+        return df
+
+    bounds = viewport.get("bounds")
+    center = viewport.get("center")
+    zoom = viewport.get("zoom")
+    if not _should_filter_viewport(bounds, center, zoom):
+        return df
+
+    effective_bounds = _effective_viewport_bounds(viewport)
+    return filter_df_by_map_bounds(df, effective_bounds)
+
+
 def _update_map_viewport(map_state: dict[str, Any]) -> None:
     """Persist pan/zoom state so the map does not reset on Streamlit reruns."""
     center = map_state.get("center")
@@ -506,11 +637,19 @@ def _update_map_viewport(map_state: dict[str, Any]) -> None:
     viewport = dict(st.session_state.get("map_viewport") or {})
     if center:
         viewport["center"] = center
-    if zoom is not None:
-        viewport["zoom"] = zoom
+    parsed_zoom = _safe_map_zoom(zoom)
+    if parsed_zoom is not None:
+        viewport["zoom"] = parsed_zoom
     if bounds:
         viewport["bounds"] = bounds
     st.session_state["map_viewport"] = viewport
+
+
+def _sync_map_viewport_from_widget() -> None:
+    """Callback for st_folium pan/zoom — copy widget state into map_viewport."""
+    widget_state = st.session_state.get("portfolio_map")
+    if isinstance(widget_state, dict):
+        _update_map_viewport(widget_state)
 
 
 def _resolve_map_view(
@@ -642,7 +781,7 @@ def render_portfolio_map(
     """
     Labeled folium map with hover tooltips and click-to-select.
 
-    Returns (selected address, current viewport bounds) when the user interacts.
+    Returns (selected address, persisted viewport state) for ledger filtering.
     """
     mappable = df.dropna(subset=["lat", "lon"])
     if mappable.empty:
@@ -658,17 +797,21 @@ def render_portfolio_map(
     map_state = st_folium(
         fmap,
         width=None,
-        height=520,
+        height=MAP_VIEW_HEIGHT_PX,
         center=map_center,
         zoom=map_zoom,
         returned_objects=["last_object_clicked", "bounds", "center", "zoom"],
         use_container_width=True,
         key="portfolio_map",
+        on_change=_sync_map_viewport_from_widget,
     )
-    _update_map_viewport(map_state)
-    clicked = _match_click_to_address(map_state.get("last_object_clicked"), df)
-    bounds = map_state.get("bounds") or st.session_state.get("map_viewport", {}).get("bounds")
-    return clicked, bounds
+    if isinstance(map_state, dict):
+        _update_map_viewport(map_state)
+    clicked = _match_click_to_address(
+        (map_state or {}).get("last_object_clicked"),
+        df,
+    )
+    return clicked, st.session_state.get("map_viewport")
 
 
 def compute_top_market(df: pd.DataFrame) -> str:
@@ -870,11 +1013,19 @@ def render_portfolio_map_page() -> None:
         st.session_state["map_selected_address"] = None
 
     selected_address = st.session_state.get("map_selected_address")
-    clicked_address, map_bounds = render_portfolio_map(map_df, focus_address=selected_address)
+    clicked_address, map_viewport = render_portfolio_map(map_df, focus_address=selected_address)
     if clicked_address:
         st.session_state["map_selected_address"] = clicked_address
 
-    ledger_df = filter_df_by_map_bounds(map_df, map_bounds)
+    ledger_df = filter_df_by_map_viewport(map_df, map_viewport)
+    viewport_filter_active = (
+        map_viewport is not None
+        and _should_filter_viewport(
+            map_viewport.get("bounds"),
+            map_viewport.get("center"),
+            map_viewport.get("zoom"),
+        )
+    )
 
     selected_address = st.session_state.get("map_selected_address")
     if selected_address:
@@ -914,13 +1065,20 @@ def render_portfolio_map_page() -> None:
     ledger_col3.metric("Top market", top_market)
 
     st.markdown("##### Property ledger")
-    if len(ledger_df) < len(map_df):
+    if viewport_filter_active and len(ledger_df) < len(map_df):
         st.caption(
             f"Showing {len(ledger_df):,} of {len(map_df):,} properties in the current map view. "
             "Zoom out to see more."
         )
+    elif viewport_filter_active:
+        st.caption(
+            f"Map view filter active — {len(ledger_df):,} properties in the current viewport."
+        )
     else:
-        st.caption("Double-click an address to focus it on the map above.")
+        st.caption(
+            "Zoom in on a metro area to filter this ledger to properties on screen. "
+            "Double-click an address to focus it on the map."
+        )
     display_df = ledger_df[
         [
             "address",
