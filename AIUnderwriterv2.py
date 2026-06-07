@@ -5,6 +5,7 @@ from __future__ import annotations
 import streamlit as st
 
 from authenticate import render_auth_page
+from property_nav import INDIVIDUAL_SEARCH_PAGE, MAP_OPEN_ADDRESS_KEY, consume_nav_target
 from share_access import consume_guest_landing_address, is_guest_viewer
 from ui_theme import inject_app_css
 
@@ -28,21 +29,29 @@ if not render_auth_page():
     )
     st.stop()
 
-if is_guest_viewer():
-    if not st.session_state.get("_guest_landing_routed"):
-        landing = consume_guest_landing_address()
-        if landing:
-            st.session_state["map_open_address"] = landing
-            st.session_state["_guest_landing_routed"] = True
-            st.switch_page("pages/1_Individual_Search.py")
+open_individual_search = consume_nav_target() == INDIVIDUAL_SEARCH_PAGE
+
+if is_guest_viewer() and not st.session_state.get("_guest_landing_routed"):
+    landing = consume_guest_landing_address()
+    if landing:
+        st.session_state[MAP_OPEN_ADDRESS_KEY] = landing
+        st.session_state["_guest_landing_routed"] = True
+        open_individual_search = True
 
 nav_pages = [
-    st.Page("pages/Home.py", title="Home", icon="🗺️", url_path="home", default=True),
+    st.Page(
+        "pages/Home.py",
+        title="Home",
+        icon="🗺️",
+        url_path="home",
+        default=not open_individual_search,
+    ),
     st.Page(
         "pages/1_Individual_Search.py",
         title="Individual Search",
         icon="🔍",
         url_path="individual-search",
+        default=open_individual_search,
     ),
 ]
 

@@ -24,7 +24,7 @@ from knowledge_base import (
     parse_zipcode_from_address,
 )
 from market_pulse import render_market_pulse
-from property_nav import queue_property_for_main_tab
+from property_nav import navigate_to_individual_search
 from ui_theme import render_page_hero
 
 # ---------------------------------------------------------------------------
@@ -741,8 +741,7 @@ def render_portfolio_map_page() -> None:
                         use_container_width=True,
                         key="map_open_search",
                     ):
-                        queue_property_for_main_tab(selected_address)
-                        st.switch_page("pages/1_Individual_Search.py")
+                        navigate_to_individual_search(selected_address)
                 with clear_col:
                     if st.button("Clear", use_container_width=True, key="map_clear_selection"):
                         st.session_state["map_selected_address"] = None
