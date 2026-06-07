@@ -552,6 +552,91 @@ class TestDiscoveryParsing(unittest.TestCase):
         self.assertEqual(listings[0]["city"], "Rochester")
         self.assertGreater(calls["count"], 1)
 
+    def test_plan_redistributes_unfilled_rochester_slots(self):
+        from engine import HOT_MARKETS, MAX_DISCOVERY_LISTINGS, _plan_market_discovery_pass
+
+        listings: list[dict] = []
+        for name, _, target in HOT_MARKETS:
+            count = 3 if name == "Rochester" else target
+            for idx in range(count):
+                listings.append(
+                    {
+                        "address": f"{idx} Main St, {name} Metro",
+                        "city": name,
+                        "list_price": 180000.0,
+                        "listing_url": f"https://www.zillow.com/homedetails/{name}-{idx}/",
+                    }
+                )
+
+        self.assertEqual(len(listings), MAX_DISCOVERY_LISTINGS - 2)
+        plan = _plan_market_discovery_pass(listings, {"Rochester"})
+        planned_total = sum(count for _, count in plan)
+        self.assertEqual(planned_total, 2)
+        self.assertNotIn("Rochester", [market for market, _ in plan])
+        self.assertEqual(plan[0][0], "Syracuse")
+        self.assertEqual(plan[0][1], 1)
+        self.assertEqual(plan[1][0], "Buffalo")
+        self.assertEqual(plan[1][1], 1)
+
+    def test_plan_keeps_trying_rochester_until_exhausted(self):
+        from engine import _plan_market_discovery_pass
+
+        listings = [
+            {
+                "address": f"{idx} Main St, Rochester, NY",
+                "city": "Rochester",
+                "list_price": 180000.0,
+                "listing_url": f"https://www.zillow.com/homedetails/rochester-{idx}/",
+            }
+            for idx in range(3)
+        ]
+        plan = _plan_market_discovery_pass(listings, set())
+        rochester_need = next((count for name, count in plan if name == "Rochester"), 0)
+        self.assertEqual(rochester_need, 2)
+        self.assertEqual(sum(count for _, count in plan), 25 - len(listings))
+
+    def test_discover_redistributes_when_rochester_exhausted(self):
+        rochester_calls = 0
+        other_markets: list[str] = []
+
+        def fake_discovery_attempt(**kwargs):
+            nonlocal rochester_calls
+            split_market = kwargs.get("split_market")
+            if split_market == "Rochester":
+                rochester_calls += 1
+                if rochester_calls == 1:
+                    payload = [
+                        {
+                            "address": f"{idx} Park Ave, Rochester, NY 1460{idx}",
+                            "city": "Rochester",
+                            "list_price": 189000 + idx * 1000,
+                            "listing_url": (
+                                f"https://www.zillow.com/homedetails/rochester-{idx}/"
+                            ),
+                        }
+                        for idx in range(3)
+                    ]
+                    return payload, json.dumps(payload)
+                return [], "[]"
+            if split_market:
+                other_markets.append(split_market)
+                row = {
+                    "address": f"1 Oak St, {split_market}, ST 12345",
+                    "city": split_market,
+                    "list_price": 195000,
+                    "listing_url": f"https://www.zillow.com/homedetails/{split_market}-1/",
+                }
+                return [row], json.dumps([row])
+            return [], "[]"
+
+        with patch("engine._run_discovery_attempt", side_effect=fake_discovery_attempt):
+            listings = discover_hot_market_listings(model=DISCOVERY_MODEL)
+
+        rochester_count = sum(1 for item in listings if item["city"] == "Rochester")
+        self.assertEqual(rochester_count, 3)
+        self.assertIn("Syracuse", other_markets)
+        self.assertGreater(len(listings), 3)
+
     def test_suburb_address_maps_to_parent_metro(self):
         from engine import _build_listings_from_raw
 

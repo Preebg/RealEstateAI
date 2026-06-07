@@ -1186,6 +1186,54 @@ def _count_listings_by_market(listings: list[dict[str, Any]]) -> dict[str, int]:
     return counts
 
 
+def _plan_market_discovery_pass(
+    listings: list[dict[str, Any]],
+    exhausted_markets: set[str],
+) -> list[tuple[str, int]]:
+    """
+    Build per-market discovery requests for the next pass.
+
+    Markets that still need inventory are filled to their base target first.
+    Unfilled slots from exhausted markets (e.g. Rochester found 3/5) are
+    redistributed in HOT_MARKETS priority order to other cities until the
+    global cap of MAX_DISCOVERY_LISTINGS is reached.
+    """
+    by_market = _count_listings_by_market(listings)
+    global_remaining = MAX_DISCOVERY_LISTINGS - len(listings)
+    if global_remaining <= 0:
+        return []
+
+    plan_counts: dict[str, int] = {}
+
+    for market_name, _, base_target in HOT_MARKETS:
+        if market_name in exhausted_markets:
+            continue
+        base_deficit = max(0, base_target - by_market.get(market_name, 0))
+        if base_deficit > 0:
+            plan_counts[market_name] = plan_counts.get(market_name, 0) + base_deficit
+
+    still_need = global_remaining - sum(plan_counts.values())
+
+    while still_need > 0:
+        added_any = False
+        for market_name, _, _ in HOT_MARKETS:
+            if still_need <= 0:
+                break
+            if market_name in exhausted_markets:
+                continue
+            plan_counts[market_name] = plan_counts.get(market_name, 0) + 1
+            still_need -= 1
+            added_any = True
+        if not added_any:
+            break
+
+    return [
+        (name, plan_counts[name])
+        for name, _, _ in HOT_MARKETS
+        if plan_counts.get(name, 0) > 0
+    ]
+
+
 def _discovery_prompt(
     max_price: float,
     *,
@@ -1423,28 +1471,49 @@ def _discover_listings_per_market(
     """Focused per-market discovery (works better for the Gemma fallback model)."""
     split_listings = list(seed_listings or [])
     last_raw = ""
-    market_total = len(HOT_MARKETS)
+    exhausted_markets: set[str] = set()
 
     for round_idx in range(1, DISCOVERY_TOPUP_MAX_ROUNDS + 1):
         if len(split_listings) >= MAX_DISCOVERY_LISTINGS:
             break
-        by_market = _count_listings_by_market(split_listings)
-        round_added = 0
 
-        for market_idx, (market_name, _, target) in enumerate(HOT_MARKETS, start=1):
+        plan = _plan_market_discovery_pass(split_listings, exhausted_markets)
+        if not plan:
+            break
+
+        round_added = 0
+        market_total = len(plan)
+        exhausted_before = set(exhausted_markets)
+        if exhausted_markets:
+            _discovery_log(
+                f"[discovery] Round {round_idx}/{DISCOVERY_TOPUP_MAX_ROUNDS}: "
+                f"redistributing unfilled slots from "
+                f"{', '.join(sorted(exhausted_markets))} to other markets"
+            )
+
+        for market_idx, (market_name, needed_count) in enumerate(plan, start=1):
             if len(split_listings) >= MAX_DISCOVERY_LISTINGS:
                 break
+
+            by_market = _count_listings_by_market(split_listings)
             have = by_market.get(market_name, 0)
-            deficit = target - have
-            if deficit <= 0:
-                continue
+            base_target = next(
+                target for name, _, target in HOT_MARKETS if name == market_name
+            )
+            base_deficit = max(0, base_target - have)
+            redistributed = max(0, needed_count - base_deficit)
+            scope_note = (
+                f"need {needed_count} more ({redistributed} redistributed), "
+                if redistributed
+                else f"need {needed_count} more, "
+            )
 
             found_addrs = [str(item.get("address", "")) for item in split_listings]
             merged_exclude = list(exclude_addresses or []) + found_addrs
             _discovery_log(
                 f"[discovery] Round {round_idx}/{DISCOVERY_TOPUP_MAX_ROUNDS} "
                 f"market {market_idx}/{market_total}: {market_name} "
-                f"(need {deficit} more, have {have}/{target}, "
+                f"({scope_note}have {have}/{base_target}, "
                 f"total {len(split_listings)}/{MAX_DISCOVERY_LISTINGS})..."
             )
             started = time.monotonic()
@@ -1453,7 +1522,7 @@ def _discover_listings_per_market(
                 max_price=max_price,
                 split_market=market_name,
                 exclude_addresses=merged_exclude,
-                needed_count=deficit,
+                needed_count=needed_count,
             )
             elapsed = time.monotonic() - started
             last_raw = market_raw or last_raw
@@ -1462,14 +1531,52 @@ def _discover_listings_per_market(
             split_listings = _dedupe_discovery_listings(split_listings, max_price=max_price)
             added = len(split_listings) - before
             round_added += added
-            by_market = _count_listings_by_market(split_listings)
+            if needed_count > 0 and not market_listings:
+                exhausted_markets.add(market_name)
             _discovery_log(
                 f"[discovery] {market_name}: +{added} new verified in "
                 f"{elapsed:.0f}s (total {len(split_listings)}/{MAX_DISCOVERY_LISTINGS})"
             )
 
         if round_added == 0:
-            break
+            can_redistribute = (
+                bool(exhausted_markets - exhausted_before)
+                and len(split_listings) < MAX_DISCOVERY_LISTINGS
+                and bool(_plan_market_discovery_pass(split_listings, exhausted_markets))
+            )
+            if not can_redistribute:
+                break
+
+    if len(split_listings) < MAX_DISCOVERY_LISTINGS:
+        plan = _plan_market_discovery_pass(split_listings, exhausted_markets)
+        if plan:
+            _discovery_log(
+                f"[discovery] Final per-market top-up toward "
+                f"{MAX_DISCOVERY_LISTINGS} listings "
+                f"(have {len(split_listings)}, plan={plan})..."
+            )
+            for market_name, needed_count in plan:
+                if len(split_listings) >= MAX_DISCOVERY_LISTINGS:
+                    break
+                found_addrs = [str(item.get("address", "")) for item in split_listings]
+                merged_exclude = list(exclude_addresses or []) + found_addrs
+                market_listings, market_raw = _run_discovery_attempt(
+                    model=model,
+                    max_price=max_price,
+                    split_market=market_name,
+                    exclude_addresses=merged_exclude,
+                    needed_count=needed_count,
+                )
+                last_raw = market_raw or last_raw
+                before = len(split_listings)
+                split_listings.extend(market_listings)
+                split_listings = _dedupe_discovery_listings(
+                    split_listings, max_price=max_price
+                )
+                _discovery_log(
+                    f"[discovery] Top-up {market_name}: +{len(split_listings) - before} new "
+                    f"(total {len(split_listings)}/{MAX_DISCOVERY_LISTINGS})"
+                )
 
     if len(split_listings) < MAX_DISCOVERY_LISTINGS:
         remaining = MAX_DISCOVERY_LISTINGS - len(split_listings)
