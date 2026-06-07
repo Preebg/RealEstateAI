@@ -6,6 +6,7 @@ from typing import Any
 
 from app_nav import (
     INDIVIDUAL_SEARCH_PAGE,
+    INDIVIDUAL_SEARCH_SCRIPT,
     MAP_OPEN_ADDRESS_KEY,
     NAV_TARGET_KEY,
     consume_map_property_selection,
@@ -16,6 +17,7 @@ from app_nav import (
 
 __all__ = [
     "INDIVIDUAL_SEARCH_PAGE",
+    "INDIVIDUAL_SEARCH_SCRIPT",
     "MAP_OPEN_ADDRESS_KEY",
     "NAV_TARGET_KEY",
     "consume_map_property_selection",

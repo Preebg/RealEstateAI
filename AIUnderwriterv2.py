@@ -18,20 +18,11 @@ st.set_page_config(
 
 inject_app_css()
 
-if not render_auth_page():
-    st.markdown(
-        """
-        <style>
-        [data-testid="stSidebarNav"] { display: none; }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-    st.stop()
+authenticated = render_auth_page()
 
 open_individual_search = consume_nav_target() == INDIVIDUAL_SEARCH_PAGE
 
-if is_guest_viewer() and not st.session_state.get("_guest_landing_routed"):
+if authenticated and is_guest_viewer() and not st.session_state.get("_guest_landing_routed"):
     landing = consume_guest_landing_address()
     if landing:
         st.session_state[MAP_OPEN_ADDRESS_KEY] = landing
@@ -60,6 +51,12 @@ nav_pages = [
         url_path="compare",
     ),
 ]
+
+if not authenticated:
+    # Register v2 navigation (overrides default "AIUnderwriterv2" sidebar label)
+    # without showing page links on the login screen.
+    st.navigation(nav_pages, position="hidden")
+    st.stop()
 
 pg = st.navigation(nav_pages)
 pg.run()

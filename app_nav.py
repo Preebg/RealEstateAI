@@ -7,6 +7,7 @@ import streamlit as st
 MAP_OPEN_ADDRESS_KEY = "map_open_address"
 NAV_TARGET_KEY = "_nav_target_page"
 INDIVIDUAL_SEARCH_PAGE = "individual-search"
+INDIVIDUAL_SEARCH_SCRIPT = "pages/1_Individual_Search.py"
 
 
 def queue_property_for_main_tab(address: str) -> None:
@@ -26,14 +27,15 @@ def consume_map_property_selection() -> str | None:
 
 def navigate_to_individual_search(address: str | None = None) -> None:
     """
-    Open Individual Search on the next app rerun.
+    Open Individual Search immediately.
 
-    Uses st.navigation default-page selection instead of st.switch_page.
+    st.Page(default=True) only applies on cold load; st.switch_page is required
+    when the user is already on another registered page (e.g. Home / Compare).
     """
     if address and str(address).strip():
         queue_property_for_main_tab(address)
     st.session_state[NAV_TARGET_KEY] = INDIVIDUAL_SEARCH_PAGE
-    st.rerun()
+    st.switch_page(INDIVIDUAL_SEARCH_SCRIPT)
 
 
 def consume_nav_target() -> str | None:

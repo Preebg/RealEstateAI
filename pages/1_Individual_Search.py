@@ -21,7 +21,9 @@ from share_access import (
     render_guest_sidebar,
 )
 from knowledge_base import (
+    MAX_SAVED_PROPERTIES,
     compute_rent_deviation_pct,
+    count_user_saved_properties,
     get_ai_baseline_maint,
     get_ai_baseline_rent,
     get_effective_display_maint,
@@ -539,9 +541,16 @@ if st.session_state.property_data:
         if _logged_in_user and _account_property_id
         else False
     )
+    _saved_count = (
+        count_user_saved_properties(_logged_in_user["id"]) if _logged_in_user else 0
+    )
+    _at_save_limit = (
+        _saved_count >= MAX_SAVED_PROPERTIES and not _is_saved_to_account
+    )
 
     if not _guest_mode:
         st.subheader("⭐ My Account")
+        st.caption(f"{_saved_count} of {MAX_SAVED_PROPERTIES} properties saved")
         if _is_saved_to_account:
             st.success("This property is saved to your account.")
             if st.button("Remove from My Account", key="unsave_account_btn"):
@@ -552,49 +561,60 @@ if st.session_state.property_data:
                         invalidate_portfolio_cache()
                         st.success(f"Removed {address} from your saved properties.")
                         st.rerun()
-        elif st.button("⭐ Save to My Account", type="primary", key="save_account_btn"):
-            if hitl_is_outlier and not str(override_notes).strip():
-                st.error(
-                    "An override note is required when rent differs by more than 50% from the AI."
+        else:
+            if _at_save_limit:
+                st.warning(
+                    f"You have reached the limit of {MAX_SAVED_PROPERTIES} saved properties. "
+                    "Remove one from the sidebar list or use **Clear all** to add another."
                 )
-                st.stop()
+            if st.button(
+                "⭐ Save to My Account",
+                type="primary",
+                key="save_account_btn",
+                disabled=_at_save_limit,
+            ):
+                if hitl_is_outlier and not str(override_notes).strip():
+                    st.error(
+                        "An override note is required when rent differs by more than 50% from the AI."
+                    )
+                    st.stop()
 
-            if not _logged_in_user:
-                st.error("You must be signed in to save.")
-                st.stop()
+                if not _logged_in_user:
+                    st.error("You must be signed in to save.")
+                    st.stop()
 
-            account_override_payload = {
-                "rent": final_monthly_rent,
-                "maint_percent": final_maint_percent,
-                "vacancy_rate": user_vacancy_reserve,
-                "management_fee": user_management_fee,
-                "is_outlier": hitl_is_outlier,
-                "override_notes": str(override_notes).strip(),
-            }
+                account_override_payload = {
+                    "rent": final_monthly_rent,
+                    "maint_percent": final_maint_percent,
+                    "vacancy_rate": user_vacancy_reserve,
+                    "management_fee": user_management_fee,
+                    "is_outlier": hitl_is_outlier,
+                    "override_notes": str(override_notes).strip(),
+                }
 
-            save_payload = None
-            if not from_kb:
-                save_payload = dict(property_info)
-                save_payload["address"] = address
-                save_payload["from_kb"] = True
-                save_payload["location_score"] = location_score
-                save_payload["appreciation_forecast"] = appreciation_forecast
-                save_payload["property_category"] = branding_label
-                save_payload.update(account_override_payload)
+                save_payload = None
+                if not from_kb:
+                    save_payload = dict(property_info)
+                    save_payload["address"] = address
+                    save_payload["from_kb"] = True
+                    save_payload["location_score"] = location_score
+                    save_payload["appreciation_forecast"] = appreciation_forecast
+                    save_payload["property_category"] = branding_label
+                    save_payload.update(account_override_payload)
 
-            result_id = save_property_to_user_account(
-                _logged_in_user["id"],
-                property_id=_account_property_id,
-                property_data=save_payload,
-                override_payload=account_override_payload if from_kb else None,
-            )
-            if result_id is None:
-                st.error("Save failed. Check your connection and try again.")
-                st.stop()
+                result_id = save_property_to_user_account(
+                    _logged_in_user["id"],
+                    property_id=_account_property_id,
+                    property_data=save_payload,
+                    override_payload=account_override_payload if from_kb else None,
+                )
+                if result_id is None:
+                    st.error("Save failed. Check your connection and try again.")
+                    st.stop()
 
-            invalidate_portfolio_cache()
-            st.success(f"Saved {address} to your account.")
-            st.rerun()
+                invalidate_portfolio_cache()
+                st.success(f"Saved {address} to your account.")
+                st.rerun()
     else:
         st.caption("Sign in to save properties to your personal account.")
 

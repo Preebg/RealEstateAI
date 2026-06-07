@@ -679,6 +679,16 @@ def save_knowledge_base(
     return override_response or canonical_response
 
 
+MAX_SAVED_PROPERTIES = 20
+
+
+def count_user_saved_properties(user_id: str | None) -> int:
+    """Number of properties bookmarked on the user's account."""
+    if not user_id or not is_valid_uuid(user_id):
+        return 0
+    return len(_fetch_user_saved_rows(user_id))
+
+
 def _fetch_user_saved_rows(user_id: str) -> list[dict[str, Any]]:
     """Return bookmark rows for the user, newest first."""
     if not is_valid_uuid(user_id):
@@ -788,6 +798,15 @@ def save_property_to_user_account(
             st.error("Could not resolve property ID for this address.")
         return None
 
+    if not is_property_saved_for_user(user_id, resolved_id):
+        if count_user_saved_properties(user_id) >= MAX_SAVED_PROPERTIES:
+            if show_errors and st is not None:
+                st.error(
+                    f"You can save at most {MAX_SAVED_PROPERTIES} properties. "
+                    "Remove one from your saved list to add another."
+                )
+            return None
+
     supabase = get_client()
     try:
         supabase.table("user_saved_properties").upsert(
@@ -859,6 +878,38 @@ def unsave_property_from_user_account(
     return True
 
 
+def clear_all_saved_properties_from_user_account(
+    user_id: str,
+    *,
+    show_errors: bool = True,
+) -> bool:
+    """Remove every bookmarked property from the user's account."""
+    if in_streamlit_app():
+        from share_access import is_guest_viewer
+
+        if is_guest_viewer():
+            if show_errors and st is not None:
+                st.error("Sign in to manage saved properties.")
+            return False
+
+    if not user_id or not is_valid_uuid(user_id):
+        raise ValueError(f"user_id must be a valid UUID, got: {user_id!r}")
+
+    supabase = get_client()
+    try:
+        supabase.table("user_saved_properties").delete().eq(
+            "user_id", user_id
+        ).execute()
+    except APIError as exc:
+        report_error(log, "kb_saved_clear_all_failed", exc, user_id=user_id)
+        if show_errors and st is not None:
+            st.error(f"Failed to clear saved properties: {exc}")
+        return False
+
+    log.info("kb_saved_clear_all_success", user_id=user_id)
+    return True
+
+
 def get_user_saved_properties(user_id: str | None = None) -> list[dict[str, Any]]:
     """Bookmarked properties merged with the user's underwriting overrides."""
     uid = _resolve_user_id(user_id)
@@ -886,11 +937,12 @@ def get_user_saved_properties(user_id: str | None = None) -> list[dict[str, Any]
 
 
 def render_user_saved_properties_sidebar() -> None:
-    """Sidebar list of bookmarked properties — click to reload analysis."""
+    """Sidebar list of bookmarked properties — click to reload or remove."""
     if not in_streamlit_app() or st is None:
         return
 
-    from property_nav import load_property_from_kb
+    from portfolio_map_page import invalidate_portfolio_cache
+    from property_nav import navigate_to_individual_search
 
     user = get_logged_in_user()
     if not user:
@@ -900,7 +952,10 @@ def render_user_saved_properties_sidebar() -> None:
     with st.expander("⭐ My Saved Properties", expanded=bool(saved)):
         if not saved:
             st.caption("Analyze a property and use **Save to My Account** to revisit it later.")
+            st.caption(f"You can save up to {MAX_SAVED_PROPERTIES} properties.")
             return
+
+        st.caption(f"{len(saved)} of {MAX_SAVED_PROPERTIES} saved")
 
         for prop in saved:
             addr = str(prop.get("address") or "Unknown address")
@@ -911,16 +966,44 @@ def render_user_saved_properties_sidebar() -> None:
                     label = f"{addr} — ${float(price):,.0f}"
                 except (TypeError, ValueError):
                     pass
-            key = f"saved_prop_{prop.get('user_saved_id') or prop.get('id')}"
-            if st.button(label, key=key, use_container_width=True):
-                st.session_state["address_input"] = addr
-                loaded = load_property_from_kb(addr)
-                if loaded:
-                    st.session_state["property_data"] = loaded
-                    st.toast(f"Loaded {addr}", icon="⭐")
-                else:
-                    st.warning(f"Could not load saved data for **{addr}**.")
-                st.rerun()
+            prop_id = str(prop.get("id") or "")
+            key_suffix = str(prop.get("user_saved_id") or prop_id)
+            load_col, remove_col = st.columns([6, 1])
+            with load_col:
+                if st.button(
+                    label, key=f"saved_load_{key_suffix}", use_container_width=True
+                ):
+                    navigate_to_individual_search(addr)
+            with remove_col:
+                if st.button(
+                    "✕",
+                    key=f"saved_remove_{key_suffix}",
+                    help="Remove from saved list",
+                ):
+                    if prop_id and unsave_property_from_user_account(
+                        user["id"], prop_id, show_errors=True
+                    ):
+                        invalidate_portfolio_cache()
+                        st.toast(f"Removed {addr}", icon="🗑️")
+                        st.rerun()
+
+        if st.session_state.get("confirm_clear_saved"):
+            st.warning(f"Remove all {len(saved)} saved properties?")
+            yes_col, no_col = st.columns(2)
+            with yes_col:
+                if st.button("Yes, clear all", key="saved_clear_confirm", type="primary"):
+                    if clear_all_saved_properties_from_user_account(user["id"]):
+                        invalidate_portfolio_cache()
+                        st.session_state.pop("confirm_clear_saved", None)
+                        st.toast("Cleared all saved properties", icon="🗑️")
+                        st.rerun()
+            with no_col:
+                if st.button("Cancel", key="saved_clear_cancel"):
+                    st.session_state.pop("confirm_clear_saved", None)
+                    st.rerun()
+        elif st.button("Clear all saved properties", key="saved_clear_init"):
+            st.session_state["confirm_clear_saved"] = True
+            st.rerun()
 
 
 def save_harvest_property(
@@ -1112,9 +1195,12 @@ __all__ = [
     "save_canonical_property",
     "save_user_property_override",
     "save_knowledge_base",
+    "MAX_SAVED_PROPERTIES",
+    "count_user_saved_properties",
     "is_property_saved_for_user",
     "save_property_to_user_account",
     "unsave_property_from_user_account",
+    "clear_all_saved_properties_from_user_account",
     "get_user_saved_properties",
     "render_user_saved_properties_sidebar",
     "save_harvest_property",

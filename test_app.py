@@ -765,6 +765,58 @@ class TestUserSavedProperties(unittest.TestCase):
             self.assertTrue(is_property_saved_for_user(user_id, property_id))
             self.assertFalse(is_property_saved_for_user(user_id, None))
 
+    def test_save_property_blocked_at_max_limit(self):
+        from unittest.mock import MagicMock, patch
+
+        from knowledge_base import MAX_SAVED_PROPERTIES, save_property_to_user_account
+
+        user_id = "7f35bc1e-9de5-484d-8f73-27fd3da733eb"
+        property_id = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        saved_rows = [
+            {"id": f"row-{i}", "property_id": f"p{i}", "user_id": user_id}
+            for i in range(MAX_SAVED_PROPERTIES)
+        ]
+
+        with patch(
+            "knowledge_base.is_property_saved_for_user", return_value=False
+        ):
+            with patch(
+                "knowledge_base._fetch_user_saved_rows", return_value=saved_rows
+            ):
+                with patch("knowledge_base.get_client") as mock_get_client:
+                    result = save_property_to_user_account(
+                        user_id,
+                        property_id=property_id,
+                        show_errors=False,
+                    )
+
+        self.assertIsNone(result)
+        mock_get_client.assert_not_called()
+
+    def test_clear_all_saved_properties_from_user_account(self):
+        from unittest.mock import MagicMock, patch
+
+        from knowledge_base import clear_all_saved_properties_from_user_account
+
+        mock_client = MagicMock()
+        mock_table = MagicMock()
+        mock_client.table.return_value = mock_table
+        mock_table.delete.return_value.eq.return_value.execute.return_value = (
+            MagicMock(data=[])
+        )
+
+        user_id = "7f35bc1e-9de5-484d-8f73-27fd3da733eb"
+
+        with patch("knowledge_base.get_client", return_value=mock_client):
+            self.assertTrue(
+                clear_all_saved_properties_from_user_account(
+                    user_id, show_errors=False
+                )
+            )
+
+        mock_client.table.assert_called_with("user_saved_properties")
+        mock_table.delete.return_value.eq.assert_called_with("user_id", user_id)
+
 
 class TestUuidValidation(unittest.TestCase):
     def test_rejects_typo_uuid_with_letter_l(self):
