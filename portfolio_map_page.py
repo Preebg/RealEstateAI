@@ -464,6 +464,77 @@ def _match_click_to_address(
     return str(mappable.loc[nearest_idx, "address"])
 
 
+def _parse_map_bounds(bounds: dict[str, Any] | None) -> tuple[float, float, float, float] | None:
+    """Return (south, west, north, east) from an st_folium bounds payload."""
+    if not bounds:
+        return None
+    sw = bounds.get("_southWest") or bounds.get("southWest")
+    ne = bounds.get("_northEast") or bounds.get("northEast")
+    if not sw or not ne:
+        return None
+    try:
+        return float(sw["lat"]), float(sw["lng"]), float(ne["lat"]), float(ne["lng"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def filter_df_by_map_bounds(df: pd.DataFrame, bounds: dict[str, Any] | None) -> pd.DataFrame:
+    """Keep geocoded rows whose coordinates fall inside the current map viewport."""
+    parsed = _parse_map_bounds(bounds)
+    if parsed is None or df.empty:
+        return df
+
+    south, west, north, east = parsed
+    has_coords = df["lat"].notna() & df["lon"].notna()
+    in_view = has_coords & (
+        (df["lat"] >= south)
+        & (df["lat"] <= north)
+        & (df["lon"] >= west)
+        & (df["lon"] <= east)
+    )
+    return df[in_view].copy()
+
+
+def _update_map_viewport(map_state: dict[str, Any]) -> None:
+    """Persist pan/zoom state so the map does not reset on Streamlit reruns."""
+    center = map_state.get("center")
+    zoom = map_state.get("zoom")
+    bounds = map_state.get("bounds")
+    if center is None and zoom is None and bounds is None:
+        return
+
+    viewport = dict(st.session_state.get("map_viewport") or {})
+    if center:
+        viewport["center"] = center
+    if zoom is not None:
+        viewport["zoom"] = zoom
+    if bounds:
+        viewport["bounds"] = bounds
+    st.session_state["map_viewport"] = viewport
+
+
+def _resolve_map_view(
+    df: pd.DataFrame,
+    focus_address: str | None,
+) -> tuple[tuple[float, float] | None, int | None, bool]:
+    """Return st_folium center, zoom, and whether to skip fit_bounds."""
+    focus_row = _resolve_focus_row(df, focus_address)
+    if focus_row is not None:
+        return (float(focus_row["lat"]), float(focus_row["lon"])), 15, True
+
+    stored = st.session_state.get("map_viewport") or {}
+    center_payload = stored.get("center")
+    if center_payload:
+        try:
+            center = (float(center_payload["lat"]), float(center_payload["lng"]))
+            zoom = int(stored.get("zoom") or 8)
+            return center, zoom, True
+        except (KeyError, TypeError, ValueError):
+            pass
+
+    return None, None, False
+
+
 def _resolve_focus_row(
     df: pd.DataFrame,
     focus_address: str | None,
@@ -481,6 +552,8 @@ def _resolve_focus_row(
 def _build_folium_map(
     df: pd.DataFrame,
     focus_address: str | None = None,
+    *,
+    skip_fit_bounds: bool = False,
 ) -> folium.Map:
     """Interactive labeled map with profitability-colored property markers."""
     mappable = df.dropna(subset=["lat", "lon"])
@@ -505,7 +578,7 @@ def _build_folium_map(
         control_scale=True,
     )
 
-    if focus_row is None:
+    if focus_row is None and not skip_fit_bounds:
         bounds = [
             [float(mappable["lat"].min()), float(mappable["lon"].min())],
             [float(mappable["lat"].max()), float(mappable["lon"].max())],
@@ -565,27 +638,37 @@ def sort_portfolio(df: pd.DataFrame, sort_key: str) -> pd.DataFrame:
 def render_portfolio_map(
     df: pd.DataFrame,
     focus_address: str | None = None,
-) -> str | None:
+) -> tuple[str | None, dict[str, Any] | None]:
     """
     Labeled folium map with hover tooltips and click-to-select.
 
-    Returns the selected address when the user clicks a marker.
+    Returns (selected address, current viewport bounds) when the user interacts.
     """
     mappable = df.dropna(subset=["lat", "lon"])
     if mappable.empty:
         st.info("No geocoded properties to display on the map yet.")
-        return None
+        return None, None
 
-    fmap = _build_folium_map(df, focus_address=focus_address)
+    map_center, map_zoom, skip_fit_bounds = _resolve_map_view(df, focus_address)
+    fmap = _build_folium_map(
+        df,
+        focus_address=focus_address,
+        skip_fit_bounds=skip_fit_bounds,
+    )
     map_state = st_folium(
         fmap,
         width=None,
         height=520,
-        returned_objects=["last_object_clicked"],
+        center=map_center,
+        zoom=map_zoom,
+        returned_objects=["last_object_clicked", "bounds", "center", "zoom"],
         use_container_width=True,
         key="portfolio_map",
     )
-    return _match_click_to_address(map_state.get("last_object_clicked"), df)
+    _update_map_viewport(map_state)
+    clicked = _match_click_to_address(map_state.get("last_object_clicked"), df)
+    bounds = map_state.get("bounds") or st.session_state.get("map_viewport", {}).get("bounds")
+    return clicked, bounds
 
 
 def compute_top_market(df: pd.DataFrame) -> str:
@@ -771,9 +854,15 @@ def render_portfolio_map_page() -> None:
     geo_df = attach_coordinates(sorted_df)
     map_df = apply_map_colors(geo_df)
 
+    filter_sig = f"{min_price}|{sort_key}|{len(map_df)}"
+    if st.session_state.get("_map_filter_sig") != filter_sig:
+        st.session_state["_map_filter_sig"] = filter_sig
+        st.session_state.pop("map_viewport", None)
+
     st.markdown("##### Map")
     st.caption(
         "Hover for quick stats · click a marker to select · "
+        "zoom or pan to filter the ledger below · "
         "double-click an address in the ledger to focus the map · green = higher 1-yr ROI"
     )
 
@@ -781,9 +870,11 @@ def render_portfolio_map_page() -> None:
         st.session_state["map_selected_address"] = None
 
     selected_address = st.session_state.get("map_selected_address")
-    clicked_address = render_portfolio_map(map_df, focus_address=selected_address)
+    clicked_address, map_bounds = render_portfolio_map(map_df, focus_address=selected_address)
     if clicked_address:
         st.session_state["map_selected_address"] = clicked_address
+
+    ledger_df = filter_df_by_map_bounds(map_df, map_bounds)
 
     selected_address = st.session_state.get("map_selected_address")
     if selected_address:
@@ -815,16 +906,22 @@ def render_portfolio_map_page() -> None:
                         st.rerun()
 
     ledger_col1, ledger_col2, ledger_col3 = st.columns(3)
-    avg_roi = map_df["one_year_roi"].mean() if not map_df.empty else 0.0
-    top_market = compute_top_market(map_df)
+    avg_roi = ledger_df["one_year_roi"].mean() if not ledger_df.empty else 0.0
+    top_market = compute_top_market(ledger_df)
 
-    ledger_col1.metric("Properties shown", f"{len(map_df):,}")
+    ledger_col1.metric("Properties in view", f"{len(ledger_df):,}")
     ledger_col2.metric("Avg 1-yr ROI", f"{avg_roi:.2f}%")
     ledger_col3.metric("Top market", top_market)
 
     st.markdown("##### Property ledger")
-    st.caption("Double-click an address to focus it on the map above.")
-    display_df = map_df[
+    if len(ledger_df) < len(map_df):
+        st.caption(
+            f"Showing {len(ledger_df):,} of {len(map_df):,} properties in the current map view. "
+            "Zoom out to see more."
+        )
+    else:
+        st.caption("Double-click an address to focus it on the map above.")
+    display_df = ledger_df[
         [
             "address",
             "category",
@@ -846,7 +943,7 @@ def render_portfolio_map_page() -> None:
         }
     )
 
-    st.session_state["_property_ledger_addresses"] = map_df["address"].tolist()
+    st.session_state["_property_ledger_addresses"] = ledger_df["address"].tolist()
 
     st.dataframe(
         display_df,
@@ -870,4 +967,7 @@ def render_portfolio_map_page() -> None:
 
     geocoded_count = int(map_df["lat"].notna().sum())
     if geocoded_count < len(map_df):
-        st.caption(f"{geocoded_count:,} of {len(map_df):,} properties placed on the map.")
+        st.caption(
+            f"{geocoded_count:,} of {len(map_df):,} properties placed on the map "
+            "(unmapped addresses are omitted when the ledger is filtered by map view)."
+        )
