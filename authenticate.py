@@ -7,6 +7,8 @@ import hashlib
 import os
 import secrets
 import datetime
+from html import escape
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
 
@@ -17,6 +19,95 @@ from supabase import Client, create_client
 from app_logging import configure_logging, report_error
 
 log = configure_logging("authenticate")
+
+_GOOGLE_G_LOGO_PATH = Path(__file__).resolve().parent / "assets" / "google-g-logo.png"
+
+
+@st.cache_data(show_spinner=False)
+def _google_g_logo_data_uri() -> str:
+    """Inline the Google G logo so the sign-in button works on Streamlit Cloud."""
+    if not _GOOGLE_G_LOGO_PATH.is_file():
+        return ""
+    encoded = base64.b64encode(_GOOGLE_G_LOGO_PATH.read_bytes()).decode("ascii")
+    return f"data:image/png;base64,{encoded}"
+
+
+def _render_google_signin_button(oauth_url: str) -> None:
+    """Google-branded sign-in control with the official-style G logo."""
+    logo_uri = _google_g_logo_data_uri()
+    safe_url = escape(oauth_url, quote=True)
+    logo_markup = (
+        f'<img src="{logo_uri}" alt="" class="google-signin-btn__logo" />'
+        if logo_uri
+        else '<span class="google-signin-btn__logo-fallback" aria-hidden="true">G</span>'
+    )
+
+    st.markdown(
+        f"""
+        <style>
+        .google-signin-btn {{
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 12px;
+            width: 100%;
+            min-height: 44px;
+            padding: 0 16px;
+            border: 1px solid #dadce0;
+            border-radius: 8px;
+            background: #ffffff;
+            color: #3c4043;
+            font-family: "Google Sans", "Segoe UI", Roboto, Arial, sans-serif;
+            font-size: 0.95rem;
+            font-weight: 500;
+            line-height: 1;
+            text-decoration: none;
+            box-shadow: 0 1px 2px rgba(60, 64, 67, 0.08);
+            transition: background 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
+            box-sizing: border-box;
+        }}
+        .google-signin-btn:hover {{
+            background: #f8f9fa;
+            border-color: #c6c9cc;
+            box-shadow: 0 1px 3px rgba(60, 64, 67, 0.14);
+            color: #202124;
+        }}
+        .google-signin-btn:active {{
+            background: #f1f3f4;
+            box-shadow: inset 0 1px 2px rgba(60, 64, 67, 0.12);
+        }}
+        .google-signin-btn__logo {{
+            width: 20px;
+            height: 20px;
+            display: block;
+            flex: 0 0 20px;
+            object-fit: contain;
+            mix-blend-mode: lighten;
+        }}
+        .google-signin-btn__logo-fallback {{
+            width: 20px;
+            height: 20px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 50%;
+            background: #4285f4;
+            color: #ffffff;
+            font-size: 0.78rem;
+            font-weight: 700;
+            flex: 0 0 20px;
+        }}
+        .google-signin-btn__label {{
+            white-space: nowrap;
+        }}
+        </style>
+        <a class="google-signin-btn" href="{safe_url}" rel="noopener noreferrer">
+            {logo_markup}
+            <span class="google-signin-btn__label">Continue with Google</span>
+        </a>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 class StreamlitAuthStorage:
@@ -846,13 +937,7 @@ def render_login_page() -> bool:
                     st.session_state["google_oauth_redirect"] = redirect_to
                     st.session_state["google_oauth_url"] = login_with_google()
                 oauth_url = st.session_state["google_oauth_url"]
-                st.link_button(
-                    "Continue with Google",
-                    oauth_url,
-                    type="primary",
-                    use_container_width=True,
-                    help="Opens Google sign-in in this browser tab.",
-                )
+                _render_google_signin_button(oauth_url)
                 if st.button("Refresh Google sign-in link", use_container_width=True):
                     st.session_state.pop("google_oauth_url", None)
                     st.session_state.pop("google_oauth_redirect", None)
