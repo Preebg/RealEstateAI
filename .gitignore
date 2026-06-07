@@ -3,9 +3,7 @@ venv/
 .streamlit/secrets.toml
 .cursor/
 .agents/
-scripts/backfill_zip_codes.py
-scripts/test_user_overrides.py
-scripts/setup_task.ps1
+scripts/
 supabase/
 __pycache__/
 property_kb.json
@@ -15,7 +13,6 @@ harvester_scheduled.log
 reports/
 poised-epigram-493119-g0-64095d0f749b.json
 .aider*
-
 # Local-only docs and test fixtures (not required at runtime on Streamlit Cloud)
 tests/
 docs/QUANTUM_METHOD.md
