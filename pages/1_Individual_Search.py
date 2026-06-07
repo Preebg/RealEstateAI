@@ -32,7 +32,7 @@ from knowledge_base import (
 )
 from market_pulse import render_market_pulse
 from property_nav import consume_map_property_selection, load_property_from_kb
-from ui_theme import render_page_hero
+from ui_theme import render_page_hero, style_matplotlib_chart
 import matplotlib.pyplot as plt
 from pdf_generator import generate_property_pdf
 import tldextract
@@ -336,9 +336,9 @@ if st.session_state.property_data:
             ax.set_title("Projected Property Value Growth", fontsize=14)
             ax.set_xlabel("Year")
             ax.set_ylabel("Estimated Value ($)")
-            ax.grid(True, linestyle='--', alpha=0.6)
             ax.ticklabel_format(style='plain', axis='y')
-            
+            style_matplotlib_chart(fig, ax)
+
             st.pyplot(fig)
 
     # Display the summary from the AI search
