@@ -36,7 +36,20 @@ _log = get_logger("engine")
 
 # --- Model routing (harvester + underwriter) ---
 DISCOVERY_MODEL = "gemini-2.5-flash"
-DISCOVERY_FALLBACK_MODEL = "gemma-4-26b-a4b-it"
+DISCOVERY_FALLBACK_MODELS: tuple[str, ...] = (
+    "gemini-2.5-flash-lite",
+    "gemma-4-21b-it",
+)
+DISCOVERY_MODEL_CHAIN: tuple[str, ...] = (
+    DISCOVERY_MODEL,
+    *DISCOVERY_FALLBACK_MODELS,
+)
+# Tier 3 label; Gemini API hosts gemma-4-26b-a4b-it (no gemma-4-21b-it).
+_DISCOVERY_MODEL_API_SLUGS: dict[str, str] = {
+    "gemma-4-21b-it": "gemma-4-26b-a4b-it",
+}
+# Backward-compatible alias for tests and harvester UI.
+DISCOVERY_FALLBACK_MODEL = DISCOVERY_FALLBACK_MODELS[-1]
 RESEARCH_MODEL = "gemma-4-31b-it"
 SYNTHESIS_MODEL = "gemini-3.1-flash-lite-preview"
 SYNTHESIS_FALLBACK_MODEL = "gemma-4-26b-a4b-it"
@@ -112,6 +125,8 @@ _US_ZIP_RE = re.compile(r"\b\d{5}(?:-\d{4})?\b")
 _STREET_NUMBER_RE = re.compile(r"(?:^|\s)(\d{1,6}[A-Za-z]?)\s+\S+")
 # Grounded discovery needs more search calls than the SDK default (10 AFC).
 DISCOVERY_MAX_REMOTE_CALLS = 25
+DISCOVERY_FALLBACK_MAX_REMOTE_CALLS = 8
+DISCOVERY_SPLIT_MAX_REMOTE_CALLS = 10
 MAX_SYNTHESIS_PRICE = 400_000
 MAX_API_RETRIES = 5
 BACKOFF_BASE_SEC = 4.0
@@ -315,6 +330,53 @@ def _grounded_search_config(
     )
 
 
+def _discovery_log(message: str) -> None:
+    """Discovery progress lines — flush so long API waits show liveness in the console."""
+    print(message, flush=True)
+
+
+def _resolve_discovery_model(model: str) -> str:
+    """Map user-facing discovery tier labels to hosted Gemini API slugs."""
+    resolved = _DISCOVERY_MODEL_API_SLUGS.get(model, model)
+    if resolved != model:
+        _discovery_log(
+            f"[discovery] Model alias: {model} -> {resolved} (hosted API slug)"
+        )
+    return resolved
+
+
+def _is_gemma_discovery_model(model: str) -> bool:
+    return model.startswith("gemma")
+
+
+def _discovery_models_to_try(explicit_model: str | None = None) -> list[str]:
+    if explicit_model:
+        return [_resolve_discovery_model(explicit_model)]
+    return [_resolve_discovery_model(model) for model in DISCOVERY_MODEL_CHAIN]
+
+
+def _discovery_afc_budget(
+    model: str,
+    *,
+    split_market: str | None = None,
+) -> int:
+    """Right-size AFC search calls: combined needs more; per-market/gemma need fewer."""
+    if split_market:
+        target = next(
+            (count for name, _, count in HOT_MARKETS if name == split_market),
+            3,
+        )
+        per_market_cap = (
+            DISCOVERY_FALLBACK_MAX_REMOTE_CALLS
+            if _is_gemma_discovery_model(model)
+            else DISCOVERY_SPLIT_MAX_REMOTE_CALLS
+        )
+        return min(target + 3, per_market_cap)
+    if _is_gemma_discovery_model(model):
+        return DISCOVERY_FALLBACK_MAX_REMOTE_CALLS
+    return DISCOVERY_MAX_REMOTE_CALLS
+
+
 def generate_with_retry(
     model: str,
     contents: str,
@@ -414,12 +476,17 @@ def _generate_with_grounding_retry(
     use_search: bool = False,
     max_retries: int = MAX_API_RETRIES,
     session: GenaiSession | None = None,
+    max_remote_calls: int = DISCOVERY_MAX_REMOTE_CALLS,
 ) -> tuple[str, list[str]]:
     """Like generate_with_retry but also returns grounded search URLs for discovery."""
     active = session or get_session()
     config = None
     if use_search:
-        config = _grounded_search_config()
+        config = _grounded_search_config(max_remote_calls=max_remote_calls)
+        _discovery_log(
+            f"[discovery] Grounded search in progress on {model} "
+            f"(up to {max_remote_calls} search calls; often 30–90s)..."
+        )
 
     last_error: BaseException | None = None
     total_wait_sec = 0.0
@@ -1127,6 +1194,7 @@ def _run_discovery_attempt(
     split_market: str | None = None,
     exclude_addresses: list[str] | None = None,
 ) -> tuple[list[dict[str, Any]], str]:
+    afc_budget = _discovery_afc_budget(model, split_market=split_market)
     prompt = _discovery_prompt(
         max_price,
         split_market=split_market,
@@ -1136,6 +1204,7 @@ def _run_discovery_attempt(
         model,
         prompt,
         use_search=_model_supports_grounding(model),
+        max_remote_calls=afc_budget,
     )
     listings = _build_listings_from_raw(raw, max_price, grounding_urls=grounding_urls)
     return listings, raw
@@ -1233,20 +1302,31 @@ def _discover_listings_per_market(
     """Focused per-market discovery (works better for the Gemma fallback model)."""
     split_listings = list(seed_listings or [])
     last_raw = ""
-    for market_name, _, _ in HOT_MARKETS:
+    market_total = len(HOT_MARKETS)
+    for market_idx, (market_name, _, target) in enumerate(HOT_MARKETS, start=1):
         if len(split_listings) >= MAX_DISCOVERY_LISTINGS:
             break
         found_addrs = [str(item.get("address", "")) for item in split_listings]
         merged_exclude = list(exclude_addresses or []) + found_addrs
+        _discovery_log(
+            f"[discovery] Market {market_idx}/{market_total}: {market_name} "
+            f"(target {target}, have {len(split_listings)}/{MAX_DISCOVERY_LISTINGS})..."
+        )
+        started = time.monotonic()
         market_listings, market_raw = _run_discovery_attempt(
             model=model,
             max_price=max_price,
             split_market=market_name,
             exclude_addresses=merged_exclude,
         )
+        elapsed = time.monotonic() - started
         last_raw = market_raw or last_raw
         split_listings.extend(market_listings)
         split_listings = _dedupe_discovery_listings(split_listings, max_price=max_price)
+        _discovery_log(
+            f"[discovery] {market_name}: +{len(market_listings)} verified in "
+            f"{elapsed:.0f}s (total {len(split_listings)}/{MAX_DISCOVERY_LISTINGS})"
+        )
     return split_listings, last_raw
 
 
@@ -1257,10 +1337,12 @@ def _discover_listings_for_model(
     exclude_addresses: list[str] | None,
 ) -> tuple[list[dict[str, Any]], str]:
     """Run combined discovery, then top up per market until MAX_DISCOVERY_LISTINGS."""
-    if model == DISCOVERY_FALLBACK_MODEL:
-        print(
+    model = _resolve_discovery_model(model)
+    if _is_gemma_discovery_model(model):
+        _discovery_log(
             f"[discovery] Using per-market searches on {model} "
-            f"(combined multi-market search is unreliable on fallback)."
+            f"(combined multi-market search is unreliable on Gemma; "
+            f"~{DISCOVERY_FALLBACK_MAX_REMOTE_CALLS} search calls per market)."
         )
         return _discover_listings_per_market(
             model=model,
@@ -1284,7 +1366,7 @@ def _discover_listings_for_model(
             count=len(deduped),
             target=MAX_DISCOVERY_LISTINGS,
         )
-        print(
+        _discovery_log(
             f"[discovery] Combined search returned {len(deduped)}/{MAX_DISCOVERY_LISTINGS} "
             f"listings on {model}; topping up per market..."
         )
@@ -1294,7 +1376,7 @@ def _discover_listings_for_model(
             model=model,
             raw_preview=last_raw[:400],
         )
-        print(
+        _discovery_log(
             f"[discovery] Combined search returned 0 listings on {model}; "
             "retrying per market..."
         )
@@ -1316,14 +1398,13 @@ def discover_hot_market_listings(
     """
     Stage 1 (Discovery): Search Grounding across prioritized hot markets.
     Returns up to MAX_DISCOVERY_LISTINGS listings (< max_price).
-    """
-    primary_model = model or DISCOVERY_MODEL
-    models_to_try = [primary_model]
-    if primary_model == DISCOVERY_MODEL and DISCOVERY_FALLBACK_MODEL not in models_to_try:
-        models_to_try.append(DISCOVERY_FALLBACK_MODEL)
 
+    Model order: gemini-2.5-flash -> gemini-2.5-flash-lite -> gemma-4-21b-it
+    (tier 3 resolves to gemma-4-26b-a4b-it on the hosted API).
+    """
+    models_to_try = _discovery_models_to_try(model)
     last_raw = ""
-    for active_model in models_to_try:
+    for tier_idx, active_model in enumerate(models_to_try):
         try:
             listings, last_raw = _discover_listings_for_model(
                 model=active_model,
@@ -1331,21 +1412,24 @@ def discover_hot_market_listings(
                 exclude_addresses=exclude_addresses,
             )
         except _DISCOVERY_API_ERRORS as exc:
-            fallback = models_to_try[-1]
-            if is_daily_quota_exhausted(exc) and active_model != fallback:
+            if (
+                is_daily_quota_exhausted(exc)
+                and tier_idx < len(models_to_try) - 1
+            ):
+                next_model = models_to_try[tier_idx + 1]
                 _log.warning(
                     "discovery_quota_fallback",
                     from_model=active_model,
-                    to_model=fallback,
+                    to_model=next_model,
                     error=str(exc),
                 )
-                print(
+                _discovery_log(
                     f"[discovery] {active_model} daily quota exhausted; "
-                    f"switching to {fallback}..."
+                    f"switching to {next_model}..."
                 )
-                print(
+                _discovery_log(
                     "[discovery] Note: 'AFC is enabled with max remote calls' is normal SDK "
-                    f"output for Google Search (budget: {DISCOVERY_MAX_REMOTE_CALLS} calls)."
+                    "output for Google Search (per-call budget is shown before each search)."
                 )
                 continue
             raise
@@ -1363,10 +1447,11 @@ def discover_hot_market_listings(
             model=active_model,
             raw_preview=last_raw[:400],
         )
-        if active_model != models_to_try[-1]:
-            print(
+        if tier_idx < len(models_to_try) - 1:
+            next_model = models_to_try[tier_idx + 1]
+            _discovery_log(
                 f"[discovery] No listings from {active_model}; "
-                f"trying fallback model {models_to_try[-1]}..."
+                f"trying {next_model}..."
             )
 
     if last_raw.strip():

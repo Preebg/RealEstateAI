@@ -28,7 +28,9 @@ with patch("streamlit.secrets", {"GEMINI_API_KEY": "fake_key"}):
     )
     from engine import (
         DISCOVERY_FALLBACK_MODEL,
+        DISCOVERY_FALLBACK_MODELS,
         DISCOVERY_MODEL,
+        DISCOVERY_MODEL_CHAIN,
         RESEARCH_MODEL,
         discover_hot_market_listings,
         is_daily_quota_exhausted,
@@ -450,7 +452,7 @@ class TestDailyQuotaDetection(unittest.TestCase):
 
         def fake_generate(model, contents, **kwargs):
             calls.append(model)
-            if model == DISCOVERY_MODEL:
+            if model in ("gemini-2.5-flash", "gemini-2.5-flash-lite"):
                 raise quota_err
             return _discovery_generate_return(payload)
 
@@ -458,8 +460,8 @@ class TestDailyQuotaDetection(unittest.TestCase):
             listings = discover_hot_market_listings()
         self.assertEqual(len(listings), 1)
         self.assertEqual(calls[0], DISCOVERY_MODEL)
-        self.assertEqual(calls[1], DISCOVERY_FALLBACK_MODEL)
-        self.assertTrue(all(model == DISCOVERY_FALLBACK_MODEL for model in calls[1:]))
+        self.assertEqual(DISCOVERY_MODEL_CHAIN, ("gemini-2.5-flash", "gemini-2.5-flash-lite", "gemma-4-21b-it"))
+        self.assertTrue(any(model == "gemma-4-26b-a4b-it" for model in calls))
 
 
 class TestSearchGrounding(unittest.TestCase):
@@ -468,12 +470,10 @@ class TestSearchGrounding(unittest.TestCase):
             "engine._generate_with_grounding_retry",
             return_value=_discovery_generate_return("[]"),
         ) as mock_gen:
-            discover_hot_market_listings(model=DISCOVERY_MODEL)
-            self.assertTrue(mock_gen.call_args.kwargs["use_search"])
-
-            mock_gen.reset_mock()
-            discover_hot_market_listings(model=DISCOVERY_FALLBACK_MODEL)
-            self.assertTrue(mock_gen.call_args.kwargs["use_search"])
+            for discovery_model in DISCOVERY_MODEL_CHAIN:
+                discover_hot_market_listings(model=discovery_model)
+                self.assertTrue(mock_gen.call_args.kwargs["use_search"])
+                mock_gen.reset_mock()
 
     def test_research_uses_search_grounding(self):
         payload = json.dumps(

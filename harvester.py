@@ -431,7 +431,7 @@ async def run_harvester_pipeline_async(admin_user_id: str) -> dict[str, Any]:
     """
     Execute the full 3-stage harvester once per run.
 
-    Stage 1: Single grounded discovery (gemini-2.5-flash) — up to 25 listings per run.
+    Stage 1: Grounded discovery (flash -> flash-lite -> gemma) — up to 25 listings.
     Stage 2: Parallel per-address research (gemma-4-31b-it), capped at 10 RPM.
     Stage 3: Parallel synthesis + quantum + KB save (gemini-3.1-flash-lite-preview),
     capped at 10 RPM.
