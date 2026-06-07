@@ -98,17 +98,88 @@ def _normalize_app_url(url: str) -> str:
     return cleaned
 
 
+def _is_localhost_url(url: str) -> bool:
+    from urllib.parse import urlsplit
+
+    host = (urlsplit(url).hostname or "").lower()
+    return host in {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
+
+
+def _current_app_url() -> str:
+    """Origin of the page the user is actually visiting."""
+    if _headless_mode():
+        return ""
+    return _normalize_app_url(str(st.context.url))
+
+
+def _configured_redirect_url() -> str | None:
+    explicit = os.getenv("OAUTH_REDIRECT_URL")
+    if explicit and str(explicit).strip():
+        return _normalize_app_url(explicit)
+    if not _headless_mode() and "OAUTH_REDIRECT_URL" in st.secrets:
+        value = str(st.secrets["OAUTH_REDIRECT_URL"]).strip()
+        if value:
+            return _normalize_app_url(value)
+    return None
+
+
 def _get_redirect_url() -> str:
     """OAuth redirect URL — must match Supabase Auth redirect allow-list."""
-    explicit = os.getenv("OAUTH_REDIRECT_URL")
-    if explicit:
-        return _normalize_app_url(explicit)
-    if "OAUTH_REDIRECT_URL" in st.secrets:
-        return _normalize_app_url(str(st.secrets["OAUTH_REDIRECT_URL"]))
-    base = _normalize_app_url(str(st.context.url))
-    if base:
-        return base
+    context_url = _current_app_url()
+    configured = _configured_redirect_url()
+
+    # Streamlit Cloud secrets are often copied from dev with localhost here.
+    # Prefer the live app URL so Google returns to the page the user opened.
+    if configured:
+        if _is_localhost_url(configured) and context_url and not _is_localhost_url(
+            context_url
+        ):
+            log.warning(
+                "oauth_redirect_ignored_localhost",
+                configured=configured,
+                context_url=context_url,
+            )
+            return context_url
+        return configured
+
+    if context_url:
+        return context_url
     return "http://localhost:8501"
+
+
+def _oauth_redirect_config_warning() -> str | None:
+    """Explain redirect misconfiguration before the user starts Google sign-in."""
+    if _headless_mode():
+        return None
+
+    context_url = _current_app_url()
+    configured = _configured_redirect_url()
+    if not context_url:
+        return None
+
+    if configured and configured != context_url:
+        if _is_localhost_url(configured):
+            return (
+                f"**Google sign-in is misconfigured.** `OAUTH_REDIRECT_URL` is set to "
+                f"`{configured}`, but this app runs at `{context_url}`. After Google "
+                f"approves access, the browser is sent to localhost instead of back here. "
+                f"Update Streamlit Cloud secrets to "
+                f"`OAUTH_REDIRECT_URL = \"{context_url}\"` and add `{context_url}` under "
+                f"Supabase → Authentication → URL Configuration → Redirect URLs."
+            )
+        return (
+            f"**Google sign-in is misconfigured.** `OAUTH_REDIRECT_URL` (`{configured}`) "
+            f"does not match this app (`{context_url}`). Update Streamlit secrets and the "
+            f"Supabase redirect allow-list."
+        )
+
+    if not configured and not _is_localhost_url(context_url):
+        return (
+            f"For Google sign-in on Streamlit Cloud, set "
+            f"`OAUTH_REDIRECT_URL = \"{context_url}\"` in app secrets and add `{context_url}` "
+            f"to Supabase → Authentication → URL Configuration → Redirect URLs."
+        )
+    return None
 
 
 def _get_pkce_session_id() -> str:
@@ -283,6 +354,51 @@ def _read_pkce_verifier(supabase: Client | None = None) -> str | None:
     return None
 
 
+def _peek_auth_handoff(handoff_id: str) -> dict[str, Any] | None:
+    """Read stored OAuth session without deleting it (survives Streamlit reruns)."""
+    supabase = get_supabase()
+    try:
+        response = supabase.rpc(
+            "peek_oauth_auth_handoff", {"p_handoff_id": handoff_id}
+        ).execute()
+    except APIError as exc:
+        details = getattr(exc, "args", [{}])
+        code = details[0].get("code") if details and isinstance(details[0], dict) else ""
+        if code == "PGRST202" or "peek_oauth_auth_handoff" in str(exc).lower():
+            return _consume_auth_handoff_row(handoff_id)
+        report_error(log, "oauth_handoff_peek_failed", exc, level="warning")
+        return None
+
+    rows = response.data or []
+    return rows[0] if rows else None
+
+
+def _consume_auth_handoff_row(handoff_id: str) -> dict[str, Any] | None:
+    """Legacy one-time handoff read (pre-peek migration)."""
+    supabase = get_supabase()
+    try:
+        response = supabase.rpc(
+            "consume_oauth_auth_handoff", {"p_handoff_id": handoff_id}
+        ).execute()
+    except APIError as exc:
+        report_error(log, "oauth_handoff_consume_failed", exc, level="warning")
+        return None
+
+    rows = response.data or []
+    return rows[0] if rows else None
+
+
+def _consume_auth_handoff(handoff_id: str) -> None:
+    """Delete a stored OAuth handoff (logout / explicit cleanup)."""
+    supabase = get_supabase()
+    try:
+        supabase.rpc(
+            "consume_oauth_auth_handoff", {"p_handoff_id": handoff_id}
+        ).execute()
+    except APIError:
+        pass
+
+
 def _save_auth_handoff(handoff_id: str, session: Any) -> None:
     """Persist completed OAuth session for post-redirect recovery on Streamlit Cloud."""
     supabase = get_supabase()
@@ -302,40 +418,20 @@ def _save_auth_handoff(handoff_id: str, session: Any) -> None:
 def _restore_auth_handoff() -> bool:
     """
     Recover session tokens after OAuth redirect when Streamlit session_state reset.
-    Returns True when a handoff was consumed and auth state was restored.
+    Returns True when a handoff was applied and auth state was restored.
     """
     handoff_id = _query_param("auth_handoff")
     if not handoff_id:
         return False
 
     if get_logged_in_user():
-        try:
-            supabase = get_supabase()
-            supabase.rpc(
-                "consume_oauth_auth_handoff", {"p_handoff_id": handoff_id}
-            ).execute()
-        except APIError:
-            pass
-        _clear_query_param("auth_handoff")
-        return True
-
-    supabase = get_supabase()
-    try:
-        response = supabase.rpc(
-            "consume_oauth_auth_handoff", {"p_handoff_id": handoff_id}
-        ).execute()
-    except APIError as exc:
-        report_error(log, "oauth_handoff_consume_failed", exc, level="warning")
-        _clear_query_param("auth_handoff")
         return False
 
-    rows = response.data or []
-    if not rows:
+    row = _peek_auth_handoff(handoff_id)
+    if not row:
         log.warning("oauth_handoff_not_found", handoff_id=handoff_id[:8] + "…")
-        _clear_query_param("auth_handoff")
         return False
 
-    row = rows[0]
     st.session_state["sb_access_token"] = row.get("access_token")
     st.session_state["sb_refresh_token"] = row.get("refresh_token") or ""
     st.session_state["user"] = {
@@ -343,7 +439,6 @@ def _restore_auth_handoff() -> bool:
         "email": row.get("user_email") or "",
     }
     st.session_state.pop("google_oauth_url", None)
-    _clear_query_param("auth_handoff")
     log.info("oauth_handoff_restored", handoff_id=handoff_id[:8] + "…")
     return True
 
@@ -416,10 +511,9 @@ def process_auth_callback() -> bool:
             handoff_id = _oauth_handoff_id()
             _save_auth_handoff(handoff_id, response.session)
             _persist_session(response.session)
-            # Keep auth_handoff in the URL so a fresh Streamlit session can recover tokens.
+            # Keep auth_handoff in the URL so reruns / fresh Streamlit sessions can recover.
             st.query_params["auth_handoff"] = handoff_id
             _clear_oauth_query_params(keep_handoff=True)
-            st.rerun()
         except (APIError, ValueError, TypeError) as exc:
             report_error(log, "oauth_exchange_failed", exc)
             st.error(f"Sign-in failed: {exc}")
@@ -528,6 +622,10 @@ def get_logged_in_user() -> dict[str, str] | None:
 
 def logout() -> None:
     """Sign out and clear Streamlit session auth state."""
+    handoff_id = _query_param("auth_handoff")
+    if handoff_id:
+        _consume_auth_handoff(handoff_id)
+
     supabase = get_supabase()
     try:
         access = st.session_state.get("sb_access_token")
@@ -545,7 +643,7 @@ def logout() -> None:
 
 def restore_session_from_tokens() -> None:
     """Re-hydrate user from saved tokens when not handling OAuth callback."""
-    if "user" in st.session_state:
+    if get_logged_in_user():
         return
 
     access = st.session_state.get("sb_access_token")
@@ -563,7 +661,9 @@ def restore_session_from_tokens() -> None:
                 "email": user_response.user.email or "",
             }
     except Exception:
-        _clear_auth_state()
+        # Keep auth_handoff recovery available when Streamlit resets session_state.
+        if not _query_param("auth_handoff"):
+            _clear_auth_state()
 
 
 def get_authenticated_client() -> Client | None:
@@ -695,11 +795,8 @@ def render_login_page() -> bool:
     Returns True when the user is authenticated.
     """
     process_auth_callback()
-    handoff_restored = _restore_auth_handoff()
+    _restore_auth_handoff()
     restore_session_from_tokens()
-
-    if handoff_restored and get_logged_in_user():
-        st.rerun()
 
     if get_logged_in_user():
         return True
@@ -714,8 +811,18 @@ def render_login_page() -> bool:
         with login_tab:
             st.markdown("##### Sign in with Google")
 
+            redirect_warning = _oauth_redirect_config_warning()
+            if redirect_warning:
+                st.warning(redirect_warning)
+
             try:
-                if not st.session_state.get("google_oauth_url"):
+                redirect_to = _redirect_url_with_pkce_sid()
+                cached_redirect = st.session_state.get("google_oauth_redirect")
+                if (
+                    not st.session_state.get("google_oauth_url")
+                    or cached_redirect != redirect_to
+                ):
+                    st.session_state["google_oauth_redirect"] = redirect_to
                     st.session_state["google_oauth_url"] = login_with_google()
                 oauth_url = st.session_state["google_oauth_url"]
                 st.link_button(
@@ -727,6 +834,7 @@ def render_login_page() -> bool:
                 )
                 if st.button("Refresh Google sign-in link", use_container_width=True):
                     st.session_state.pop("google_oauth_url", None)
+                    st.session_state.pop("google_oauth_redirect", None)
                     st.session_state.pop("pkce_code_verifier", None)
                     st.session_state.pop("pkce_session_id", None)
                     _clear_pending_pkce()

@@ -697,12 +697,20 @@ def research_property(address: str) -> dict[str, Any]:
     prompt = f"""Research the residential property at: {address}
 
 Use live listing search results (Zillow, Redfin, Realtor.com, MLS, county records).
+Read the FULL listing description and agent remarks — not just headline stats or Rent Zestimate.
+
 Extract ONLY these fields:
 - price (current list price USD, number only)
 - taxes (total ANNUAL property tax USD)
 - hoa (monthly HOA fee USD, 0 if none)
 - square_footage (integer)
 - property_condition: exactly one of "Excellent", "Good", "Fair", "Poor"
+- property_type: e.g. "Single Family", "Duplex", "Triplex", "Multi-Family", "Mixed Use"
+- stated_gross_monthly_rent: TOTAL monthly gross rent for the entire property if explicitly
+  stated in the listing description (sum all units). Use 0 if not stated. If the listing gives
+  ANNUAL rent/income, divide by 12. If it gives per-unit rent, multiply by unit count.
+- listing_rent_notes: quote or paraphrase any rent/income/tenant language from the listing
+  (empty string if none). Include whether amounts were monthly or annual.
 
 Return ONLY JSON:
 {{
@@ -711,7 +719,10 @@ Return ONLY JSON:
   "taxes": number,
   "hoa": number,
   "square_footage": number,
-  "property_condition": "Good"
+  "property_condition": "Good",
+  "property_type": "Single Family",
+  "stated_gross_monthly_rent": 0,
+  "listing_rent_notes": ""
 }}"""
 
     raw = generate_with_retry(
@@ -728,6 +739,9 @@ Return ONLY JSON:
             "hoa": 0.0,
             "square_footage": 0,
             "property_condition": "Unknown",
+            "property_type": "Unknown",
+            "stated_gross_monthly_rent": 0.0,
+            "listing_rent_notes": "",
         }
 
     data["address"] = address
@@ -737,6 +751,9 @@ Return ONLY JSON:
     data["square_footage"] = int(safe_float(data.get("square_footage")))
     condition = str(data.get("property_condition", "Unknown")).strip()
     data["property_condition"] = condition
+    data["property_type"] = str(data.get("property_type", "Unknown")).strip() or "Unknown"
+    data["stated_gross_monthly_rent"] = safe_float(data.get("stated_gross_monthly_rent"))
+    data["listing_rent_notes"] = str(data.get("listing_rent_notes", "")).strip()
     return data
 
 
@@ -768,6 +785,12 @@ RESEARCH DATA (verified extraction):
 {json.dumps(research, indent=2)}
 
 Produce a complete investment underwriting. Use research price/taxes/hoa/sqft as anchors.
+
+RENT (critical):
+- If research includes stated_gross_monthly_rent > 0 or listing_rent_notes, use that as rent
+  (total building gross monthly rent). Do NOT substitute a single-family Rent Zestimate.
+- For duplex/triplex/multifamily, rent must reflect ALL units combined.
+- If listing_rent_notes mention annual income, divide by 12 for monthly rent.
 
 Return ONLY JSON with these keys:
 {{
@@ -880,9 +903,12 @@ def researcher_agent(address: str, model: str) -> str:
       listed price of the home. If the property is not currently listed, insert 9999999 as the price of the home.
 
           Find the following details:
-          1. PROPERTY BASICS: Current listing price (or estimated market value), year built, and HOA fees.
+          1. PROPERTY BASICS: Current listing price (or estimated market value), year built, HOA fees, and property type (single-family, duplex, triplex, multifamily, etc.). Read the FULL Zillow/Redfin listing description and agent remarks — not just the summary card.
           2. TAXES: Total Annual Property Tax (including school and local taxes).
-          3. RENT: Rent Zestimate or actual rental listings for similar homes in this specific neighborhood.
+          3. RENT (read listing description carefully):
+             - First, extract any rent or income explicitly stated in the listing description (e.g. "currently rents for $X", "gross annual rent $X", "tenant paying $X/month", "each unit rents for $X"). Note whether amounts are monthly or annual; if annual, also state the monthly equivalent.
+             - For multifamily/duplex/triplex, report TOTAL gross monthly rent for the entire building (sum all units). Do not report rent for only one unit unless the property is single-family.
+             - Only if the listing does NOT state rent/income, fall back to Rent Zestimate or comparable rental listings — and note that the estimate assumes single-family unless comps match the property type.
           4. INSURANCE: Monthly insurance costs or local zip code averages.
           5. VALUATION: Recent comparable sales (comps) in the immediate area; preferably 3 properties. Comps must be properties with similar characteristics (size, age, location). Provide the names of the properties you used to determine the comps, their
       sale prices, and how they compare to the target property.
@@ -906,6 +932,12 @@ def analyzer_agent(
     RESEARCH DATA:
     {research_data}
     If the price given is 9999999, it means the property is not currently listed and you must use the comps and market data to estimate a realistic listing price. Do not leave the price as 9999999 in your final JSON output.
+
+    RENT (critical):
+    - If the research cites rent or income from the listing description, use that as "rent" (monthly gross for the whole property). Convert annual amounts to monthly (/12). Sum per-unit rents for multifamily/duplex/triplex.
+    - Do NOT use a single-family Rent Zestimate when the property is multifamily or when the listing already states rent/income.
+    - Only estimate from comps/zestimates when the listing provides no rent/income data.
+
     OUTPUT FORMAT:
     Return ONLY a JSON object with these keys:
     {{

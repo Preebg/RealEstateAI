@@ -680,5 +680,41 @@ class TestHeadlessDbClient(unittest.TestCase):
                     create.assert_not_called()
 
 
+class TestOAuthRedirectUrl(unittest.TestCase):
+    def test_prefers_live_app_url_over_localhost_secret(self):
+        from unittest.mock import patch
+
+        with patch("authenticate._headless_mode", return_value=False):
+            with patch(
+                "authenticate._current_app_url",
+                return_value="https://my-app.streamlit.app",
+            ):
+                with patch(
+                    "authenticate._configured_redirect_url",
+                    return_value="http://localhost:8501",
+                ):
+                    from authenticate import _get_redirect_url
+
+                    self.assertEqual(
+                        _get_redirect_url(), "https://my-app.streamlit.app"
+                    )
+
+    def test_uses_localhost_when_app_is_local(self):
+        from unittest.mock import patch
+
+        with patch("authenticate._headless_mode", return_value=False):
+            with patch(
+                "authenticate._current_app_url",
+                return_value="http://localhost:8501",
+            ):
+                with patch(
+                    "authenticate._configured_redirect_url",
+                    return_value="http://localhost:8501",
+                ):
+                    from authenticate import _get_redirect_url
+
+                    self.assertEqual(_get_redirect_url(), "http://localhost:8501")
+
+
 if __name__ == "__main__":
     unittest.main()
