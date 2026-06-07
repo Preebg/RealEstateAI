@@ -14,6 +14,12 @@ from finance import (
     project_value_schedule,
 )
 from authenticate import get_logged_in_user, render_auth_sidebar
+from share_access import (
+    build_share_url,
+    create_property_share_link,
+    is_guest_viewer,
+    render_guest_sidebar,
+)
 from knowledge_base import (
     compute_rent_deviation_pct,
     get_ai_baseline_maint,
@@ -39,6 +45,8 @@ import tldextract
 
 if not render_auth_page():
     st.stop()
+
+_guest_mode = is_guest_viewer()
 
 _map_address = consume_map_property_selection()
 if _map_address:
@@ -74,7 +82,10 @@ render_page_hero(
 
 # 2. Sidebar for Inputs (Instead of hardcoded variables)
 with st.sidebar:
-    render_auth_sidebar()
+    if _guest_mode:
+        render_guest_sidebar()
+    else:
+        render_auth_sidebar()
     st.divider()
     render_market_pulse()
     st.divider()
@@ -82,11 +93,23 @@ with st.sidebar:
     down_payment=st.number_input("Expected Down Payment (%)", value=25)
     loan_term=st.number_input("Loan Term (yrs)", value=30)
     interest_rate=st.number_input("Your Mortgage Rate (%)", value=6.000)
-address = st.text_input(label='Property Address', key='address_input', placeholder="123 Main St, New York, NY")# 3. The Analysis Logic
+if _guest_mode:
+    st.info(
+        "You're viewing via a shared link. Browse and explore read-only — "
+        "sign in to run new AI research or save assumptions."
+    )
+address = st.text_input(
+    label='Property Address',
+    key='address_input',
+    placeholder="123 Main St, New York, NY",
+    disabled=_guest_mode,
+    help="Guests can open properties from the Portfolio Map. Sign in to search new addresses.",
+)
+# 3. The Analysis Logic
 if "property_data" not in st.session_state:
     st.session_state["property_data"] = None
 
-if st.button("Analyze Property"):
+if st.button("Analyze Property", disabled=_guest_mode):
     if address:
         st.warning(
             "**LEGAL DISCLOSURE:** This is an AI-powered educational tool. Quantum-probabilistic scores are simulations, not financial guarantees. Consult a professional before making investment decisions in NY, NC, FL, TX, AL,  PA, or SC."
@@ -140,6 +163,8 @@ if st.button("Analyze Property"):
 
     else:
         st.warning("Please enter a property address.")
+elif _guest_mode and not st.session_state.property_data:
+    st.caption("Open a property from the **Portfolio Map** or use the link your friend shared.")
 if st.session_state.property_data:
     property_info=st.session_state.property_data
 
@@ -281,6 +306,35 @@ if st.session_state.property_data:
     header_col1, header_col2, header_col3 = st.columns([2, 1, 1])
     with header_col1:
         st.subheader("📊 Analysis Overview")
+        share_property_id = property_id or get_property_id_by_address(address)
+        if not _guest_mode and share_property_id:
+            with st.popover("🔗 Share with a friend"):
+                st.caption(
+                    "Send a read-only link — no account needed. "
+                    "Friends can browse the portfolio but cannot save changes."
+                )
+                include_assumptions = st.checkbox(
+                    "Include my personal assumptions",
+                    value=True,
+                    help="When checked, your rent/fee sliders are shown; otherwise AI baselines only.",
+                )
+                if st.button("Generate share link", type="primary", key="create_share_link"):
+                    token = create_property_share_link(
+                        str(share_property_id),
+                        include_assumptions=include_assumptions,
+                    )
+                    if token:
+                        st.session_state["last_share_url"] = build_share_url(token)
+                    else:
+                        st.error("Could not create share link. Try again.")
+                if st.session_state.get("last_share_url"):
+                    st.text_input(
+                        "Copy this link",
+                        value=st.session_state["last_share_url"],
+                        label_visibility="collapsed",
+                    )
+        elif not _guest_mode and not from_kb:
+            st.caption("Save this property to enable sharing with friends.")
 
     with header_col2:
         st.metric(
@@ -476,7 +530,7 @@ if st.session_state.property_data:
         if from_kb
         else "✅ Save Property + My Assumptions"
     )
-    if st.button(save_label, disabled=from_kb and not has_assumption_changes):
+    if not _guest_mode and st.button(save_label, disabled=from_kb and not has_assumption_changes):
         if hitl_is_outlier and not str(override_notes).strip():
             st.error("An override note is required when rent differs by more than 50% from the AI.")
             st.stop()
@@ -523,6 +577,8 @@ if st.session_state.property_data:
             else f"Saved {address} to the shared catalog with your assumptions."
         )
         st.rerun()
+    elif _guest_mode:
+        st.caption("Sign in to save properties or personal assumptions to the database.")
     elif from_kb and not has_assumption_changes:
         st.caption("Adjust a slider above to enable saving your personal assumptions.")
     

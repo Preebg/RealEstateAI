@@ -13,6 +13,7 @@ import streamlit.components.v1 as components
 from streamlit_folium import st_folium
 
 from authenticate import render_auth_sidebar
+from share_access import is_guest_viewer, render_guest_sidebar
 from finance import analyze_investment, calculate_10yr_appreciation, calculate_one_year_roi
 from knowledge_base import (
     _fetch_canonical_properties,
@@ -655,7 +656,10 @@ def render_portfolio_map_page() -> None:
     )
 
     with st.sidebar:
-        render_auth_sidebar()
+        if is_guest_viewer():
+            render_guest_sidebar()
+        else:
+            render_auth_sidebar()
         st.divider()
         render_market_pulse()
 

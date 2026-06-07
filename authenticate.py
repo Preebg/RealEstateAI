@@ -1101,6 +1101,14 @@ button[data-testid="baseButton-secondary"][arial-label="Open terms popup"] p{
     return False
 
 
-def render_auth_page() -> bool:
-    """Login / sign-up gate for app entry. Returns True when authenticated."""
+def render_auth_page(*, allow_guest: bool = True) -> bool:
+    """
+    Login / sign-up gate for app entry.
+    Returns True when authenticated or in a valid guest share session.
+    """
+    if allow_guest:
+        from share_access import activate_guest_session_from_query, is_guest_viewer
+
+        if activate_guest_session_from_query() or is_guest_viewer():
+            return True
     return render_login_page()

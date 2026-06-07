@@ -77,6 +77,12 @@ def _resolve_user_id(user_id: str | None) -> str | None:
 
 def _fetch_canonical_properties() -> list[dict[str, Any]]:
     """Return all shared canonical property rows (one per address)."""
+    if in_streamlit_app():
+        from share_access import fetch_guest_portfolio, is_guest_viewer
+
+        if is_guest_viewer():
+            return fetch_guest_portfolio()
+
     supabase = get_client()
     try:
         response = supabase.table("properties").select("*").execute()
@@ -176,6 +182,18 @@ def lookup_property(address: str, user_id: str | None = None) -> dict[str, Any] 
     """Instant Pull: return a cached property for this address if it exists."""
     if not address or not address.strip():
         return None
+
+    if in_streamlit_app():
+        from share_access import fetch_guest_property, is_guest_viewer
+
+        if is_guest_viewer():
+            hit = fetch_guest_property(address=address)
+            if hit:
+                record = _normalize_record_numerics(hit)
+                record["from_kb"] = True
+                return record
+            return None
+
     data = get_kb_raw_data(user_id)
     hit = data.get(normalize_address_key(address))
     if hit:
@@ -502,6 +520,14 @@ def save_canonical_property(
     show_errors: bool = True,
 ) -> Any:
     """Upsert shared property facts (AI baselines + harvest metadata)."""
+    if in_streamlit_app():
+        from share_access import is_guest_viewer
+
+        if is_guest_viewer():
+            if show_errors and st is not None:
+                st.error("Sign in to save properties to the database.")
+            return None
+
     if not user_id or not is_valid_uuid(user_id):
         raise ValueError(f"user_id must be a valid UUID, got: {user_id!r}")
 
@@ -542,6 +568,14 @@ def save_user_property_override(
     show_errors: bool = True,
 ) -> Any:
     """Upsert per-user underwriting assumptions for a canonical property."""
+    if in_streamlit_app():
+        from share_access import is_guest_viewer
+
+        if is_guest_viewer():
+            if show_errors and st is not None:
+                st.error("Sign in to save your assumptions.")
+            return None
+
     if not user_id or not is_valid_uuid(user_id):
         raise ValueError(f"user_id must be a valid UUID, got: {user_id!r}")
     if not property_id or not is_valid_uuid(property_id):
