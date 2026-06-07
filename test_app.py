@@ -6,6 +6,18 @@ from unittest.mock import patch
 
 from scipy.optimize import minimize as scipy_minimize
 
+_VERIFIED_DISCOVERY_ROW = {
+    "address": "10 Park Ave, Rochester, NY 14607",
+    "city": "Rochester",
+    "list_price": 210000,
+    "listing_url": "https://www.zillow.com/homedetails/10-Park-Ave-Rochester-NY-14607/123_zpid/",
+}
+
+
+def _discovery_generate_return(payload: str) -> tuple[str, list[str]]:
+    return payload, []
+
+
 # Mock streamlit before importing engine to avoid secrets errors
 with patch("streamlit.secrets", {"GEMINI_API_KEY": "fake_key"}):
     from engine import (
@@ -424,15 +436,7 @@ class TestDailyQuotaDetection(unittest.TestCase):
                 mock_sleep.assert_not_called()
 
     def test_discovery_switches_to_gemma_on_flash_quota(self):
-        payload = json.dumps(
-            [
-                {
-                    "address": "10 Park Ave, Rochester, NY",
-                    "city": "Rochester",
-                    "list_price": 210000,
-                }
-            ]
-        )
+        payload = json.dumps([_VERIFIED_DISCOVERY_ROW])
         quota_err = errors.ClientError(
             429,
             {
@@ -448,9 +452,9 @@ class TestDailyQuotaDetection(unittest.TestCase):
             calls.append(model)
             if model == DISCOVERY_MODEL:
                 raise quota_err
-            return payload
+            return _discovery_generate_return(payload)
 
-        with patch("engine.generate_with_retry", side_effect=fake_generate):
+        with patch("engine._generate_with_grounding_retry", side_effect=fake_generate):
             listings = discover_hot_market_listings()
         self.assertEqual(len(listings), 1)
         self.assertEqual(calls[0], DISCOVERY_MODEL)
@@ -460,7 +464,10 @@ class TestDailyQuotaDetection(unittest.TestCase):
 
 class TestSearchGrounding(unittest.TestCase):
     def test_discovery_uses_search_for_gemini_and_gemma_fallback(self):
-        with patch("engine.generate_with_retry", return_value="[]") as mock_gen:
+        with patch(
+            "engine._generate_with_grounding_retry",
+            return_value=_discovery_generate_return("[]"),
+        ) as mock_gen:
             discover_hot_market_listings(model=DISCOVERY_MODEL)
             self.assertTrue(mock_gen.call_args.kwargs["use_search"])
 
@@ -521,17 +528,7 @@ class TestDiscoveryParsing(unittest.TestCase):
     def test_extract_wrapped_listings_object(self):
         from engine import _build_listings_from_raw
 
-        raw = json.dumps(
-            {
-                "listings": [
-                    {
-                        "address": "10 Park Ave, Rochester, NY",
-                        "city": "Rochester",
-                        "price": 210000,
-                    }
-                ]
-            }
-        )
+        raw = json.dumps({"listings": [{**_VERIFIED_DISCOVERY_ROW, "price": 210000}]})
         listings = _build_listings_from_raw(raw, 250_000)
         self.assertEqual(len(listings), 1)
         self.assertEqual(listings[0]["city"], "Rochester")
@@ -543,18 +540,21 @@ class TestDiscoveryParsing(unittest.TestCase):
         def fake_generate(model, prompt, **kwargs):
             calls["count"] += 1
             if calls["count"] == 1:
-                return "No parseable listings in this response."
-            return json.dumps(
-                [
-                    {
-                        "address": "15 Maple Dr, Rochester, NY 14609",
-                        "city": "Rochester",
-                        "list_price": 199000,
-                    }
-                ]
+                return _discovery_generate_return("No parseable listings in this response.")
+            return _discovery_generate_return(
+                json.dumps(
+                    [
+                        {
+                            "address": "15 Maple Dr, Rochester, NY 14609",
+                            "city": "Rochester",
+                            "list_price": 199000,
+                            "listing_url": "https://www.redfin.com/NY/Rochester/15-Maple-Dr-14609/home/999",
+                        }
+                    ]
+                )
             )
 
-        with patch("engine.generate_with_retry", side_effect=fake_generate):
+        with patch("engine._generate_with_grounding_retry", side_effect=fake_generate):
             listings = discover_hot_market_listings(model=DISCOVERY_MODEL)
 
         self.assertEqual(len(listings), 1)
@@ -570,12 +570,35 @@ class TestDiscoveryParsing(unittest.TestCase):
                     "address": "22 Suburban Ln, Henrietta, NY 14623",
                     "city": "Rochester",
                     "list_price": 185000,
+                    "listing_url": "https://www.realtor.com/realestateandhomes-detail/22-Suburban-Ln",
                 }
             ]
         )
         listings = _build_listings_from_raw(raw, 250_000)
         self.assertEqual(len(listings), 1)
         self.assertEqual(listings[0]["city"], "Rochester")
+
+    def test_rejects_hallucinated_rows_without_listing_url(self):
+        from engine import _build_listings_from_raw
+
+        raw = json.dumps(
+            [
+                {
+                    "address": "999 Fake St, Rochester, NY 14607",
+                    "city": "Rochester",
+                    "list_price": 150000,
+                }
+            ]
+        )
+        listings = _build_listings_from_raw(raw, 250_000)
+        self.assertEqual(listings, [])
+
+    def test_rejects_zero_list_price(self):
+        from engine import _build_listings_from_raw
+
+        raw = json.dumps([{**_VERIFIED_DISCOVERY_ROW, "list_price": 0}])
+        listings = _build_listings_from_raw(raw, 250_000)
+        self.assertEqual(listings, [])
 
 
 class TestOneYearROI(unittest.TestCase):

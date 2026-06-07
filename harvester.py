@@ -301,6 +301,7 @@ async def _research_listing(
     print(f"  [research] START {address} ({market_city})")
     research = await engine.research_property_async(
         address,
+        discovery=listing,
         rate_limiter=rate_limiter,
         session=session,
     )

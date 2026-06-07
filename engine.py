@@ -11,6 +11,7 @@ from collections import defaultdict, deque
 from dataclasses import dataclass
 from datetime import date
 from typing import Any, cast
+from urllib.parse import urlparse
 
 from google import genai
 from google.genai import errors, types
@@ -99,6 +100,10 @@ DISCOVERY_MARKET_KEYS = frozenset(name for name, _, _ in HOT_MARKETS)
 MAX_DISCOVERY_LISTINGS = 25
 MIN_PREFERRED_YEAR_BUILT = 1965
 MAX_DISCOVERY_PRICE = 250_000
+_TRUSTED_LISTING_DOMAINS = ("zillow.com", "redfin.com", "realtor.com")
+_DISCOVERY_STATE_CODES = frozenset({"NY", "NC", "SC", "OH", "TX"})
+_US_ZIP_RE = re.compile(r"\b\d{5}(?:-\d{4})?\b")
+_STREET_NUMBER_RE = re.compile(r"(?:^|\s)(\d{1,6}[A-Za-z]?)\s+\S+")
 MAX_SYNTHESIS_PRICE = 400_000
 MAX_API_RETRIES = 5
 BACKOFF_BASE_SEC = 4.0
@@ -336,6 +341,98 @@ def generate_with_retry(
                     f"after {attempt + 1} attempt(s), total_wait_sec={total_wait_sec:.2f}"
                 )
             return text
+        except (errors.ClientError, errors.ServerError, errors.APIError) as e:
+            last_error = e
+            if is_daily_quota_exhausted(e):
+                _log_retry(
+                    model=model,
+                    attempt=attempt,
+                    max_retries=max_retries,
+                    error=e,
+                    delay_sec=0.0,
+                    total_wait_sec=total_wait_sec,
+                    retriable=False,
+                )
+                raise
+            will_retry = _is_retriable(e) and attempt < max_retries - 1
+            if will_retry:
+                delay_sec = retry_delay_seconds(attempt)
+                total_wait_sec += delay_sec
+                _log_retry(
+                    model=model,
+                    attempt=attempt,
+                    max_retries=max_retries,
+                    error=e,
+                    delay_sec=delay_sec,
+                    total_wait_sec=total_wait_sec,
+                    retriable=True,
+                )
+                time.sleep(delay_sec)
+                continue
+            _log_retry(
+                model=model,
+                attempt=attempt,
+                max_retries=max_retries,
+                error=e,
+                delay_sec=0.0,
+                total_wait_sec=total_wait_sec,
+                retriable=False,
+            )
+            raise
+
+    raise RuntimeError(
+        f"Max retries ({max_retries}) exceeded for model={model}, "
+        f"total_wait_sec={total_wait_sec:.2f}"
+    ) from last_error
+
+
+def _generate_with_grounding_retry(
+    model: str,
+    contents: str,
+    *,
+    use_search: bool = False,
+    max_retries: int = MAX_API_RETRIES,
+    session: GenaiSession | None = None,
+) -> tuple[str, list[str]]:
+    """Like generate_with_retry but also returns grounded search URLs for discovery."""
+    active = session or get_session()
+    config = None
+    if use_search:
+        config = types.GenerateContentConfig(
+            tools=[types.Tool(google_search=types.GoogleSearch())]
+        )
+
+    last_error: BaseException | None = None
+    total_wait_sec = 0.0
+
+    for attempt in range(max_retries):
+        try:
+            response = active.client.models.generate_content(
+                model=model,
+                contents=contents,
+                config=config,
+            )
+            text = _extract_response_text(response)
+            if not text.strip() and attempt < max_retries - 1:
+                delay_sec = retry_delay_seconds(attempt)
+                total_wait_sec += delay_sec
+                _log_retry(
+                    model=model,
+                    attempt=attempt,
+                    max_retries=max_retries,
+                    error=RuntimeError("empty response text"),
+                    delay_sec=delay_sec,
+                    total_wait_sec=total_wait_sec,
+                    retriable=True,
+                )
+                time.sleep(delay_sec)
+                continue
+            if attempt > 0:
+                print(
+                    f"[gemini-retry] model={model} succeeded "
+                    f"after {attempt + 1} attempt(s), total_wait_sec={total_wait_sec:.2f}"
+                )
+            return text, _extract_grounding_web_urls(response)
         except (errors.ClientError, errors.ServerError, errors.APIError) as e:
             last_error = e
             if is_daily_quota_exhausted(e):
@@ -647,6 +744,108 @@ def _infer_discovery_city(address: str, city: str) -> str:
     return _match_market_from_text(address)
 
 
+def _is_trusted_listing_url(url: str) -> bool:
+    """True when URL points at a major listing site."""
+    if not url or not url.strip():
+        return False
+    host = urlparse(url.strip()).netloc.lower()
+    if host.startswith("www."):
+        host = host[4:]
+    return any(host == domain or host.endswith(f".{domain}") for domain in _TRUSTED_LISTING_DOMAINS)
+
+
+def is_plausible_discovery_address(address: str) -> bool:
+    """Reject hallucinated or incomplete discovery addresses."""
+    normalized = address.strip()
+    if len(normalized) < 12 or "," not in normalized:
+        return False
+    if not _US_ZIP_RE.search(normalized):
+        return False
+    if not _STREET_NUMBER_RE.search(normalized):
+        return False
+    upper = normalized.upper()
+    if not any(f", {state}" in upper or f" {state} " in upper for state in _DISCOVERY_STATE_CODES):
+        return False
+    return True
+
+
+def _extract_grounding_web_urls(response: Any) -> list[str]:
+    """Collect grounded search result URLs from a Gemini response."""
+    urls: list[str] = []
+    seen: set[str] = set()
+    for candidate in getattr(response, "candidates", None) or []:
+        metadata = getattr(candidate, "grounding_metadata", None)
+        if metadata is None:
+            continue
+        for chunk in getattr(metadata, "grounding_chunks", None) or []:
+            web = getattr(chunk, "web", None)
+            uri = getattr(web, "uri", None) if web is not None else None
+            if uri and uri not in seen:
+                seen.add(uri)
+                urls.append(str(uri))
+    return urls
+
+
+def _filter_verified_discovery_listings(
+    listings: list[dict[str, Any]],
+    *,
+    max_price: float,
+    grounding_urls: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Drop discovery rows that look invented or lack verifiable listing evidence."""
+    grounded_trusted = [
+        url
+        for url in grounding_urls or []
+        if _is_trusted_listing_url(url)
+    ]
+    verified: list[dict[str, Any]] = []
+    for item in listings:
+        address = str(item.get("address", "")).strip()
+        list_price = safe_float(item.get("list_price"))
+        listing_url = str(
+            item.get("listing_url")
+            or item.get("source_url")
+            or item.get("url")
+            or ""
+        ).strip()
+
+        if not is_plausible_discovery_address(address):
+            _log.info("discovery_rejected_address", address=address[:80], reason="implausible")
+            continue
+        if list_price <= 0 or list_price > max_price:
+            _log.info(
+                "discovery_rejected_price",
+                address=address[:80],
+                list_price=list_price,
+            )
+            continue
+        if not listing_url or not _is_trusted_listing_url(listing_url):
+            _log.info(
+                "discovery_rejected_url",
+                address=address[:80],
+                listing_url=listing_url[:120],
+            )
+            continue
+
+        verified.append(
+            {**item, "address": address, "list_price": list_price, "listing_url": listing_url}
+        )
+    if listings and not verified:
+        _log.warning(
+            "discovery_all_rejected",
+            parsed=len(listings),
+            grounded_trusted=len(grounded_trusted),
+        )
+        print(
+            "[discovery] All parsed listings failed verification "
+            "(need ZIP + street number + trusted listing_url + valid price)."
+        )
+    elif listings and len(verified) < len(listings):
+        rejected = len(listings) - len(verified)
+        print(f"[discovery] Rejected {rejected} unverified listing(s) after parsing.")
+    return verified
+
+
 def _normalize_discovery_item(item: Any) -> dict[str, Any] | None:
     """Map alternate discovery field names into the harvester listing shape."""
     if not isinstance(item, dict):
@@ -672,7 +871,18 @@ def _normalize_discovery_item(item: Any) -> dict[str, Any] | None:
     list_price = safe_float(
         item.get("list_price", item.get("price", item.get("asking_price", 0)))
     )
-    return {"address": address, "city": city, "list_price": list_price}
+    listing_url = str(
+        item.get("listing_url")
+        or item.get("source_url")
+        or item.get("url")
+        or ""
+    ).strip()
+    return {
+        "address": address,
+        "city": city,
+        "list_price": list_price,
+        "listing_url": listing_url,
+    }
 
 
 def _parse_discovery_fallback(text: str) -> list[dict[str, Any]]:
@@ -684,7 +894,7 @@ def _parse_discovery_fallback(text: str) -> list[dict[str, Any]]:
             continue
         city = _infer_discovery_city(line, "")
         if city:
-            results.append({"address": line, "city": city, "list_price": 0.0})
+            results.append({"address": line, "city": city, "list_price": 0.0, "listing_url": ""})
     return results
 
 
@@ -701,12 +911,17 @@ def _dedupe_discovery_listings(
         if key in seen:
             continue
         seen.add(key)
-        if item["list_price"] <= max_price or item["list_price"] == 0:
+        if 0 < item["list_price"] <= max_price:
             unique.append(item)
     return unique[:limit]
 
 
-def _build_listings_from_raw(raw: str, max_price: float) -> list[dict[str, Any]]:
+def _build_listings_from_raw(
+    raw: str,
+    max_price: float,
+    *,
+    grounding_urls: list[str] | None = None,
+) -> list[dict[str, Any]]:
     """Parse and normalize discovery model output into listing dicts."""
     parsed = _extract_json(raw)
     listings: list[dict[str, Any]] = []
@@ -718,6 +933,11 @@ def _build_listings_from_raw(raw: str, max_price: float) -> list[dict[str, Any]]
     if not listings:
         listings = _parse_discovery_fallback(raw)
 
+    listings = _filter_verified_discovery_listings(
+        listings,
+        max_price=max_price,
+        grounding_urls=grounding_urls,
+    )
     return _dedupe_discovery_listings(listings, max_price=max_price)
 
 
@@ -777,13 +997,26 @@ Each listing price must be strictly under ${max_price:,.0f}.
 
 Return ONLY a JSON array (no markdown, no commentary). Example:
 [
-  {{"address": "123 Main St, Henrietta, NY 14623", "city": "Rochester", "list_price": 189000}},
-  {{"address": "456 Oak Ave, Penfield, NY 14526", "city": "Rochester", "list_price": 175000}},
-  {{"address": "789 Elm Dr, Cary, NC 27511", "city": "Raleigh", "list_price": 245000}}
+  {{
+    "address": "123 Main St, Henrietta, NY 14623",
+    "city": "Rochester",
+    "list_price": 189000,
+    "listing_url": "https://www.zillow.com/homedetails/123-Main-St-Henrietta-NY-14623/12345678_zpid/"
+  }},
+  {{
+    "address": "456 Oak Ave, Penfield, NY 14526",
+    "city": "Rochester",
+    "list_price": 175000,
+    "listing_url": "https://www.redfin.com/NY/Penfield/456-Oak-Ave-14526/home/12345678"
+  }}
 ]
 
 Rules:
 - Search Zillow, Redfin, Realtor.com, or MLS listing pages for active for-sale homes.
+- NEVER invent, guess, or fabricate addresses. Only return properties you found on an
+  active listing page in this search session.
+- listing_url is REQUIRED for every row — must be the exact Zillow, Redfin, or Realtor.com
+  URL of the active listing you used (not a search-results page).
 - Include suburbs and townships — not just the core city (e.g. Henrietta/Penfield/Fairport
   count as Rochester; Cicero/Clay/Liverpool/North Syracuse count as Syracuse).
 - You MUST return {MAX_DISCOVERY_LISTINGS} distinct listings when possible. Do not stop at 7–13.
@@ -795,9 +1028,11 @@ Rules:
   and small Multi-Family only.
 - Prefer homes built in {MIN_PREFERRED_YEAR_BUILT} or later when year built is visible on the listing.
   If choosing between similar listings, pick newer construction over pre-{MIN_PREFERRED_YEAR_BUILT}.
-- Use real street addresses with city/town, state, and ZIP when available.
+- Use real street addresses with city/town, state, and ZIP (5-digit ZIP required).
 - list_price must be the active asking price as a plain number (no $ or commas).
-- city must be the parent metro key: one of {market_keys} (NOT the suburb name).{exclude_block}"""
+- city must be the parent metro key: one of {market_keys} (NOT the suburb name).
+- If you cannot verify a listing with a real URL and asking price, omit it — do not pad
+  the list with speculative addresses.{exclude_block}"""
 
 
 def _run_discovery_attempt(
@@ -812,12 +1047,12 @@ def _run_discovery_attempt(
         split_market=split_market,
         exclude_addresses=exclude_addresses,
     )
-    raw = generate_with_retry(
+    raw, grounding_urls = _generate_with_grounding_retry(
         model,
         prompt,
         use_search=_model_supports_grounding(model),
     )
-    listings = _build_listings_from_raw(raw, max_price)
+    listings = _build_listings_from_raw(raw, max_price, grounding_urls=grounding_urls)
     return listings, raw
 
 
@@ -1030,9 +1265,30 @@ def discover_hot_market_listings(
     return []
 
 
-def _research_prompt(address: str) -> str:
-    return f"""Research the residential property at: {address}
+def _discovery_hint_block(discovery: dict[str, Any] | None) -> str:
+    if not discovery:
+        return ""
+    list_price = safe_float(discovery.get("list_price"))
+    listing_url = str(discovery.get("listing_url", "")).strip()
+    if list_price <= 0 and not listing_url:
+        return ""
+    lines = [
+        "",
+        "DISCOVERY HINT (verify on the live listing page — do not invent data):",
+    ]
+    if listing_url:
+        lines.append(f"- Listing URL from discovery: {listing_url}")
+    if list_price > 0:
+        lines.append(f"- Discovery reported asking price: ${list_price:,.0f}")
+    lines.append(
+        "- Open that listing page first. If the address or URL is wrong, return price 0."
+    )
+    return "\n".join(lines) + "\n"
 
+
+def _research_prompt(address: str, discovery: dict[str, Any] | None = None) -> str:
+    return f"""Research the residential property at: {address}
+{_discovery_hint_block(discovery)}
 Use live listing search results (Zillow, Redfin, Realtor.com, MLS, county records).
 Read the FULL listing description and agent remarks — not just headline stats or Rent Zestimate.
 
@@ -1091,33 +1347,59 @@ def _normalize_research_payload(address: str, data: Any) -> dict[str, Any]:
     return data
 
 
-def research_property(address: str) -> dict[str, Any]:
+def _apply_discovery_research_fallback(
+    research: dict[str, Any],
+    discovery: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Use verified discovery price when research could not resolve the listing."""
+    if safe_float(research.get("price")) > 0 or not discovery:
+        return research
+    hint_price = safe_float(discovery.get("list_price"))
+    listing_url = str(discovery.get("listing_url", "")).strip()
+    if hint_price > 0 and _is_trusted_listing_url(listing_url):
+        research["price"] = hint_price
+        note = (
+            "Research could not confirm price; using discovery listing URL price."
+        )
+        existing = str(research.get("listing_rent_notes", "")).strip()
+        research["listing_rent_notes"] = f"{existing} {note}".strip()
+    return research
+
+
+def research_property(
+    address: str,
+    *,
+    discovery: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """
     Stage 2 (Research): Gemma extraction with Search Grounding.
     """
     raw = generate_with_retry(
         RESEARCH_MODEL,
-        _research_prompt(address),
+        _research_prompt(address, discovery),
         use_search=_model_supports_grounding(RESEARCH_MODEL),
     )
-    return _normalize_research_payload(address, _extract_json(raw))
+    research = _normalize_research_payload(address, _extract_json(raw))
+    return _apply_discovery_research_fallback(research, discovery)
 
 
 async def research_property_async(
     address: str,
     *,
+    discovery: dict[str, Any] | None = None,
     rate_limiter: ModelRateLimiter | None = None,
     session: GenaiSession | None = None,
 ) -> dict[str, Any]:
     """Async Stage 2 research for parallel harvester workers."""
     raw = await generate_with_retry_async(
         RESEARCH_MODEL,
-        _research_prompt(address),
+        _research_prompt(address, discovery),
         use_search=_model_supports_grounding(RESEARCH_MODEL),
         rate_limiter=rate_limiter,
         session=session,
     )
-    return _normalize_research_payload(address, _extract_json(raw))
+    research = _normalize_research_payload(address, _extract_json(raw))
+    return _apply_discovery_research_fallback(research, discovery)
 
 
 _DISALLOWED_PROPERTY_TYPE_RE = re.compile(
