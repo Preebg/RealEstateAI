@@ -13,6 +13,7 @@ from typing import Any
 from urllib.parse import urlencode
 
 import streamlit as st
+import streamlit.components.v1 as components
 from postgrest.exceptions import APIError
 from supabase import Client, create_client
 
@@ -42,71 +43,84 @@ def _render_google_signin_button(oauth_url: str) -> None:
         else '<span class="google-signin-btn__logo-fallback" aria-hidden="true">G</span>'
     )
 
-    st.markdown(
+    components.html(
         f"""
-        <style>
-        .google-signin-btn {{
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            gap: 12px;
-            width: 100%;
-            min-height: 44px;
-            padding: 0 16px;
-            border: 1px solid #dadce0;
-            border-radius: 8px;
-            background: #ffffff;
-            color: #3c4043;
-            font-family: "Google Sans", "Segoe UI", Roboto, Arial, sans-serif;
-            font-size: 0.95rem;
-            font-weight: 500;
-            line-height: 1;
-            text-decoration: none;
-            box-shadow: 0 1px 2px rgba(60, 64, 67, 0.08);
-            transition: background 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
-            box-sizing: border-box;
-        }}
-        .google-signin-btn:hover {{
-            background: #f8f9fa;
-            border-color: #c6c9cc;
-            box-shadow: 0 1px 3px rgba(60, 64, 67, 0.14);
-            color: #202124;
-        }}
-        .google-signin-btn:active {{
-            background: #f1f3f4;
-            box-shadow: inset 0 1px 2px rgba(60, 64, 67, 0.12);
-        }}
-        .google-signin-btn__logo {{
-            width: 20px;
-            height: 20px;
-            display: block;
-            flex: 0 0 20px;
-            object-fit: contain;
-            mix-blend-mode: lighten;
-        }}
-        .google-signin-btn__logo-fallback {{
-            width: 20px;
-            height: 20px;
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            border-radius: 50%;
-            background: #4285f4;
-            color: #ffffff;
-            font-size: 0.78rem;
-            font-weight: 700;
-            flex: 0 0 20px;
-        }}
-        .google-signin-btn__label {{
-            white-space: nowrap;
-        }}
-        </style>
-        <a class="google-signin-btn" href="{safe_url}" rel="noopener noreferrer">
-            {logo_markup}
-            <span class="google-signin-btn__label">Continue with Google</span>
-        </a>
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="utf-8" />
+            <style>
+            html, body {{
+                margin: 0;
+                padding: 0;
+                background: transparent;
+            }}
+            .google-signin-btn {{
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                gap: 12px;
+                width: 100%;
+                min-height: 44px;
+                padding: 0 16px;
+                border: 1px solid #dadce0;
+                border-radius: 8px;
+                background: #ffffff;
+                color: #3c4043 !important;
+                font-family: "Google Sans", "Segoe UI", Roboto, Arial, sans-serif;
+                font-size: 15px;
+                font-weight: 500;
+                line-height: 1;
+                text-decoration: none !important;
+                box-shadow: 0 1px 2px rgba(60, 64, 67, 0.08);
+                transition: background 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
+                box-sizing: border-box;
+            }}
+            .google-signin-btn:hover {{
+                background: #f8f9fa;
+                border-color: #c6c9cc;
+                box-shadow: 0 1px 3px rgba(60, 64, 67, 0.14);
+                color: #202124 !important;
+            }}
+            .google-signin-btn:active {{
+                background: #f1f3f4;
+                box-shadow: inset 0 1px 2px rgba(60, 64, 67, 0.12);
+            }}
+            .google-signin-btn__logo {{
+                width: 20px;
+                height: 20px;
+                display: block;
+                flex: 0 0 20px;
+                object-fit: contain;
+            }}
+            .google-signin-btn__logo-fallback {{
+                width: 20px;
+                height: 20px;
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                border-radius: 50%;
+                background: #4285f4;
+                color: #ffffff;
+                font-size: 12px;
+                font-weight: 700;
+                flex: 0 0 20px;
+            }}
+            .google-signin-btn__label {{
+                white-space: nowrap;
+            }}
+            </style>
+        </head>
+        <body>
+            <a class="google-signin-btn" href="{safe_url}" target="_top">
+                {logo_markup}
+                <span class="google-signin-btn__label">Continue with Google</span>
+            </a>
+        </body>
+        </html>
         """,
-        unsafe_allow_html=True,
+        height=52,
+        scrolling=False,
     )
 
 
@@ -1007,7 +1021,7 @@ def render_login_page() -> bool:
                 st.empty()
             with row_text:
                 st.markdown(
-                    '<p style="margin:0;padding-top:0.42rem;line-height:1.2;">I have read and agree to the&nbsp;</p>',
+                    '<p class="auth-agreement-text">I have read and agree to the&nbsp;</p>',
                     unsafe_allow_html=True,
                 )
             with row_link:
@@ -1022,7 +1036,7 @@ button[data-testid="baseButton-secondary"][arial-label="Open terms popup"]{
   border: none!important;
   box-shadow: none!important;
   background: transparent!important;
-  color: #2563eb!important;
+  color: var(--primary-color)!important;
   font-size: 1rem!important;
   font-weight: 400!important;
   text-decoration: underline!important;
