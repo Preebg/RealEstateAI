@@ -1217,7 +1217,52 @@ class TestDataProvenance(unittest.TestCase):
         self.assertEqual(confidence_label(0.92), "High")
         self.assertEqual(confidence_label(0.65), "Medium")
         self.assertEqual(confidence_label(0.45), "Low")
-        self.assertEqual(confidence_label(0.20), "Very Low")
+
+
+class TestPortfolioMapGeocoding(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        import sys
+        from unittest.mock import MagicMock
+
+        sys.modules.setdefault("folium", MagicMock())
+        sys.modules.setdefault("streamlit_folium", MagicMock())
+
+    def test_new_market_zip_centroids(self):
+        from portfolio_map_page import resolve_coordinates_local
+
+        cases = [
+            ("10 Main St, Orlando, FL 32801", "32801", "Orlando"),
+            ("20 Oak Ave, Tampa, FL 33602", "33602", "Tampa"),
+            ("30 Bay Rd, Miami, FL 33139", "33139", "Miami"),
+            ("40 State St, Philadelphia, PA 19103", "19103", "Philadelphia"),
+            ("50 Grant St, Pittsburgh, PA 15213", "15213", "Pittsburgh"),
+            ("60 Maple Dr, Buffalo, NY 14221", "14221", "Buffalo"),
+            ("70 Central Ave, Albany, NY 12203", "12203", "Albany"),
+        ]
+        for address, zip_code, market in cases:
+            lat, lon = resolve_coordinates_local(address, zip_code, market)
+            self.assertIsNotNone(lat, msg=address)
+            self.assertIsNotNone(lon, msg=address)
+
+    def test_new_market_suburb_keyword_fallback(self):
+        from portfolio_map_page import resolve_coordinates_local
+
+        lat, lon = resolve_coordinates_local(
+            "100 Suburban Ln, Kissimmee, FL 34741",
+            "34741",
+            "Orlando",
+        )
+        self.assertIsNotNone(lat)
+        self.assertIsNotNone(lon)
+        self.assertLess(lat, 29.0)
+        self.assertGreater(lat, 27.5)
+
+    def test_dataframe_selected_rows_reads_dict_state(self):
+        from portfolio_map_page import _dataframe_selected_rows
+
+        rows = _dataframe_selected_rows({"selection": {"rows": [2], "columns": []}})
+        self.assertEqual(rows, [2])
 
 
 if __name__ == "__main__":

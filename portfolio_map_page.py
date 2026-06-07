@@ -50,19 +50,82 @@ MARKET_CITY_CENTERS: dict[str, tuple[float, float]] = {
     "Austin": (30.2672, -97.7431),
 }
 
-# Ohio harvest scope spans several metros — place by suburb/city when possible.
-OHIO_METRO_KEYWORDS: tuple[tuple[str, tuple[float, float]], ...] = (
-    ("cleveland", (41.4993, -81.6944)),
-    ("lakewood", (41.4810, -81.7980)),
-    ("parma", (41.4048, -81.7229)),
-    ("columbus", (39.9612, -82.9988)),
-    ("dublin", (40.0992, -83.1141)),
-    ("westerville", (40.1262, -82.9291)),
-    ("cincinnati", (39.1031, -84.5120)),
-    ("mason", (39.3601, -84.3099)),
-    ("fairfield", (39.3459, -84.5603)),
-    ("hamilton", (39.3995, -84.5613)),
-)
+# Suburb/city keywords → local map center (same pattern as legacy Ohio handling).
+METRO_SUBURB_CENTERS: dict[str, tuple[tuple[str, tuple[float, float]], ...]] = {
+    "Buffalo": (
+        ("amherst", (42.9784, -78.7997)),
+        ("cheektowaga", (42.9034, -78.7548)),
+        ("tonawanda", (43.0203, -78.8803)),
+        ("williamsville", (42.9639, -78.7378)),
+        ("west seneca", (42.8501, -78.7998)),
+        ("hamburg", (42.7159, -78.8295)),
+        ("orchard park", (42.7676, -78.7439)),
+        ("kenmore", (42.9659, -78.8700)),
+    ),
+    "Albany": (
+        ("colonie", (42.7170, -73.7818)),
+        ("guilderland", (42.7048, -73.9110)),
+        ("latham", (42.7470, -73.7590)),
+        ("schenectady", (42.8142, -73.9396)),
+        ("clifton park", (42.8656, -73.7701)),
+        ("troy", (42.7284, -73.6918)),
+    ),
+    "Philadelphia": (
+        ("ardmore", (40.0068, -75.2855)),
+        ("media", (39.9168, -75.3877)),
+        ("norristown", (40.1215, -75.3399)),
+        ("king of prussia", (40.0893, -75.3960)),
+        ("levittown", (40.1551, -74.8288)),
+        ("bensalem", (40.1046, -74.9513)),
+    ),
+    "Pittsburgh": (
+        ("cranberry", (40.6849, -80.1062)),
+        ("monroeville", (40.4212, -79.7881)),
+        ("bethel park", (40.3276, -80.0395)),
+        ("mt. lebanon", (40.3554, -80.0495)),
+        ("mccandless", (40.5870, -80.0289)),
+        ("robinson township", (40.4587, -80.1289)),
+    ),
+    "Orlando": (
+        ("kissimmee", (28.2920, -81.4076)),
+        ("winter park", (28.5997, -81.3392)),
+        ("sanford", (28.8006, -81.2731)),
+        ("apopka", (28.6934, -81.5322)),
+        ("ocoee", (28.5692, -81.5440)),
+        ("altamonte springs", (28.6611, -81.3656)),
+        ("lake mary", (28.7589, -81.3178)),
+    ),
+    "Tampa": (
+        ("st. petersburg", (27.7676, -82.6403)),
+        ("clearwater", (27.9659, -82.8001)),
+        ("brandon", (27.9378, -82.2859)),
+        ("wesley chapel", (28.2397, -82.3279)),
+        ("riverview", (27.8661, -82.3265)),
+        ("largo", (27.9095, -82.7873)),
+        ("palm harbor", (28.0781, -82.7637)),
+    ),
+    "Miami": (
+        ("fort lauderdale", (26.1224, -80.1373)),
+        ("hialeah", (25.8576, -80.2781)),
+        ("pembroke pines", (26.0031, -80.2239)),
+        ("hollywood", (26.0112, -80.1495)),
+        ("coral springs", (26.2712, -80.2706)),
+        ("miramar", (25.9861, -80.3036)),
+        ("pompano beach", (26.2379, -80.1248)),
+    ),
+    "Ohio": (
+        ("cleveland", (41.4993, -81.6944)),
+        ("lakewood", (41.4810, -81.7980)),
+        ("parma", (41.4048, -81.7229)),
+        ("columbus", (39.9612, -82.9988)),
+        ("dublin", (40.0992, -83.1141)),
+        ("westerville", (40.1262, -82.9291)),
+        ("cincinnati", (39.1031, -84.5120)),
+        ("mason", (39.3601, -84.3099)),
+        ("fairfield", (39.3459, -84.5603)),
+        ("hamilton", (39.3995, -84.5613)),
+    ),
+}
 
 # ZIP-prefix → discovery market when no centroid is in ZIP_CENTROIDS.
 _ZIP_PREFIX_MARKETS: tuple[tuple[str, str], ...] = (
@@ -155,6 +218,48 @@ ZIP_CENTROIDS: dict[str, tuple[float, float]] = {
     "13041": (43.1850, -76.1720),
     "13088": (43.1060, -76.2090),
     "13090": (43.1650, -76.2200),
+    # Buffalo
+    "14221": (42.9860, -78.7270),
+    "14226": (42.9610, -78.7820),
+    "14228": (43.0180, -78.7520),
+    "14217": (42.9630, -78.8640),
+    "14043": (42.9860, -78.6970),
+    # Albany
+    "12203": (42.6520, -73.7860),
+    "12208": (42.6540, -73.8060),
+    "12211": (42.7070, -73.7620),
+    "12303": (42.7980, -73.9390),
+    "12110": (42.8140, -73.9390),
+    # Philadelphia
+    "19103": (39.9520, -75.1740),
+    "19104": (39.9590, -75.1960),
+    "19107": (39.9520, -75.1620),
+    "19123": (39.9650, -75.1410),
+    "19087": (40.0890, -75.3960),
+    "19073": (39.9170, -75.3880),
+    # Pittsburgh
+    "15213": (40.4440, -79.9530),
+    "15217": (40.4350, -79.9200),
+    "15237": (40.5470, -80.0180),
+    "15146": (40.4690, -79.7620),
+    "16066": (40.6850, -80.1060),
+    # Orlando
+    "32801": (28.5380, -81.3790),
+    "32803": (28.5560, -81.3510),
+    "32825": (28.5230, -81.2470),
+    "34741": (28.2920, -81.4080),
+    # Tampa
+    "33602": (27.9500, -82.4570),
+    "33607": (27.9600, -82.5070),
+    "33615": (28.0130, -82.5720),
+    "33701": (27.7710, -82.6400),
+    "33511": (27.9380, -82.2860),
+    # Miami / South Florida
+    "33101": (25.7750, -80.1930),
+    "33125": (25.7750, -80.2370),
+    "33139": (25.7820, -80.1340),
+    "33301": (26.1220, -80.1370),
+    "33024": (26.0180, -80.2690),
 }
 
 # Default underwriting assumptions when recomputing cash flow for ROI.
@@ -380,10 +485,11 @@ def _coords_from_market_center(address: str, market_key: str) -> tuple[float, fl
 
 
 def _coords_for_market(address: str, market_key: str) -> tuple[float, float]:
-    """Market-center fallback; Ohio listings use sub-metro centers when matched."""
-    if market_key == "Ohio":
+    """Market-center fallback with suburb-level centers when the address matches."""
+    suburb_centers = METRO_SUBURB_CENTERS.get(market_key)
+    if suburb_centers:
         lowered = address.lower()
-        for keyword, center in OHIO_METRO_KEYWORDS:
+        for keyword, center in suburb_centers:
             if keyword in lowered:
                 base_lat, base_lon = center
                 lat_off, lon_off = _deterministic_jitter(address)
@@ -861,24 +967,62 @@ def compute_top_market(df: pd.DataFrame) -> str:
     return str(market_stats.idxmax())
 
 
-def _sync_ledger_selection_to_map() -> None:
-    """Focus the map when the user selects a property ledger row."""
-    state = st.session_state.get("property_ledger")
+def _dataframe_selected_rows(state: Any) -> list[int]:
+    """Read selected row indices from a Streamlit dataframe widget state."""
     if state is None:
+        return []
+
+    if isinstance(state, dict):
+        selection = state.get("selection") or {}
+        rows = selection.get("rows") if isinstance(selection, dict) else []
+    else:
+        selection = getattr(state, "selection", None)
+        if selection is None:
+            return []
+        rows = (
+            selection.get("rows")
+            if isinstance(selection, dict)
+            else getattr(selection, "rows", None)
+        )
+    return list(rows or [])
+
+
+def _focus_map_on_address(address: str, map_df: pd.DataFrame) -> None:
+    """Center the folium map on a ledger-selected property."""
+    cleaned = str(address or "").strip()
+    if not cleaned:
         return
 
-    rows = getattr(getattr(state, "selection", None), "rows", None)
+    st.session_state["map_selected_address"] = cleaned
+    matches = map_df[map_df["address"] == cleaned].dropna(subset=["lat", "lon"])
+    if matches.empty:
+        return
+
+    lat = float(matches.iloc[0]["lat"])
+    lon = float(matches.iloc[0]["lon"])
+    st.session_state["map_viewport"] = {
+        "center": {"lat": lat, "lng": lon},
+        "zoom": 15,
+    }
+
+
+def _apply_ledger_selection_to_map(
+    ledger_state: Any,
+    map_df: pd.DataFrame,
+) -> None:
+    """Focus the map when the user selects a property ledger row."""
+    rows = _dataframe_selected_rows(ledger_state)
     if not rows:
         return
 
     addresses = st.session_state.get("_property_ledger_addresses") or []
     row_idx = rows[0]
     if 0 <= row_idx < len(addresses):
-        st.session_state["map_selected_address"] = addresses[row_idx]
+        _focus_map_on_address(addresses[row_idx], map_df)
 
 
-def _render_ledger_dblclick_helper(addresses: list[str]) -> None:
-    """Double-click an address cell to select the ledger row and focus the map."""
+def _render_ledger_click_helper(addresses: list[str]) -> None:
+    """Click any ledger row to select it and focus the map."""
     if not addresses:
         return
 
@@ -932,7 +1076,7 @@ def _render_ledger_dblclick_helper(addresses: list[str]) -> None:
                 }}
                 grid.dataset.ledgerDblBound = "1";
                 grid.addEventListener(
-                    "dblclick",
+                    "click",
                     (event) => {{
                         const cell = event.target.closest(
                             '[class*="gdg-cell"], [role="gridcell"], td'
@@ -940,17 +1084,15 @@ def _render_ledger_dblclick_helper(addresses: list[str]) -> None:
                         if (!cell) {{
                             return;
                         }}
-                        const text = cell.textContent.trim();
-                        if (!text) {{
+                        const row = rowFromCell(cell);
+                        if (!row) {{
                             return;
                         }}
-                        const matched = ADDRESSES.find(
-                            (address) => address === text || text.includes(address)
-                        );
-                        if (!matched) {{
-                            return;
+                        const text = row.textContent.trim();
+                        const matched = ADDRESSES.find((address) => text.includes(address));
+                        if (matched) {{
+                            selectRow(row);
                         }}
-                        selectRow(rowFromCell(cell));
                     }},
                     true
                 );
@@ -1038,11 +1180,13 @@ def render_portfolio_map_page() -> None:
     st.caption(
         "Hover for quick stats · click a marker to select · "
         "zoom or pan to filter the ledger below · "
-        "double-click an address in the ledger to focus the map · green = higher 1-yr ROI"
+        "click a ledger row to focus the map · green = higher 1-yr ROI"
     )
 
     if "map_selected_address" not in st.session_state:
         st.session_state["map_selected_address"] = None
+
+    _apply_ledger_selection_to_map(st.session_state.get("property_ledger"), map_df)
 
     selected_address = st.session_state.get("map_selected_address")
     clicked_address, map_viewport = render_portfolio_map(map_df, focus_address=selected_address)
@@ -1109,7 +1253,7 @@ def render_portfolio_map_page() -> None:
     else:
         st.caption(
             "Zoom in on a metro area to filter this ledger to properties on screen. "
-            "Double-click an address to focus it on the map."
+            "Click a row to focus it on the map."
         )
     display_df = ledger_df[
         [
@@ -1140,11 +1284,11 @@ def render_portfolio_map_page() -> None:
         use_container_width=True,
         hide_index=True,
         key="property_ledger",
-        on_select=_sync_ledger_selection_to_map,
+        on_select="rerun",
         selection_mode="single-row",
         column_config={
             "Address": st.column_config.TextColumn(
-                help="Double-click to show this property on the map.",
+                help="Click the row to show this property on the map.",
             ),
             "Price": st.column_config.NumberColumn(format="$%d"),
             "Monthly rent": st.column_config.NumberColumn(format="$%d"),
@@ -1153,7 +1297,7 @@ def render_portfolio_map_page() -> None:
             "Alignment Score": st.column_config.NumberColumn(format="%.1f%%"),
         },
     )
-    _render_ledger_dblclick_helper(st.session_state["_property_ledger_addresses"])
+    _render_ledger_click_helper(st.session_state["_property_ledger_addresses"])
 
     geocoded_count = int(map_df["lat"].notna().sum())
     if geocoded_count < len(map_df):
