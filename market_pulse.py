@@ -9,12 +9,16 @@ from knowledge_base import get_market_pulse
 MARKET_DISPLAY_NAMES: dict[str, str] = {
     "Rochester": "Rochester, NY",
     "Syracuse": "Syracuse, NY",
+    "Buffalo": "Buffalo, NY",
+    "Albany": "Albany, NY",
+    "Philadelphia": "Philadelphia, PA",
+    "Pittsburgh": "Pittsburgh, PA",
+    "Orlando": "Orlando, FL",
+    "Tampa": "Tampa, FL",
+    "Miami": "Miami–Fort Lauderdale",
     "Charlotte": "Charlotte, NC",
     "Raleigh": "Raleigh, NC",
     "Charleston": "Charleston, SC",
-    "Ohio": "Ohio",
-    "DFW": "Dallas–Fort Worth",
-    "Austin": "Austin, TX",
 }
 
 
@@ -35,10 +39,10 @@ def render_market_pulse() -> None:
     st.markdown("##### 📡 Hot Market Pulse")
     pulse = get_market_pulse()
 
-    upstate = ("Rochester", "Syracuse")
-    col_r, col_s = st.columns(2)
-    for col, city in ((col_r, upstate[0]), (col_s, upstate[1])):
-        with col:
+    upstate = ("Rochester", "Syracuse", "Buffalo", "Albany")
+    upstate_cols = st.columns(2)
+    for idx, city in enumerate(upstate):
+        with upstate_cols[idx % 2]:
             _render_market_card(city, pulse[city])
 
     st.markdown('<div class="pulse-market-sub">Other active markets</div>', unsafe_allow_html=True)

@@ -147,7 +147,7 @@ For every 90 minutes, use a loop script or systemd timer with `OnUnitActiveSec=9
 | Stage | Model | Calls per run | Concurrency |
 |-------|--------|----------------|-------------|
 | Discovery | gemini-2.5-flash → flash-lite → gemma-4-21b-it (API: 26b-a4b) | **1** | Sequential |
-| Research | gemma-4-31b-it | up to ~25 | **Parallel** (≤10 calls/min) |
+| Research | gemma-4-31b-it → gemma-4-21b-it (API: 26b-a4b) | up to ~25 | **Parallel** (≤10 calls/min) |
 | Synthesis | gemini-3.1-flash-lite-preview | up to ~25 | **Parallel** (≤10 calls/min) |
 
 Stages 2 and 3 are pipelined via `asyncio`: research runs in parallel, and each property

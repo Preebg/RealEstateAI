@@ -34,6 +34,7 @@ INVESTMENT_PARAMS = {
 
 # Active models for this run (updated when RPD fallback triggers).
 _active_discovery_model = engine.DISCOVERY_MODEL
+_active_research_model = engine.RESEARCH_MODEL
 _active_synthesis_model = engine.SYNTHESIS_MODEL
 
 
@@ -46,12 +47,23 @@ class _SynthesisJob:
 
 @dataclass
 class _HarvesterModelState:
+    research_model: str = field(default_factory=lambda: engine.RESEARCH_MODEL)
     synthesis_model: str = field(default_factory=lambda: engine.SYNTHESIS_MODEL)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+    async def get_research_model(self) -> str:
+        async with self._lock:
+            return self.research_model
 
     async def get_synthesis_model(self) -> str:
         async with self._lock:
             return self.synthesis_model
+
+    async def set_research_fallback(self, fallback_model: str) -> None:
+        global _active_research_model
+        async with self._lock:
+            self.research_model = fallback_model
+            _active_research_model = fallback_model
 
     async def set_synthesis_fallback(self, fallback_model: str) -> None:
         global _active_synthesis_model
@@ -274,11 +286,55 @@ def _validate_listing(listing: dict[str, Any]) -> tuple[str, str]:
     return address, market_city
 
 
+async def _research_listing_with_fallback(
+    address: str,
+    listing: dict[str, Any],
+    model_state: _HarvesterModelState,
+    rate_limiter: engine.ModelRateLimiter,
+    session: engine.GenaiSession,
+) -> dict[str, Any]:
+    model = await model_state.get_research_model()
+    try:
+        return await engine.research_property_async(
+            address,
+            discovery=listing,
+            model=model,
+            rate_limiter=rate_limiter,
+            session=session,
+        )
+    except _HARVESTER_API_ERRORS as exc:
+        if (
+            engine.is_daily_quota_exhausted(exc)
+            and model != engine.RESEARCH_FALLBACK_MODEL
+        ):
+            log.warning(
+                "rpd_model_fallback",
+                stage="research",
+                from_model=model,
+                to_model=engine.RESEARCH_FALLBACK_MODEL,
+                error=str(exc),
+            )
+            print(
+                f"  [research] daily quota exhausted for {model} "
+                f"— switching to {engine.RESEARCH_FALLBACK_MODEL}"
+            )
+            await model_state.set_research_fallback(engine.RESEARCH_FALLBACK_MODEL)
+            return await engine.research_property_async(
+                address,
+                discovery=listing,
+                model=engine.RESEARCH_FALLBACK_MODEL,
+                rate_limiter=rate_limiter,
+                session=session,
+            )
+        raise
+
+
 async def _research_listing(
     listing: dict[str, Any],
     admin_user_id: str,
     report: dict[str, Any],
     report_lock: asyncio.Lock,
+    model_state: _HarvesterModelState,
     rate_limiter: engine.ModelRateLimiter,
     session: engine.GenaiSession,
 ) -> _SynthesisJob | None:
@@ -299,11 +355,12 @@ async def _research_listing(
 
     log.info("listing_research_start", address=address, market_city=market_city)
     print(f"  [research] START {address} ({market_city})")
-    research = await engine.research_property_async(
+    research = await _research_listing_with_fallback(
         address,
-        discovery=listing,
-        rate_limiter=rate_limiter,
-        session=session,
+        listing,
+        model_state,
+        rate_limiter,
+        session,
     )
     async with report_lock:
         report["researched"] += 1
@@ -474,6 +531,7 @@ async def _research_and_schedule_synthesis(
             admin_user_id,
             report,
             report_lock,
+            model_state,
             rate_limiter,
             session,
         )
@@ -516,8 +574,9 @@ async def run_harvester_pipeline_async(admin_user_id: str) -> dict[str, Any]:
     On daily quota exhaustion, discovery and synthesis switch to their
     configured fallback models for the remainder of the run.
     """
-    global _active_discovery_model, _active_synthesis_model
+    global _active_discovery_model, _active_research_model, _active_synthesis_model
     _active_discovery_model = engine.DISCOVERY_MODEL
+    _active_research_model = engine.RESEARCH_MODEL
     _active_synthesis_model = engine.SYNTHESIS_MODEL
 
     report: dict[str, Any] = {
@@ -663,7 +722,8 @@ def _render_streamlit_app() -> None:
     st.set_page_config(page_title="Hot Market Harvester", page_icon="🌾")
     st.title("🌾 Hot Market Harvester")
     st.caption(
-        "Upstate NY (priority) → Charlotte, Raleigh, Charleston, Ohio, DFW, Austin • "
+        "Upstate NY (priority: Rochester, Syracuse, Buffalo, Albany) → Philadelphia, "
+        "Pittsburgh, Orlando, Tampa, Miami → Charlotte, Raleigh, Charleston • "
         "Stage 1: grounded discovery • Stages 2–3: pipelined research → synthesis "
         f"(≤{engine.HARVESTER_RPM_PER_MODEL} API calls/min per model)"
     )
@@ -683,7 +743,7 @@ def _render_streamlit_app() -> None:
 
     col1, col2, col3 = st.columns(3)
     col1.metric("Discovery Model", _active_discovery_model)
-    col2.metric("Research Model", engine.RESEARCH_MODEL)
+    col2.metric("Research Model", _active_research_model)
     col3.metric("Synthesis Model", _active_synthesis_model)
 
     st.info(

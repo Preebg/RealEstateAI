@@ -44,13 +44,14 @@ DISCOVERY_MODEL_CHAIN: tuple[str, ...] = (
     DISCOVERY_MODEL,
     *DISCOVERY_FALLBACK_MODELS,
 )
-# Tier 3 label; Gemini API hosts gemma-4-26b-a4b-it (no gemma-4-21b-it).
-_DISCOVERY_MODEL_API_SLUGS: dict[str, str] = {
+# Tier 3 / research-fallback label; Gemini API hosts gemma-4-26b-a4b-it (no gemma-4-21b-it).
+_MODEL_API_SLUGS: dict[str, str] = {
     "gemma-4-21b-it": "gemma-4-26b-a4b-it",
 }
 # Backward-compatible alias for tests and harvester UI.
 DISCOVERY_FALLBACK_MODEL = DISCOVERY_FALLBACK_MODELS[-1]
 RESEARCH_MODEL = "gemma-4-31b-it"
+RESEARCH_FALLBACK_MODEL = "gemma-4-21b-it"
 SYNTHESIS_MODEL = "gemini-3.1-flash-lite-preview"
 SYNTHESIS_FALLBACK_MODEL = "gemma-4-26b-a4b-it"
 
@@ -59,12 +60,13 @@ PRIMARY_SEARCH_MODEL = "gemma-4-31b-it"
 SECONDARY_SEARCH_MODEL = "gemini-2.5-flash"
 
 # (market_key, search scope for prompt, per-market target when topping up)
+# Targets sum to MAX_DISCOVERY_LISTINGS; Upstate NY metros get the largest share.
 HOT_MARKETS: list[tuple[str, str, int]] = [
     (
         "Rochester",
         "Rochester NY metro (city + suburbs: Henrietta, Penfield, Fairport, Pittsford, "
         "Webster, Greece, Irondequoit, Brighton, Victor, Canandaigua)",
-        6,
+        5,
     ),
     (
         "Syracuse",
@@ -73,45 +75,69 @@ HOT_MARKETS: list[tuple[str, str, int]] = [
         4,
     ),
     (
+        "Buffalo",
+        "Buffalo NY metro (city + suburbs: Amherst, Cheektowaga, Tonawanda, Williamsville, "
+        "West Seneca, Hamburg, Orchard Park, Kenmore)",
+        3,
+    ),
+    (
+        "Albany",
+        "Albany NY metro (city + suburbs: Colonie, Guilderland, Latham, Troy, Schenectady, "
+        "Clifton Park, Bethlehem)",
+        2,
+    ),
+    (
+        "Philadelphia",
+        "Philadelphia PA metro (city + suburbs: Ardmore, Media, Norristown, King of Prussia, "
+        "Levittown, Bensalem, Cherry Hill NJ fringe)",
+        2,
+    ),
+    (
+        "Pittsburgh",
+        "Pittsburgh PA metro (city + suburbs: Cranberry, Monroeville, Bethel Park, Ross "
+        "Township, Mt. Lebanon, McCandless, Robinson Township)",
+        1,
+    ),
+    (
+        "Orlando",
+        "Orlando FL metro (city + suburbs: Kissimmee, Winter Park, Sanford, Apopka, Ocoee, "
+        "Altamonte Springs, Lake Mary)",
+        2,
+    ),
+    (
+        "Tampa",
+        "Tampa FL metro (city + suburbs: St. Petersburg, Clearwater, Brandon, Wesley Chapel, "
+        "Riverview, Largo, Palm Harbor)",
+        2,
+    ),
+    (
+        "Miami",
+        "Miami–Fort Lauderdale metro (Miami-Dade + Broward: Miami, Fort Lauderdale, Hialeah, "
+        "Pembroke Pines, Hollywood, Coral Springs, Miramar, Pompano Beach)",
+        1,
+    ),
+    (
         "Charlotte",
         "Charlotte NC metro (city + suburbs: Concord, Matthews, Huntersville, Mint Hill, "
         "Indian Trail, Pineville, Mooresville)",
-        3,
+        1,
     ),
     (
         "Raleigh",
         "Raleigh NC metro (city + suburbs: Cary, Apex, Morrisville, Wake Forest, "
         "Holly Springs, Garner, Fuquay-Varina)",
-        3,
+        1,
     ),
     (
         "Charleston",
         "Charleston SC metro (city + suburbs: Mount Pleasant, Summerville, North Charleston, "
         "Goose Creek, James Island, Johns Island)",
-        2,
-    ),
-    (
-        "Ohio",
-        "Ohio metros (Cleveland, Columbus, Cincinnati and suburbs: Lakewood, Parma, Dublin, "
-        "Westerville, Mason, Fairfield, Hamilton)",
-        3,
-    ),
-    (
-        "DFW",
-        "Dallas–Fort Worth TX metro (Dallas, Fort Worth, Arlington, Plano, Frisco, Irving, "
-        "Garland, McKinney, Denton)",
-        2,
-    ),
-    (
-        "Austin",
-        "Austin TX metro (city + suburbs: Round Rock, Cedar Park, Pflugerville, Georgetown, "
-        "Leander, Kyle, Buda)",
-        2,
+        1,
     ),
 ]
 DISCOVERY_MARKET_KEYS = frozenset(name for name, _, _ in HOT_MARKETS)
 MAX_DISCOVERY_LISTINGS = 25
-MIN_PREFERRED_YEAR_BUILT = 1965
+MIN_PREFERRED_YEAR_BUILT = 1985
 MAX_DISCOVERY_PRICE = 250_000
 _TRUSTED_LISTING_DOMAINS = ("zillow.com", "redfin.com", "realtor.com")
 _LISTING_DETAIL_URL_MARKERS = (
@@ -120,13 +146,14 @@ _LISTING_DETAIL_URL_MARKERS = (
     "realestateandhomes-detail",
     "/property/",
 )
-_DISCOVERY_STATE_CODES = frozenset({"NY", "NC", "SC", "OH", "TX"})
+_DISCOVERY_STATE_CODES = frozenset({"NY", "PA", "FL", "NC", "SC", "OH", "TX", "NJ"})
 _US_ZIP_RE = re.compile(r"\b\d{5}(?:-\d{4})?\b")
 _STREET_NUMBER_RE = re.compile(r"(?:^|\s)(\d{1,6}[A-Za-z]?)\s+\S+")
 # Grounded discovery needs more search calls than the SDK default (10 AFC).
 DISCOVERY_MAX_REMOTE_CALLS = 25
 DISCOVERY_FALLBACK_MAX_REMOTE_CALLS = 8
-DISCOVERY_SPLIT_MAX_REMOTE_CALLS = 10
+DISCOVERY_SPLIT_MAX_REMOTE_CALLS = 12
+DISCOVERY_TOPUP_MAX_ROUNDS = 3
 MAX_SYNTHESIS_PRICE = 400_000
 MAX_API_RETRIES = 5
 BACKOFF_BASE_SEC = 4.0
@@ -335,9 +362,14 @@ def _discovery_log(message: str) -> None:
     print(message, flush=True)
 
 
+def _resolve_model_slug(model: str) -> str:
+    """Map user-facing model labels to hosted Gemini API slugs."""
+    return _MODEL_API_SLUGS.get(model, model)
+
+
 def _resolve_discovery_model(model: str) -> str:
     """Map user-facing discovery tier labels to hosted Gemini API slugs."""
-    resolved = _DISCOVERY_MODEL_API_SLUGS.get(model, model)
+    resolved = _resolve_model_slug(model)
     if resolved != model:
         _discovery_log(
             f"[discovery] Model alias: {model} -> {resolved} (hosted API slug)"
@@ -359,10 +391,11 @@ def _discovery_afc_budget(
     model: str,
     *,
     split_market: str | None = None,
+    needed_count: int | None = None,
 ) -> int:
     """Right-size AFC search calls: combined needs more; per-market/gemma need fewer."""
     if split_market:
-        target = next(
+        target = needed_count or next(
             (count for name, _, count in HOT_MARKETS if name == split_market),
             3,
         )
@@ -371,7 +404,7 @@ def _discovery_afc_budget(
             if _is_gemma_discovery_model(model)
             else DISCOVERY_SPLIT_MAX_REMOTE_CALLS
         )
-        return min(target + 3, per_market_cap)
+        return min(max(target, 1) + 4, per_market_cap)
     if _is_gemma_discovery_model(model):
         return DISCOVERY_FALLBACK_MAX_REMOTE_CALLS
     return DISCOVERY_MAX_REMOTE_CALLS
@@ -754,6 +787,58 @@ _ADDRESS_MARKET_KEYWORDS: tuple[tuple[str, str], ...] = (
     ("fayetteville", "Syracuse"),
     ("baldwinsville", "Syracuse"),
     ("manlius", "Syracuse"),
+    ("buffalo", "Buffalo"),
+    ("amherst", "Buffalo"),
+    ("cheektowaga", "Buffalo"),
+    ("tonawanda", "Buffalo"),
+    ("williamsville", "Buffalo"),
+    ("west seneca", "Buffalo"),
+    ("hamburg", "Buffalo"),
+    ("orchard park", "Buffalo"),
+    ("kenmore", "Buffalo"),
+    ("albany", "Albany"),
+    ("colonie", "Albany"),
+    ("guilderland", "Albany"),
+    ("latham", "Albany"),
+    ("schenectady", "Albany"),
+    ("clifton park", "Albany"),
+    ("troy", "Albany"),
+    ("philadelphia", "Philadelphia"),
+    ("ardmore", "Philadelphia"),
+    ("norristown", "Philadelphia"),
+    ("king of prussia", "Philadelphia"),
+    ("levittown", "Philadelphia"),
+    ("bensalem", "Philadelphia"),
+    ("pittsburgh", "Pittsburgh"),
+    ("cranberry", "Pittsburgh"),
+    ("monroeville", "Pittsburgh"),
+    ("bethel park", "Pittsburgh"),
+    ("mt. lebanon", "Pittsburgh"),
+    ("mccandless", "Pittsburgh"),
+    ("orlando", "Orlando"),
+    ("kissimmee", "Orlando"),
+    ("winter park", "Orlando"),
+    ("sanford", "Orlando"),
+    ("apopka", "Orlando"),
+    ("ocoee", "Orlando"),
+    ("altamonte springs", "Orlando"),
+    ("lake mary", "Orlando"),
+    ("tampa", "Tampa"),
+    ("st. petersburg", "Tampa"),
+    ("clearwater", "Tampa"),
+    ("brandon", "Tampa"),
+    ("wesley chapel", "Tampa"),
+    ("riverview", "Tampa"),
+    ("largo", "Tampa"),
+    ("palm harbor", "Tampa"),
+    ("miami", "Miami"),
+    ("fort lauderdale", "Miami"),
+    ("hialeah", "Miami"),
+    ("pembroke pines", "Miami"),
+    ("hollywood", "Miami"),
+    ("coral springs", "Miami"),
+    ("miramar", "Miami"),
+    ("pompano beach", "Miami"),
     ("charlotte", "Charlotte"),
     ("concord", "Charlotte"),
     ("matthews", "Charlotte"),
@@ -1093,11 +1178,23 @@ def _build_listings_from_raw(
     return _dedupe_discovery_listings(listings, max_price=max_price)
 
 
+def _count_listings_by_market(listings: list[dict[str, Any]]) -> dict[str, int]:
+    """Count verified discovery rows per canonical market key."""
+    counts = {name: 0 for name, _, _ in HOT_MARKETS}
+    for item in listings:
+        city = str(item.get("city", "")).strip()
+        if city in counts:
+            counts[city] += 1
+    return counts
+
+
 def _discovery_prompt(
     max_price: float,
     *,
     split_market: str | None = None,
     exclude_addresses: list[str] | None = None,
+    needed_count: int | None = None,
+    total_needed: int | None = None,
 ) -> str:
     """Build a grounded-search discovery prompt."""
     if split_market:
@@ -1106,12 +1203,22 @@ def _discovery_prompt(
             for name, loc, target in HOT_MARKETS
             if name == split_market
         )
-        scope = f"{count} residential properties CURRENTLY FOR SALE in {location}"
-    else:
-        markets_desc = ", ".join(
-            f"{count} in {location}" for _, location, count in HOT_MARKETS
+        ask_count = needed_count if needed_count and needed_count > 0 else count
+        scope = (
+            f"{ask_count} NEW residential properties CURRENTLY FOR SALE in {location} "
+            f"(we already have listings for this market — return different addresses only)"
         )
-        scope = f"residential properties CURRENTLY FOR SALE: {markets_desc}"
+    else:
+        if total_needed and total_needed > 0:
+            scope = (
+                f"{total_needed} additional distinct residential properties CURRENTLY FOR SALE "
+                f"across these hot markets (do not repeat addresses we already have)"
+            )
+        else:
+            markets_desc = ", ".join(
+                f"{count} in {location}" for _, location, count in HOT_MARKETS
+            )
+            scope = f"residential properties CURRENTLY FOR SALE: {markets_desc}"
 
     exclude_block = ""
     if exclude_addresses:
@@ -1126,9 +1233,10 @@ def _discovery_prompt(
 
     market_keys = ", ".join(f'"{name}"' for name, _, _ in HOT_MARKETS)
     priority_note = (
-        "Search priority: fill Upstate NY (Rochester, Syracuse) first, then Charlotte, "
-        "Raleigh, Charleston, Ohio, DFW, and Austin metros. For Syracuse, favor Cicero, "
-        "Clay, Liverpool, and North Syracuse over downtown Syracuse."
+        "Search priority: fill Upstate NY first (Rochester, Syracuse, Buffalo, Albany), "
+        "then Philadelphia, Pittsburgh, Orlando, Tampa, and Miami–Fort Lauderdale, then "
+        "Charlotte, Raleigh, and Charleston. Strongly favor newer construction and "
+        "conventional site-built homes over manufactured/mobile housing."
     )
     if split_market:
         priority_note = (
@@ -1139,6 +1247,11 @@ def _discovery_prompt(
             priority_note += (
                 " Weight searches toward Cicero, Clay, Liverpool, and North Syracuse ZIPs "
                 "(13039, 13041, 13088, 13212) before central Syracuse."
+            )
+        elif split_market in ("Rochester", "Buffalo", "Albany"):
+            priority_note += (
+                " Prioritize Upstate NY suburbs with newer single-family inventory; "
+                "exclude manufactured/mobile homes entirely."
             )
 
     return f"""You are a real estate discovery agent for US hot rental markets.
@@ -1170,16 +1283,18 @@ Rules:
 - listing_url is REQUIRED for every row — must be the exact Zillow, Redfin, or Realtor.com
   URL of the active listing you used (not a search-results page).
 - Include suburbs and townships — not just the core city (e.g. Henrietta/Penfield/Fairport
-  count as Rochester; Cicero/Clay/Liverpool/North Syracuse count as Syracuse).
+  count as Rochester; Cicero/Clay/Liverpool/North Syracuse count as Syracuse; Amherst/Cheektowaga
+  count as Buffalo; Colonie/Guilderland count as Albany).
 - You MUST return {MAX_DISCOVERY_LISTINGS} distinct listings when possible. Do not stop at 7–13.
-- ONLY include: single-family detached homes, townhomes/townhouses, and small multifamily
-  (duplex, triplex, or fourplex — at most 4 units total).
-- EXCLUDE manufactured homes, mobile homes, modular homes, trailers, park-model homes,
-  apartment buildings, and any multifamily with 5+ units. Skip "Manufactured" listing filters
-  entirely; on Zillow/Redfin/Realtor use property-type filters for Single Family, Townhouse,
-  and small Multi-Family only.
-- Prefer homes built in {MIN_PREFERRED_YEAR_BUILT} or later when year built is visible on the listing.
-  If choosing between similar listings, pick newer construction over pre-{MIN_PREFERRED_YEAR_BUILT}.
+- ONLY include: conventional site-built single-family detached homes, townhomes/townhouses,
+  and small multifamily (duplex, triplex, or fourplex — at most 4 units total).
+- NEVER include manufactured homes, mobile homes, modular homes, trailers, park-model homes,
+  or HUD-code housing. Skip "Manufactured" / "Mobile" listing filters entirely; on Zillow/Redfin/
+  Realtor use property-type filters for Single Family, Townhouse, and small Multi-Family only.
+- EXCLUDE apartment buildings and any multifamily with 5+ units.
+- Strongly prefer homes built in {MIN_PREFERRED_YEAR_BUILT} or later when year built is visible.
+  When year built is shown, deprioritize pre-{MIN_PREFERRED_YEAR_BUILT} homes unless inventory is
+  very thin. Upstate NY (Rochester, Syracuse, Buffalo, Albany) should skew newest-available.
 - Use real street addresses with city/town, state, and ZIP (5-digit ZIP required).
 - list_price must be the active asking price as a plain number (no $ or commas).
 - city must be the parent metro key: one of {market_keys} (NOT the suburb name).
@@ -1193,12 +1308,20 @@ def _run_discovery_attempt(
     max_price: float,
     split_market: str | None = None,
     exclude_addresses: list[str] | None = None,
+    needed_count: int | None = None,
+    total_needed: int | None = None,
 ) -> tuple[list[dict[str, Any]], str]:
-    afc_budget = _discovery_afc_budget(model, split_market=split_market)
+    afc_budget = _discovery_afc_budget(
+        model,
+        split_market=split_market,
+        needed_count=needed_count,
+    )
     prompt = _discovery_prompt(
         max_price,
         split_market=split_market,
         exclude_addresses=exclude_addresses,
+        needed_count=needed_count,
+        total_needed=total_needed,
     )
     raw, grounding_urls = _generate_with_grounding_retry(
         model,
@@ -1303,30 +1426,76 @@ def _discover_listings_per_market(
     split_listings = list(seed_listings or [])
     last_raw = ""
     market_total = len(HOT_MARKETS)
-    for market_idx, (market_name, _, target) in enumerate(HOT_MARKETS, start=1):
+
+    for round_idx in range(1, DISCOVERY_TOPUP_MAX_ROUNDS + 1):
         if len(split_listings) >= MAX_DISCOVERY_LISTINGS:
             break
+        by_market = _count_listings_by_market(split_listings)
+        round_added = 0
+
+        for market_idx, (market_name, _, target) in enumerate(HOT_MARKETS, start=1):
+            if len(split_listings) >= MAX_DISCOVERY_LISTINGS:
+                break
+            have = by_market.get(market_name, 0)
+            deficit = target - have
+            if deficit <= 0:
+                continue
+
+            found_addrs = [str(item.get("address", "")) for item in split_listings]
+            merged_exclude = list(exclude_addresses or []) + found_addrs
+            _discovery_log(
+                f"[discovery] Round {round_idx}/{DISCOVERY_TOPUP_MAX_ROUNDS} "
+                f"market {market_idx}/{market_total}: {market_name} "
+                f"(need {deficit} more, have {have}/{target}, "
+                f"total {len(split_listings)}/{MAX_DISCOVERY_LISTINGS})..."
+            )
+            started = time.monotonic()
+            market_listings, market_raw = _run_discovery_attempt(
+                model=model,
+                max_price=max_price,
+                split_market=market_name,
+                exclude_addresses=merged_exclude,
+                needed_count=deficit,
+            )
+            elapsed = time.monotonic() - started
+            last_raw = market_raw or last_raw
+            before = len(split_listings)
+            split_listings.extend(market_listings)
+            split_listings = _dedupe_discovery_listings(split_listings, max_price=max_price)
+            added = len(split_listings) - before
+            round_added += added
+            by_market = _count_listings_by_market(split_listings)
+            _discovery_log(
+                f"[discovery] {market_name}: +{added} new verified in "
+                f"{elapsed:.0f}s (total {len(split_listings)}/{MAX_DISCOVERY_LISTINGS})"
+            )
+
+        if round_added == 0:
+            break
+
+    if len(split_listings) < MAX_DISCOVERY_LISTINGS:
+        remaining = MAX_DISCOVERY_LISTINGS - len(split_listings)
         found_addrs = [str(item.get("address", "")) for item in split_listings]
         merged_exclude = list(exclude_addresses or []) + found_addrs
         _discovery_log(
-            f"[discovery] Market {market_idx}/{market_total}: {market_name} "
-            f"(target {target}, have {len(split_listings)}/{MAX_DISCOVERY_LISTINGS})..."
+            f"[discovery] Global top-up: need {remaining} more listing(s) "
+            f"(have {len(split_listings)}/{MAX_DISCOVERY_LISTINGS})..."
         )
-        started = time.monotonic()
-        market_listings, market_raw = _run_discovery_attempt(
+        topup_listings, topup_raw = _run_discovery_attempt(
             model=model,
             max_price=max_price,
-            split_market=market_name,
             exclude_addresses=merged_exclude,
+            total_needed=remaining,
         )
-        elapsed = time.monotonic() - started
-        last_raw = market_raw or last_raw
-        split_listings.extend(market_listings)
+        last_raw = topup_raw or last_raw
+        before = len(split_listings)
+        split_listings.extend(topup_listings)
         split_listings = _dedupe_discovery_listings(split_listings, max_price=max_price)
         _discovery_log(
-            f"[discovery] {market_name}: +{len(market_listings)} verified in "
-            f"{elapsed:.0f}s (total {len(split_listings)}/{MAX_DISCOVERY_LISTINGS})"
+            f"[discovery] Global top-up: +{len(split_listings) - before} new "
+            f"(total {len(split_listings)}/{MAX_DISCOVERY_LISTINGS})"
         )
+
     return split_listings, last_raw
 
 
@@ -1567,18 +1736,25 @@ def _apply_discovery_research_fallback(
     return research
 
 
+def _resolve_research_model(model: str | None = None) -> str:
+    active = model or RESEARCH_MODEL
+    return _resolve_model_slug(active)
+
+
 def research_property(
     address: str,
     *,
     discovery: dict[str, Any] | None = None,
+    model: str | None = None,
 ) -> dict[str, Any]:
     """
     Stage 2 (Research): Gemma extraction with Search Grounding.
     """
+    active_model = _resolve_research_model(model)
     raw = generate_with_retry(
-        RESEARCH_MODEL,
+        active_model,
         _research_prompt(address, discovery),
-        use_search=_model_supports_grounding(RESEARCH_MODEL),
+        use_search=_model_supports_grounding(active_model),
     )
     research = _normalize_research_payload(address, _extract_json(raw))
     return _apply_discovery_research_fallback(research, discovery)
@@ -1588,14 +1764,16 @@ async def research_property_async(
     address: str,
     *,
     discovery: dict[str, Any] | None = None,
+    model: str | None = None,
     rate_limiter: ModelRateLimiter | None = None,
     session: GenaiSession | None = None,
 ) -> dict[str, Any]:
     """Async Stage 2 research for parallel harvester workers."""
+    active_model = _resolve_research_model(model)
     raw = await generate_with_retry_async(
-        RESEARCH_MODEL,
+        active_model,
         _research_prompt(address, discovery),
-        use_search=_model_supports_grounding(RESEARCH_MODEL),
+        use_search=_model_supports_grounding(active_model),
         rate_limiter=rate_limiter,
         session=session,
     )

@@ -31,6 +31,7 @@ with patch("streamlit.secrets", {"GEMINI_API_KEY": "fake_key"}):
         DISCOVERY_FALLBACK_MODELS,
         DISCOVERY_MODEL,
         DISCOVERY_MODEL_CHAIN,
+        RESEARCH_FALLBACK_MODEL,
         RESEARCH_MODEL,
         discover_hot_market_listings,
         is_daily_quota_exhausted,
@@ -490,6 +491,21 @@ class TestSearchGrounding(unittest.TestCase):
             research_property("1 Main St, Rochester, NY")
             self.assertTrue(mock_gen.call_args.kwargs["use_search"])
             self.assertEqual(mock_gen.call_args.args[0], RESEARCH_MODEL)
+
+    def test_research_fallback_resolves_to_gemma_a4b_slug(self):
+        payload = json.dumps(
+            {
+                "address": "1 Main St, Rochester, NY",
+                "price": 150000,
+                "taxes": 3000,
+                "hoa": 0,
+                "square_footage": 1200,
+                "property_condition": "Good",
+            }
+        )
+        with patch("engine.generate_with_retry", return_value=payload) as mock_gen:
+            research_property("1 Main St, Rochester, NY", model=RESEARCH_FALLBACK_MODEL)
+            self.assertEqual(mock_gen.call_args.args[0], "gemma-4-26b-a4b-it")
 
 
 class TestHarvestSkipLogic(unittest.TestCase):

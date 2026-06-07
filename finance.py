@@ -5,6 +5,13 @@ from typing import TypedDict
 METRO_HISTORICAL_CAGR: dict[str, float] = {
     "Rochester": 0.042,
     "Syracuse": 0.035,
+    "Buffalo": 0.038,
+    "Albany": 0.036,
+    "Philadelphia": 0.045,
+    "Pittsburgh": 0.034,
+    "Orlando": 0.058,
+    "Tampa": 0.056,
+    "Miami": 0.060,
     "Charlotte": 0.055,
     "Raleigh": 0.058,
     "Charleston": 0.052,
