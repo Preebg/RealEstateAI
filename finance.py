@@ -1,4 +1,36 @@
+import random
 from typing import TypedDict
+
+# Historical metro home-price CAGR (decimal annual rate), keyed like engine.HOT_MARKETS.
+METRO_HISTORICAL_CAGR: dict[str, float] = {
+    "Rochester": 0.042,
+    "Syracuse": 0.035,
+    "Charlotte": 0.055,
+    "Raleigh": 0.058,
+    "Charleston": 0.052,
+    "Ohio": 0.041,
+    "DFW": 0.054,
+    "Austin": 0.061,
+}
+DEFAULT_METRO_CAGR = 0.035
+
+# Max location-score adjustment above/below metro base (±1.5%/yr at score 0/10).
+LOCATION_ADJUSTMENT_BAND = 0.015
+LOCATION_SCORE_NEUTRAL = 5.0
+
+# Std dev of annual rate uncertainty in Monte Carlo (decimal); overridable per metro.
+DEFAULT_RATE_UNCERTAINTY = 0.012
+METRO_RATE_UNCERTAINTY: dict[str, float] = {
+    "Austin": 0.018,
+    "Charleston": 0.016,
+    "DFW": 0.015,
+}
+
+MONTE_CARLO_SIMULATIONS = 2000
+MONTE_CARLO_SEED = 42
+FORECAST_YEARS = 10
+RATE_SAMPLE_FLOOR = -0.02
+RATE_SAMPLE_CEILING = 0.15
 
 # Values above this threshold are treated as annual premiums and converted to monthly.
 MONTHLY_INSURANCE_ANNUAL_THRESHOLD = 400.0
@@ -52,6 +84,17 @@ class AppreciationForecast(TypedDict):
     future_value: float
     annual_rate: float
     total_growth: float
+    future_value_p10: float
+    future_value_p50: float
+    future_value_p90: float
+    annual_rate_p10: float
+    annual_rate_p50: float
+    annual_rate_p90: float
+    metro_base_rate: float
+    location_adjustment: float
+    value_schedule_p10: list[float]
+    value_schedule_p50: list[float]
+    value_schedule_p90: list[float]
 
 
 class OperatingExpenseBreakdown(TypedDict):
@@ -74,22 +117,166 @@ class InvestmentAnalysis(TypedDict):
     cash_on_cash: float
 
 
-def calculate_10yr_appreciation(
-    current_value: float, location_score: float
-) -> AppreciationForecast:
-    """Calculates projected property value over 10 years based on location score."""
-    if current_value <= 0:
-        return {"future_value": 0.0, "annual_rate": 0.0, "total_growth": 0.0}
+def _clamp_location_score(location_score: float) -> float:
+    return min(max(location_score, 0.0), 10.0)
 
-    annual_rate = 0.03 + ((location_score - 5.0) * 0.005)
-    future_value = current_value * ((1.0 + annual_rate) ** 10)
-    total_growth = ((future_value - current_value) / current_value) * 100.0
+
+def _normalize_market_key(market_city: str | None) -> str | None:
+    if not market_city:
+        return None
+    key = str(market_city).strip()
+    return key or None
+
+
+def resolve_metro_base_rate(market_city: str | None) -> float:
+    """Metro historical CAGR; falls back to DEFAULT_METRO_CAGR when unknown."""
+    key = _normalize_market_key(market_city)
+    if not key:
+        return DEFAULT_METRO_CAGR
+    if key in METRO_HISTORICAL_CAGR:
+        return METRO_HISTORICAL_CAGR[key]
+    lowered = key.lower()
+    for name, rate in METRO_HISTORICAL_CAGR.items():
+        if name.lower() == lowered:
+            return rate
+    return DEFAULT_METRO_CAGR
+
+
+def resolve_metro_rate_uncertainty(market_city: str | None) -> float:
+    key = _normalize_market_key(market_city)
+    if not key:
+        return DEFAULT_RATE_UNCERTAINTY
+    if key in METRO_RATE_UNCERTAINTY:
+        return METRO_RATE_UNCERTAINTY[key]
+    lowered = key.lower()
+    for name, sigma in METRO_RATE_UNCERTAINTY.items():
+        if name.lower() == lowered:
+            return sigma
+    return DEFAULT_RATE_UNCERTAINTY
+
+
+def location_rate_adjustment(location_score: float) -> float:
+    """
+    Bounded location adjustment: score 5 → 0, score 10 → +1.5%/yr, score 0 → −1.5%/yr.
+    """
+    normalized = (_clamp_location_score(location_score) - LOCATION_SCORE_NEUTRAL) / 5.0
+    return normalized * LOCATION_ADJUSTMENT_BAND
+
+
+def expected_annual_appreciation_rate(
+    market_city: str | None, location_score: float
+) -> float:
+    return resolve_metro_base_rate(market_city) + location_rate_adjustment(
+        location_score
+    )
+
+
+def _percentile(sorted_values: list[float], pct: float) -> float:
+    if not sorted_values:
+        return 0.0
+    idx = int(pct * (len(sorted_values) - 1))
+    return sorted_values[idx]
+
+
+def _empty_appreciation_forecast() -> AppreciationForecast:
+    empty_schedule: list[float] = []
+    return {
+        "future_value": 0.0,
+        "annual_rate": 0.0,
+        "total_growth": 0.0,
+        "future_value_p10": 0.0,
+        "future_value_p50": 0.0,
+        "future_value_p90": 0.0,
+        "annual_rate_p10": 0.0,
+        "annual_rate_p50": 0.0,
+        "annual_rate_p90": 0.0,
+        "metro_base_rate": 0.0,
+        "location_adjustment": 0.0,
+        "value_schedule_p10": empty_schedule,
+        "value_schedule_p50": empty_schedule,
+        "value_schedule_p90": empty_schedule,
+    }
+
+
+def monte_carlo_appreciation_forecast(
+    current_value: float,
+    market_city: str | None,
+    location_score: float,
+    *,
+    years: int = FORECAST_YEARS,
+    num_schedule_years: int = 11,
+    n_sims: int = MONTE_CARLO_SIMULATIONS,
+    seed: int = MONTE_CARLO_SEED,
+) -> AppreciationForecast:
+    """
+    Project appreciation using metro CAGR + bounded location adjustment and
+    Monte Carlo rate uncertainty (10th/50th/90th percentiles).
+    """
+    if current_value <= 0:
+        return _empty_appreciation_forecast()
+
+    metro_base = resolve_metro_base_rate(market_city)
+    loc_adj = location_rate_adjustment(location_score)
+    expected_rate = metro_base + loc_adj
+    rate_std = resolve_metro_rate_uncertainty(market_city)
+
+    rng = random.Random(seed)
+    sampled_rates: list[float] = []
+    futures_at_horizon: list[float] = []
+    by_year: list[list[float]] = [[] for _ in range(num_schedule_years)]
+
+    for _ in range(n_sims):
+        rate = rng.gauss(expected_rate, rate_std)
+        rate = min(RATE_SAMPLE_CEILING, max(RATE_SAMPLE_FLOOR, rate))
+        sampled_rates.append(rate)
+        for year in range(num_schedule_years):
+            by_year[year].append(current_value * ((1.0 + rate) ** year))
+        futures_at_horizon.append(current_value * ((1.0 + rate) ** years))
+
+    sampled_rates.sort()
+    futures_at_horizon.sort()
+    rate_p10 = _percentile(sampled_rates, 0.10)
+    rate_p50 = _percentile(sampled_rates, 0.50)
+    rate_p90 = _percentile(sampled_rates, 0.90)
+    fv_p10 = _percentile(futures_at_horizon, 0.10)
+    fv_p50 = _percentile(futures_at_horizon, 0.50)
+    fv_p90 = _percentile(futures_at_horizon, 0.90)
+
+    schedule_p10 = [_percentile(sorted(by_year[y]), 0.10) for y in range(num_schedule_years)]
+    schedule_p50 = [_percentile(sorted(by_year[y]), 0.50) for y in range(num_schedule_years)]
+    schedule_p90 = [_percentile(sorted(by_year[y]), 0.90) for y in range(num_schedule_years)]
+
+    total_growth = ((fv_p50 - current_value) / current_value) * 100.0
 
     return {
-        "future_value": future_value,
-        "annual_rate": annual_rate * 100.0,
+        "future_value": fv_p50,
+        "annual_rate": expected_rate * 100.0,
         "total_growth": total_growth,
+        "future_value_p10": fv_p10,
+        "future_value_p50": fv_p50,
+        "future_value_p90": fv_p90,
+        "annual_rate_p10": rate_p10 * 100.0,
+        "annual_rate_p50": rate_p50 * 100.0,
+        "annual_rate_p90": rate_p90 * 100.0,
+        "metro_base_rate": metro_base * 100.0,
+        "location_adjustment": loc_adj * 100.0,
+        "value_schedule_p10": schedule_p10,
+        "value_schedule_p50": schedule_p50,
+        "value_schedule_p90": schedule_p90,
     }
+
+
+def calculate_10yr_appreciation(
+    current_value: float,
+    location_score: float,
+    market_city: str | None = None,
+) -> AppreciationForecast:
+    """Calculates 10-year appreciation with metro CAGR, location band, and MC bands."""
+    return monte_carlo_appreciation_forecast(
+        current_value,
+        market_city,
+        location_score,
+    )
 
 
 def calculate_mortgage(

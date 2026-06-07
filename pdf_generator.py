@@ -9,12 +9,12 @@ import matplotlib.pyplot as plt
 
 
 def _build_quantum_risk_chart(quantum_risk: dict) -> bytes:
-    """Bar chart of cash-flow, appreciation, and combined wealth success probabilities."""
+    """Bar chart of QAOA alignment scores by dimension."""
     labels = [
-        "Cash Flow\nSuccess",
-        "Appreciation\nSuccess",
-        "Combined Wealth\n(CF + Appreciation)",
-        "Overall Quantum\n(All Factors)",
+        "Cash Flow\nAlignment",
+        "Appreciation\nAlignment",
+        "Combined CF+App\n(Joint |1⟩)",
+        "Overall\n(Cost-Based)",
     ]
     values = [
         quantum_risk["cashflow_success_pct"],
@@ -27,8 +27,8 @@ def _build_quantum_risk_chart(quantum_risk: dict) -> bytes:
     fig, ax = plt.subplots(figsize=(7, 4))
     bars = ax.bar(labels, values, color=colors, edgecolor="#333333", linewidth=0.8)
     ax.set_ylim(0, 100)
-    ax.set_ylabel("Probability of Success (%)")
-    ax.set_title("Quantum Risk Analysis", fontsize=14, fontweight="bold")
+    ax.set_ylabel("Optimization Alignment (%)")
+    ax.set_title("QAOA Alignment Analysis", fontsize=14, fontweight="bold")
     ax.axhline(50, color="#95a5a6", linestyle="--", linewidth=1, alpha=0.7)
     ax.grid(axis="y", linestyle="--", alpha=0.4)
 
@@ -91,43 +91,44 @@ def generate_property_pdf(
     pdf.multi_cell(0, 5, property_info.get("summary", "No summary available."))
     pdf.ln(5)
 
-    # Quantum Risk section
+    # QAOA alignment section
     if quantum_risk:
         pdf.set_font("Times", "B", 12)
-        pdf.cell(0, 10, "Quantum Risk Analysis", ln=True)
+        pdf.cell(0, 10, "QAOA Alignment Analysis", ln=True)
         pdf.set_font("Times", "", 10)
         pdf.multi_cell(
             0,
             5,
-            "Probabilities from a QAOA quantum simulation modeling the chance this "
-            "investment generates positive cash flow, appreciation-driven wealth, "
-            "and aligned performance across both.",
+            "Scores from a QAOA quantum simulation measuring how well a 3-qubit optimizer "
+            "aligns with your normalized investment targets (cash flow, appreciation, "
+            "location). Targets are encoded in the Hamiltonian only; these are "
+            "optimization-alignment metrics, not predictions of market performance.",
         )
         pdf.ln(2)
         pdf.set_font("Times", "", 10)
         pdf.cell(
             0,
             6,
-            f"Cash Flow Success: {quantum_risk['cashflow_success_pct']:.1f}%",
+            f"Cash Flow Alignment (P qubit |1>): {quantum_risk['cashflow_success_pct']:.1f}%",
             ln=True,
         )
         pdf.cell(
             0,
             6,
-            f"Appreciation Success: {quantum_risk['appreciation_success_pct']:.1f}%",
+            f"Appreciation Alignment (P qubit |1>): {quantum_risk['appreciation_success_pct']:.1f}%",
             ln=True,
         )
         pdf.cell(
             0,
             6,
-            f"Combined Wealth Success (CF + Appreciation): "
+            f"Combined CF+App Alignment (joint |1>): "
             f"{quantum_risk['combined_wealth_success_pct']:.1f}%",
             ln=True,
         )
         pdf.cell(
             0,
             6,
-            f"Overall Quantum Success (incl. location): "
+            f"Overall Alignment (expected cost mapped to score): "
             f"{quantum_risk['overall_success_pct']:.1f}%",
             ln=True,
         )
@@ -159,7 +160,8 @@ def generate_property_pdf(
         0,
         5,
         "This score represents a weighted analysis of local appreciation trends, "
-        "school ratings, and quantum-simulated market volatility.",
+        "school ratings, and neighborhood factors. Quantum alignment scores are "
+        "separate optimization metrics and do not predict market volatility.",
     )
     pdf.ln(5)
 
@@ -176,7 +178,7 @@ def generate_property_pdf(
         0,
         4,
         f"Report generated {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}. "
-        "Quantum scores are educational simulations, not financial guarantees.",
+        "Quantum alignment scores are educational optimization simulations, not financial guarantees.",
     )
 
     return bytes(pdf.output())

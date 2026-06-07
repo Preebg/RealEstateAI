@@ -27,7 +27,7 @@ def _render_market_card(name: str, stats: dict[str, float | int | str]) -> None:
         return
     st.metric("Tracked", count)
     st.metric("Avg price", f"${stats['avg_price']:,.0f}")
-    st.caption(f"Avg quantum {stats['avg_quantum']:.1f}% · {stats['top_label']}")
+    st.caption(f"Avg alignment {stats['avg_quantum']:.1f}% · {stats['top_label']}")
 
 
 def render_market_pulse() -> None:

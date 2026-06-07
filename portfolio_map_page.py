@@ -88,7 +88,7 @@ DEFAULT_CLOSING_COSTS_PCT = 3.0
 
 SORT_OPTIONS: dict[str, str] = {
     "Highest One-Year ROI": "one_year_roi",
-    "Lowest Quantum Risk": "quantum_success",
+    "Highest Quantum Alignment": "quantum_success",
     "Highest Total Value": "price",
 }
 
@@ -209,7 +209,11 @@ def _resolve_one_year_roi(prop: dict[str, Any], price: float, rent: float) -> fl
     forecast_rate = _safe_float(prop.get("forecast_rate"))
     if forecast_rate <= 0:
         location_score = _safe_float(prop.get("location_score"), 5.0)
-        forecast_rate = calculate_10yr_appreciation(price, location_score)["annual_rate"]
+        forecast_rate = calculate_10yr_appreciation(
+            price,
+            location_score,
+            prop.get("market_city"),
+        )["annual_rate"]
 
     monthly_cash_flow = _resolve_monthly_cash_flow(prop, price, rent)
     return calculate_one_year_roi(
@@ -462,7 +466,7 @@ def _build_folium_map(
             f"Rent: ${row.rent:,.0f}/mo<br/>"
             f"Cash Flow: ${row.monthly_cash_flow:,.0f}/mo<br/>"
             f"1-Yr ROI: {row.one_year_roi:.2f}%<br/>"
-            f"Quantum: {row.quantum_success:.1f}%<br/>"
+            f"Alignment: {row.quantum_success:.1f}%<br/>"
             f"<i>Click to select</i>"
         )
         popup = (
@@ -473,7 +477,7 @@ def _build_folium_map(
             f"Rent: ${row.rent:,.0f}/mo<br/>"
             f"Cash Flow: ${row.monthly_cash_flow:,.0f}/mo<br/>"
             f"1-Yr ROI: {row.one_year_roi:.2f}%<br/>"
-            f"Quantum Success: {row.quantum_success:.1f}%"
+            f"Quantum Alignment Score: {row.quantum_success:.1f}%"
             f"</div>"
         )
         folium.CircleMarker(
@@ -497,7 +501,7 @@ def sort_portfolio(df: pd.DataFrame, sort_key: str) -> pd.DataFrame:
         return df
 
     if sort_key == "quantum_success":
-        # Lowest quantum risk → highest success probability first
+        # Highest quantum alignment first (descending score)
         return df.sort_values("quantum_success", ascending=False, kind="mergesort")
     if sort_key == "one_year_roi":
         return df.sort_values("one_year_roi", ascending=False, kind="mergesort")
@@ -661,7 +665,7 @@ def render_portfolio_map_page() -> None:
     """Portfolio map home view."""
     render_page_hero(
         "🗺️ Portfolio Map",
-        "Explore harvested properties by one-year ROI, cash flow, and quantum score.",
+        "Explore harvested properties by one-year ROI, cash flow, and quantum alignment score.",
     )
 
     with st.sidebar:
@@ -739,7 +743,7 @@ def render_portfolio_map_page() -> None:
                 sel_col2.metric("Rent", f"${row['rent']:,.0f}/mo")
                 sel_col3.metric("Cash flow", f"${row['monthly_cash_flow']:,.0f}/mo")
                 sel_col4.metric("1-yr ROI", f"{row['one_year_roi']:.2f}%")
-                sel_col5.metric("Quantum", f"{row['quantum_success']:.1f}%")
+                sel_col5.metric("Alignment Score", f"{row['quantum_success']:.1f}%")
                 st.caption(f"{row['address']} · {row['category']} · {row['market_city']}")
 
                 open_col, clear_col = st.columns([2, 1])
@@ -784,7 +788,7 @@ def render_portfolio_map_page() -> None:
             "rent": "Monthly rent",
             "monthly_cash_flow": "Cash flow",
             "one_year_roi": "1-yr ROI",
-            "quantum_success": "Quantum",
+            "quantum_success": "Alignment Score",
         }
     )
 
@@ -805,7 +809,7 @@ def render_portfolio_map_page() -> None:
             "Monthly rent": st.column_config.NumberColumn(format="$%d"),
             "Cash flow": st.column_config.NumberColumn(format="$%d"),
             "1-yr ROI": st.column_config.NumberColumn(format="%.2f%%"),
-            "Quantum": st.column_config.NumberColumn(format="%.1f%%"),
+            "Alignment Score": st.column_config.NumberColumn(format="%.1f%%"),
         },
     )
     _render_ledger_dblclick_helper(st.session_state["_property_ledger_addresses"])

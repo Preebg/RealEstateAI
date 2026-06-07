@@ -9,7 +9,7 @@ import pandas as pd
 import streamlit as st
 
 from authenticate import get_logged_in_user, render_auth_sidebar
-from engine import calculate_quantum_risk, safe_float
+from engine import CLASSICAL_QAOA_DIVERGENCE_HELP, calculate_quantum_risk, safe_float
 from finance import analyze_investment, calculate_10yr_appreciation, calculate_one_year_roi
 from knowledge_base import (
     get_effective_display_maint,
@@ -37,10 +37,14 @@ COMPARISON_METRICS: list[tuple[str, str, str, bool]] = [
     ("10-Yr Growth Rate", "forecast_rate", "percent", True),
     ("10-Yr Forecast Value", "appreciation_forecast", "currency", True),
     ("Location Score", "location_score", "score", True),
-    ("Quantum Overall", "quantum_overall", "percent", True),
-    ("Cash Flow Success", "quantum_cashflow", "percent", True),
-    ("Appreciation Success", "quantum_appreciation", "percent", True),
-    ("Combined Wealth Success", "quantum_combined", "percent", True),
+    ("Overall Success (Classical)", "classical_overall", "percent", True),
+    ("Overall Success (QAOA)", "quantum_overall", "percent", True),
+    ("Cash Flow Success (Classical)", "classical_cashflow", "percent", True),
+    ("Cash Flow Success (QAOA)", "quantum_cashflow", "percent", True),
+    ("Appreciation Success (Classical)", "classical_appreciation", "percent", True),
+    ("Appreciation Success (QAOA)", "quantum_appreciation", "percent", True),
+    ("Combined Wealth (Classical)", "classical_combined", "percent", True),
+    ("Combined Wealth (QAOA)", "quantum_combined", "percent", True),
     ("Strategy", "strategy", "text", False),
 ]
 
@@ -98,7 +102,11 @@ def build_property_comparison_metrics(
         management_fee_pct=management_fee,
     )
 
-    forecast = calculate_10yr_appreciation(predicted_value, location_score)
+    forecast = calculate_10yr_appreciation(
+        predicted_value,
+        location_score,
+        prop.get("market_city"),
+    )
     forecast_rate = safe_float(prop.get("forecast_rate")) or forecast["annual_rate"]
     appreciation_forecast = (
         safe_float(prop.get("appreciation_forecast")) or forecast["future_value"]
@@ -141,6 +149,10 @@ def build_property_comparison_metrics(
         "quantum_cashflow": quantum["cashflow_success_pct"],
         "quantum_appreciation": quantum["appreciation_success_pct"],
         "quantum_combined": quantum["combined_wealth_success_pct"],
+        "classical_overall": quantum["classical_overall_success_pct"],
+        "classical_cashflow": quantum["classical_cashflow_success_pct"],
+        "classical_appreciation": quantum["classical_appreciation_success_pct"],
+        "classical_combined": quantum["classical_combined_wealth_success_pct"],
         "strategy": strategy,
     }
 
@@ -205,7 +217,7 @@ def _render_comparison_charts(rows: list[dict[str, Any]]) -> None:
     chart_specs = [
         ("Monthly Net Cash Flow ($)", "monthly_net_cash_flow", "currency"),
         ("1-Year ROI (%)", "one_year_roi", "percent"),
-        ("Quantum Overall Success (%)", "quantum_overall", "percent"),
+        ("Quantum Alignment Score (%)", "quantum_overall", "percent"),
         ("10-Yr Growth Rate (%)", "forecast_rate", "percent"),
     ]
     labels = [_short_address(row["address"], 24) for row in rows]
@@ -240,10 +252,10 @@ def _render_comparison_charts(rows: list[dict[str, Any]]) -> None:
 
 
 def render_property_compare_page() -> None:
-    """Compare up to four saved properties on cash flow, appreciation, and risk."""
+    """Compare up to four saved properties on cash flow, appreciation, and alignment scores."""
     render_page_hero(
         "⚖️ Compare Saved Properties",
-        "Pick up to four bookmarks and compare cash flow, appreciation, and quantum risk side by side.",
+        "Pick up to four bookmarks and compare cash flow, appreciation, and hybrid optimization scores side by side.",
     )
 
     if is_guest_viewer():
@@ -329,7 +341,8 @@ def render_property_compare_page() -> None:
     with table_tab:
         st.caption(
             "Green highlights show the best value in each row "
-            "(higher is better for returns and success scores)."
+            "(higher is better for returns and alignment scores). "
+            + CLASSICAL_QAOA_DIVERGENCE_HELP
         )
         display_df = _build_comparison_dataframe(comparison_rows)
         styled = _style_comparison_table(display_df, comparison_rows)
@@ -337,6 +350,7 @@ def render_property_compare_page() -> None:
 
         best_cash = max(comparison_rows, key=lambda r: r["monthly_net_cash_flow"])
         best_roi = max(comparison_rows, key=lambda r: r["one_year_roi"])
+        best_classical = max(comparison_rows, key=lambda r: r["classical_overall"])
         best_quantum = max(comparison_rows, key=lambda r: r["quantum_overall"])
         st.markdown("**Quick picks**")
         st.markdown(
@@ -344,7 +358,9 @@ def render_property_compare_page() -> None:
             f"(${best_cash['monthly_net_cash_flow']:,.0f}/mo)\n"
             f"- **Best 1-year ROI:** {_short_address(best_roi['address'], 48)} "
             f"({best_roi['one_year_roi']:.2f}%)\n"
-            f"- **Lowest quantum risk (highest success):** {_short_address(best_quantum['address'], 48)} "
+            f"- **Highest hybrid optimization (classical):** {_short_address(best_classical['address'], 48)} "
+            f"({best_classical['classical_overall']:.1f}%)\n"
+            f"- **Highest quantum alignment (QAOA):** {_short_address(best_quantum['address'], 48)} "
             f"({best_quantum['quantum_overall']:.1f}%)"
         )
 

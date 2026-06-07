@@ -30,10 +30,13 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install ruff pytest
+          pip install ruff pytest mypy
 
       - name: Lint with Ruff
         run: ruff check .
 
+      - name: Type check with mypy
+        run: mypy quantum_portfolio.py engine.py --follow-imports=silent
+
       - name: Run tests
-        run: pytest test_app.py -v
+        run: pytest test_app.py tests/ -v

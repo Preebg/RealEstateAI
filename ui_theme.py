@@ -70,8 +70,89 @@ def inject_app_css() -> None:
             line-height: 1.2;
             color: var(--text-color);
         }
+        .confidence-badge {
+            display: inline-block;
+            font-size: 0.68rem;
+            font-weight: 600;
+            letter-spacing: 0.02em;
+            padding: 0.12rem 0.42rem;
+            border-radius: 999px;
+            color: #fff;
+            margin-left: 0.35rem;
+            vertical-align: middle;
+            white-space: nowrap;
+        }
+        .metric-with-confidence {
+            margin-bottom: 0.35rem;
+        }
+        .metric-with-confidence .metric-label {
+            font-size: 0.82rem;
+            color: var(--text-color);
+            opacity: 0.72;
+        }
+        .metric-with-confidence .metric-value {
+            font-size: 1.45rem;
+            font-weight: 600;
+            color: var(--text-color);
+            line-height: 1.2;
+        }
+        .app-footer-glossary {
+            margin-top: 2.5rem;
+            padding-top: 0.75rem;
+            border-top: 1px solid var(--border-color, rgba(128, 128, 128, 0.28));
+            font-size: 0.78rem;
+            line-height: 1.45;
+            color: var(--text-color);
+            opacity: 0.68;
+        }
         </style>
         """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_app_footer_glossary() -> None:
+    """One-line glossary clarifying alignment scores vs financial risk."""
+    st.markdown(
+        '<p class="app-footer-glossary">'
+        "<strong>Quantum Alignment Score</strong> measures how well the QAOA optimizer "
+        "matches your investment targets (0–100%); "
+        "<strong>Hybrid Optimization Score</strong> compares classical and QAOA on the "
+        "same objective. Neither is financial risk or a market prediction."
+        "</p>",
+        unsafe_allow_html=True,
+    )
+
+
+def render_confidence_badge(score: float, *, show_pct: bool = True) -> str:
+    """Return HTML for a small SNR-style confidence badge (0–1)."""
+    from data_provenance import confidence_badge_color, confidence_label
+
+    label = confidence_label(score)
+    pct = f" {score * 100:.0f}%" if show_pct else ""
+    color = confidence_badge_color(score)
+    return (
+        f'<span class="confidence-badge" style="background:{color};" '
+        f'title="Field confidence {score:.2f} (measurement uncertainty)">'
+        f'{label}{pct}</span>'
+    )
+
+
+def render_metric_with_confidence(
+    label: str,
+    value: str,
+    confidence: float | None,
+    *,
+    help_text: str | None = None,
+) -> None:
+    """Render a metric row with an optional confidence badge."""
+    badge_html = render_confidence_badge(confidence) if confidence is not None else ""
+    help_attr = f' title="{help_text}"' if help_text else ""
+    st.markdown(
+        f'<div class="metric-with-confidence"{help_attr}>'
+        f'<div class="metric-label">{label}{badge_html}</div>'
+        f'<div class="metric-value">{value}</div>'
+        f"</div>",
         unsafe_allow_html=True,
     )
 

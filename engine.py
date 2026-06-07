@@ -8,22 +8,26 @@ import re
 import time
 from dataclasses import dataclass
 from datetime import date
-from typing import Any
+from typing import Any, cast
 
 from google import genai
 from google.genai import errors, types
-from qiskit import QuantumCircuit, transpile
-from qiskit_aer import AerSimulator
-from scipy.optimize import minimize
-
-from app_logging import get_logger, report_error
+from app_logging import get_logger
 from finance import (
     calculate_10yr_appreciation,
     normalize_monthly_insurance,
     normalize_percent_rate,
     normalize_tax_rate_percent,
 )
+from data_provenance import attach_data_provenance
 from knowledge_base import get_kb_context, lookup_property
+from quantum_portfolio import (
+    ALIGNMENT_SCORE_KEYS,
+    CLASSICAL_QAOA_DIVERGENCE_HELP,
+    PortfolioInputs,
+    classical_baseline,
+    score_portfolio,
+)
 
 _log = get_logger("engine")
 
@@ -121,7 +125,7 @@ def _get_api_key() -> str:
     try:
         import streamlit as st
 
-        return st.secrets["GEMINI_API_KEY"]
+        return str(st.secrets["GEMINI_API_KEY"])
     except Exception as exc:
         raise EnvironmentError(
             "GEMINI_API_KEY not set. Export it or add to Streamlit secrets."
@@ -350,7 +354,7 @@ def _extract_response_text(response: Any) -> str:
     try:
         text = response.text
         if text:
-            return text
+            return str(text)
     except (AttributeError, ValueError):
         pass
 
@@ -397,7 +401,7 @@ def _extract_json(text: str) -> dict[str, Any] | list[Any] | None:
     """Helper to extract JSON from LLM responses."""
     for candidate in _json_candidates(text):
         try:
-            return json.loads(candidate)
+            return cast(dict[str, Any] | list[Any], json.loads(candidate))
         except json.JSONDecodeError:
             continue
     return None
@@ -1050,7 +1054,8 @@ No currency symbols or commas outside JSON."""
         "property_condition", research.get("property_condition")
     )
     _sanitize_synthesis_numerics(data)
-    return enrich_with_forecast(data)
+    enriched = enrich_with_forecast(data)
+    return attach_data_provenance(enriched, research, pipeline="harvester")
 
 
 def enrich_with_forecast(property_data: dict[str, Any]) -> dict[str, Any]:
@@ -1074,10 +1079,15 @@ def enrich_with_forecast(property_data: dict[str, Any]) -> dict[str, Any]:
     forecast = calculate_10yr_appreciation(
         safe_float(property_data.get("predicted_value")),
         safe_float(property_data.get("location_score")),
+        property_data.get("market_city"),
     )
     property_data["appreciation_forecast"] = forecast["future_value"]
     property_data["forecast_rate"] = forecast["annual_rate"]
     property_data["forecast_growth"] = forecast["total_growth"]
+    property_data["forecast_value_p10"] = forecast["future_value_p10"]
+    property_data["forecast_value_p90"] = forecast["future_value_p90"]
+    property_data["forecast_rate_p10"] = forecast["annual_rate_p10"]
+    property_data["forecast_rate_p90"] = forecast["annual_rate_p90"]
     return property_data
 
 
@@ -1086,13 +1096,15 @@ def run_harvest_quantum(
     monthly_net_cash_flow: float,
 ) -> float:
     """Run quantum probability and attach score to property_data."""
-    score = calculate_quantum_probability(
-        monthly_net_cash_flow,
-        safe_float(property_data.get("forecast_rate")),
-        safe_float(property_data.get("location_score")),
+    result = score_portfolio(
+        PortfolioInputs(
+            monthly_cash_flow=monthly_net_cash_flow,
+            forecast_rate=safe_float(property_data.get("forecast_rate")),
+            location_score=safe_float(property_data.get("location_score")),
+        )
     )
-    property_data["quantum_risk_score"] = score
-    return score
+    property_data["quantum_risk_score"] = result.overall_success_pct
+    return result.overall_success_pct
 
 
 # ---------------------------------------------------------------------------
@@ -1201,15 +1213,17 @@ def get_final_analysis(
 ) -> dict[str, Any]:
     """Stage 2: Verification, detailed mapping, and forecasting."""
     property_data = dict(initial_data)
-    property_data["sources"] = [
-        f"https://www.google.com/search?q={address.replace(' ', '+')}"
-    ]
-    return enrich_with_forecast(property_data)
+    if not property_data.get("sources"):
+        property_data["sources"] = [
+            f"https://www.google.com/search?q={address.replace(' ', '+')}"
+        ]
+    enriched = enrich_with_forecast(property_data)
+    return attach_data_provenance(enriched, pipeline="underwriter_ui")
 
 
-def _parse_quantum_inputs(
+def _portfolio_inputs_from_legacy(
     *args: float, **kwargs: float
-) -> tuple[float, float, float]:
+) -> PortfolioInputs:
     """Parse cash_flow, forecast_rate, location_score from positional/kw args."""
     cash_flow = 0.0
     forecast_rate = 0.0
@@ -1232,191 +1246,28 @@ def _parse_quantum_inputs(
     if "location_score" in kwargs:
         location_score = float(kwargs["location_score"])
 
-    return cash_flow, forecast_rate, location_score
-
-
-def _success_targets(
-    cash_flow: float, forecast_rate: float, location_score: float
-) -> tuple[float, float, float]:
-    """
-    Map investment inputs to [0, 1] success targets for each QAOA qubit.
-
-    Negative or zero cash flow targets 0 (cash-flow qubit should stay |0⟩).
-    """
-    if cash_flow <= 0:
-        cf_t = 0.0
-    else:
-        cf_t = min(cash_flow / 800.0, 1.0)
-
-    rate_t = min(max(forecast_rate / 8.0, 0.0), 1.0)
-    loc_t = min(max(location_score / 10.0, 0.0), 1.0)
-    return cf_t, rate_t, loc_t
-
-
-def _probabilities_from_measurement_counts(
-    counts: dict[str, int],
-    *,
-    cf_t: float,
-    rate_t: float,
-    loc_t: float,
-) -> dict[str, float]:
-    """
-    Derive interpretable success probabilities from QAOA bitstrings.
-
-    Qubit 0 = cash flow, qubit 1 = appreciation, qubit 2 = location.
-    Each score scales the measured |1⟩ probability by the input target so
-    negative cash flow cannot produce a high cash-flow success rate.
-    """
-    total = sum(counts.values()) or 1
-    exp_x0 = exp_x1 = exp_x2 = 0.0
-
-    for state_str, count in counts.items():
-        prob = count / total
-        bits = state_str.zfill(3)
-        exp_x0 += prob * (bits[2] == "1")
-        exp_x1 += prob * (bits[1] == "1")
-        exp_x2 += prob * (bits[0] == "1")
-
-    cf_pct = 100.0 * cf_t * exp_x0
-    app_pct = 100.0 * rate_t * exp_x1
-    loc_pct = 100.0 * loc_t * exp_x2
-    combined = 100.0 * cf_t * rate_t * exp_x0 * exp_x1
-    overall = 0.45 * cf_pct + 0.35 * app_pct + 0.20 * loc_pct
-
-    return {
-        "cashflow_success_pct": min(max(cf_pct, 0.0), 100.0),
-        "appreciation_success_pct": min(max(app_pct, 0.0), 100.0),
-        "location_success_pct": min(max(loc_pct, 0.0), 100.0),
-        "combined_wealth_success_pct": min(max(combined, 0.0), 100.0),
-        "overall_success_pct": min(max(overall, 0.0), 100.0),
-    }
-
-
-def calculate_quantum_risk(*args, **kwargs) -> dict[str, float]:
-    """
-    QAOA simulation returning cash-flow, appreciation, and combined wealth success odds.
-
-    Each qubit encodes whether a dimension (cash flow, appreciation, location) aligns
-    with investment success. Input targets drive the cost Hamiltonian; negative cash
-    flow forces the cash-flow qubit toward |0⟩ so success scores stay near 0%.
-    """
-    cash_flow, forecast_rate, location_score = _parse_quantum_inputs(*args, **kwargs)
-    cf_t, rate_t, loc_t = _success_targets(cash_flow, forecast_rate, location_score)
-
-    if cf_t == 0.0 and rate_t == 0.0 and loc_t == 0.0:
-        return {
-            "cashflow_success_pct": 0.0,
-            "appreciation_success_pct": 0.0,
-            "location_success_pct": 0.0,
-            "combined_wealth_success_pct": 0.0,
-            "overall_success_pct": 0.0,
-        }
-
-    # Legacy single-metric path (location score only)
-    if cf_t == 0.0 and rate_t == 0.0 and location_score > 0:
-        loc_pct = loc_t * 100.0
-        return {
-            "cashflow_success_pct": loc_pct,
-            "appreciation_success_pct": loc_pct,
-            "location_success_pct": loc_pct,
-            "combined_wealth_success_pct": loc_pct,
-            "overall_success_pct": loc_pct,
-        }
-
-    def compute_cost(x0: int, x1: int, x2: int) -> float:
-        misalignment = (
-            (cf_t - x0) ** 2 + (rate_t - x1) ** 2 + (loc_t - x2) ** 2
-        )
-        coupling = 0.15 * ((x0 - x1) ** 2 + (x1 - x2) ** 2)
-        return misalignment + coupling
-
-    def build_qaoa_circuit(gamma: float, beta: float) -> QuantumCircuit:
-        qc = QuantumCircuit(3)
-        qc.h([0, 1, 2])
-        for i, target in enumerate([cf_t, rate_t, loc_t]):
-            qc.rz(gamma * (2.0 * target - 1.0), i)
-        qc.rzz(-0.15 * gamma, 0, 1)
-        qc.rzz(-0.15 * gamma, 1, 2)
-        for i in range(3):
-            qc.rx(2 * beta, i)
-        return qc
-
-    gamma_bounds = (0.0, 3.14159)
-    beta_bounds = (0.0, 1.57079)
-    optimize_shots = 256
-    final_shots = 1024
-    simulator = AerSimulator()
-
-    def clip_gamma_beta(params: list[float] | tuple[float, ...]) -> tuple[float, float]:
-        gamma = min(max(float(params[0]), gamma_bounds[0]), gamma_bounds[1])
-        beta = min(max(float(params[1]), beta_bounds[0]), beta_bounds[1])
-        return gamma, beta
-
-    def cost_function(params: list[float] | tuple[float, ...]) -> float:
-        gamma, beta = clip_gamma_beta(params)
-        qc_measure = build_qaoa_circuit(gamma, beta).copy()
-        qc_measure.measure_all()
-        compiled_circuit = transpile(qc_measure, simulator)
-        job = simulator.run(
-            compiled_circuit, shots=optimize_shots, seed_simulator=42
-        )
-        counts = job.result().get_counts()
-        total = sum(counts.values()) or 1
-        expected_cost = 0.0
-        for state_str, count in counts.items():
-            prob = count / total
-            bits = state_str.zfill(3)
-            x2 = int(bits[0])
-            x1 = int(bits[1])
-            x0 = int(bits[2])
-            expected_cost += prob * compute_cost(x0, x1, x2)
-        return expected_cost
-
-    initial_params = [1.04719, 0.52359]
-    final_gamma, final_beta = clip_gamma_beta(initial_params)
-
-    try:
-        opt_result = minimize(
-            cost_function,
-            x0=initial_params,
-            method="COBYLA",
-            options={"maxiter": 30, "rhobeg": 0.35},
-        )
-        final_gamma, final_beta = clip_gamma_beta(opt_result.x)
-        if not opt_result.success:
-            _log.warning(
-                "qaoa_optimizer_did_not_converge",
-                message=str(opt_result.message),
-                nit=getattr(opt_result, "nit", None),
-                final_cost=float(opt_result.fun),
-                gamma=final_gamma,
-                beta=final_beta,
-            )
-    except Exception as exc:
-        report_error(
-            _log,
-            "qaoa_optimizer_failed",
-            exc,
-            gamma=final_gamma,
-            beta=final_beta,
-        )
-
-    opt_qc = build_qaoa_circuit(final_gamma, final_beta)
-    opt_qc.measure_all()
-    compiled_circuit = transpile(opt_qc, simulator)
-    job = simulator.run(compiled_circuit, shots=final_shots, seed_simulator=42)
-    counts = job.result().get_counts()
-    return _probabilities_from_measurement_counts(
-        counts, cf_t=cf_t, rate_t=rate_t, loc_t=loc_t
+    return PortfolioInputs(
+        monthly_cash_flow=cash_flow,
+        forecast_rate=forecast_rate,
+        location_score=location_score,
     )
 
 
-def calculate_quantum_probability(*args, **kwargs) -> float:
+def classical_baseline_score(*args: float, **kwargs: float) -> dict[str, float]:
+    """Backward-compatible wrapper around :func:`quantum_portfolio.classical_baseline`."""
+    return classical_baseline(_portfolio_inputs_from_legacy(*args, **kwargs)).to_dict()
+
+
+def calculate_quantum_risk(*args: float, **kwargs: float) -> dict[str, float]:
+    """Backward-compatible wrapper around :func:`quantum_portfolio.score_portfolio`."""
+    return score_portfolio(_portfolio_inputs_from_legacy(*args, **kwargs)).to_dict()
+
+
+def calculate_quantum_probability(*args: float, **kwargs: float) -> float:
     """
     Simulates investment success via QAOA. Returns the weighted overall success score.
     Use calculate_quantum_risk() for cash-flow and appreciation breakdowns.
     """
-    risk = calculate_quantum_risk(*args, **kwargs)
-    return risk["overall_success_pct"]
-
-
+    return score_portfolio(
+        _portfolio_inputs_from_legacy(*args, **kwargs)
+    ).overall_success_pct

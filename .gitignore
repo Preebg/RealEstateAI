@@ -12,5 +12,20 @@ property_kb.json
 .streamlit/cache/
 .streamlit/oauth_pkce_pending.json
 harvester_scheduled.log
+reports/
 poised-epigram-493119-g0-64095d0f749b.json
 .aider*
+
+# Withheld until understood (AI-generated refactors / docs — keep local only)
+quantum_portfolio.py
+data_provenance.py
+components/
+services/
+validation/
+tests/
+pages/3_Model_Validation.py
+docs/QUANTUM_METHOD.md
+docs/DATA_PIPELINE.md
+ARCHITECTURE.md
+README.md
+mypy.ini

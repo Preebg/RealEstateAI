@@ -1,4 +1,5 @@
 import json
+import logging
 import math
 import unittest
 from unittest.mock import patch
@@ -7,7 +8,12 @@ from scipy.optimize import minimize as scipy_minimize
 
 # Mock streamlit before importing engine to avoid secrets errors
 with patch("streamlit.secrets", {"GEMINI_API_KEY": "fake_key"}):
-    from engine import calculate_quantum_probability, calculate_quantum_risk
+    from engine import (
+        ALIGNMENT_SCORE_KEYS,
+        calculate_quantum_probability,
+        calculate_quantum_risk,
+        classical_baseline_score,
+    )
     from engine import (
         DISCOVERY_FALLBACK_MODEL,
         DISCOVERY_MODEL,
@@ -17,18 +23,25 @@ with patch("streamlit.secrets", {"GEMINI_API_KEY": "fake_key"}):
         research_property,
         should_skip_synthesis,
     )
-    from finance import calculate_10yr_appreciation
+    from finance import (
+        DEFAULT_METRO_CAGR,
+        LOCATION_ADJUSTMENT_BAND,
+        METRO_HISTORICAL_CAGR,
+        calculate_10yr_appreciation,
+        expected_annual_appreciation_rate,
+        location_rate_adjustment,
+        monte_carlo_appreciation_forecast,
+        resolve_metro_base_rate,
+    )
     from google.genai import errors
 
 from qiskit_aer import AerSimulator
 
-QUANTUM_RISK_KEYS = (
-    "cashflow_success_pct",
-    "appreciation_success_pct",
-    "location_success_pct",
-    "combined_wealth_success_pct",
-    "overall_success_pct",
-)
+QUANTUM_RISK_KEYS = ALIGNMENT_SCORE_KEYS
+
+CLASSICAL_RISK_KEYS = tuple(f"classical_{key}" for key in ALIGNMENT_SCORE_KEYS)
+
+ALL_RISK_KEYS = QUANTUM_RISK_KEYS + CLASSICAL_RISK_KEYS
 
 # Deterministic snapshots with AerSimulator(seed_simulator=42) and COBYLA (maxiter=30).
 GOLDEN_PERFECT_RISK = {
@@ -49,14 +62,18 @@ GOLDEN_AVERAGE_RISK = {
 
 
 def assert_valid_quantum_risk(test_case: unittest.TestCase, risk: dict[str, float]) -> None:
-    """All breakdown fields must be finite and within [0, 100]."""
-    for key in QUANTUM_RISK_KEYS:
+    """All QAOA and classical breakdown fields must be finite and within [0, 100]."""
+    for key in ALL_RISK_KEYS:
         test_case.assertIn(key, risk)
         value = risk[key]
         test_case.assertFalse(math.isnan(value), f"{key} is NaN")
         test_case.assertFalse(math.isinf(value), f"{key} is infinite")
         test_case.assertGreaterEqual(value, 0.0, f"{key} below 0")
         test_case.assertLessEqual(value, 100.0, f"{key} above 100")
+
+
+def _qaoa_subset(risk: dict[str, float]) -> dict[str, float]:
+    return {key: risk[key] for key in QUANTUM_RISK_KEYS}
 
 
 class TestAIUnderwriterEngine(unittest.TestCase):
@@ -66,9 +83,87 @@ class TestAIUnderwriterEngine(unittest.TestCase):
         Test that passing a current_value of 0 returns the guard-clause
         dictionary instead of raising a ZeroDivisionError.
         """
-        result = calculate_10yr_appreciation(0, 10)
-        expected = {"future_value": 0, "annual_rate": 0, "total_growth": 0}
-        self.assertEqual(result, expected)
+        result = calculate_10yr_appreciation(0, 10, "Rochester")
+        self.assertEqual(result["future_value"], 0)
+        self.assertEqual(result["annual_rate"], 0)
+        self.assertEqual(result["total_growth"], 0)
+        self.assertEqual(result["future_value_p10"], 0)
+        self.assertEqual(result["future_value_p50"], 0)
+        self.assertEqual(result["future_value_p90"], 0)
+        self.assertEqual(result["value_schedule_p50"], [])
+
+    def test_location_rate_adjustment_bounded_band(self):
+        self.assertAlmostEqual(location_rate_adjustment(5.0), 0.0)
+        self.assertAlmostEqual(location_rate_adjustment(10.0), LOCATION_ADJUSTMENT_BAND)
+        self.assertAlmostEqual(location_rate_adjustment(0.0), -LOCATION_ADJUSTMENT_BAND)
+        # Scores outside 0–10 are clamped to the band edges.
+        self.assertAlmostEqual(location_rate_adjustment(15.0), LOCATION_ADJUSTMENT_BAND)
+        self.assertAlmostEqual(location_rate_adjustment(-5.0), -LOCATION_ADJUSTMENT_BAND)
+
+    def test_resolve_metro_base_rate_known_and_unknown(self):
+        self.assertAlmostEqual(resolve_metro_base_rate("Raleigh"), METRO_HISTORICAL_CAGR["Raleigh"])
+        self.assertAlmostEqual(resolve_metro_base_rate("raleigh"), METRO_HISTORICAL_CAGR["Raleigh"])
+        self.assertAlmostEqual(resolve_metro_base_rate("Unknown Metro"), DEFAULT_METRO_CAGR)
+        self.assertAlmostEqual(resolve_metro_base_rate(None), DEFAULT_METRO_CAGR)
+
+    def test_appreciation_monotonic_in_location_score(self):
+        """Higher location score → higher or equal expected appreciation (fixed metro)."""
+        market = "Charlotte"
+        value = 250_000.0
+        scores = [0.0, 2.5, 5.0, 7.5, 10.0]
+        prior_rate = -1.0
+        prior_future = -1.0
+        for score in scores:
+            rate = expected_annual_appreciation_rate(market, score)
+            forecast = calculate_10yr_appreciation(value, score, market)
+            self.assertGreaterEqual(rate, prior_rate)
+            self.assertGreaterEqual(forecast["future_value_p50"], prior_future)
+            self.assertGreaterEqual(forecast["annual_rate"], prior_rate * 100.0)
+            prior_rate = rate
+            prior_future = forecast["future_value_p50"]
+
+    def test_appreciation_percentiles_ordered(self):
+        forecast = calculate_10yr_appreciation(300_000, 6.5, "DFW")
+        self.assertLessEqual(forecast["future_value_p10"], forecast["future_value_p50"])
+        self.assertLessEqual(forecast["future_value_p50"], forecast["future_value_p90"])
+        self.assertLessEqual(forecast["annual_rate_p10"], forecast["annual_rate_p50"])
+        self.assertLessEqual(forecast["annual_rate_p50"], forecast["annual_rate_p90"])
+        schedules = zip(
+            forecast["value_schedule_p10"],
+            forecast["value_schedule_p50"],
+            forecast["value_schedule_p90"],
+        )
+        for low, mid, high in schedules:
+            self.assertLessEqual(low, mid)
+            self.assertLessEqual(mid, high)
+
+    def test_appreciation_metro_changes_base_not_location_band(self):
+        low_metro = calculate_10yr_appreciation(200_000, 5.0, "Syracuse")
+        high_metro = calculate_10yr_appreciation(200_000, 5.0, "Austin")
+        self.assertGreater(high_metro["metro_base_rate"], low_metro["metro_base_rate"])
+        self.assertAlmostEqual(high_metro["location_adjustment"], 0.0)
+        self.assertAlmostEqual(low_metro["location_adjustment"], 0.0)
+        self.assertGreater(high_metro["future_value_p50"], low_metro["future_value_p50"])
+
+    def test_monte_carlo_forecast_is_deterministic_with_seed(self):
+        args = (275_000.0, "Rochester", 7.0)
+        first = monte_carlo_appreciation_forecast(*args, seed=99)
+        second = monte_carlo_appreciation_forecast(*args, seed=99)
+        self.assertEqual(first["future_value_p50"], second["future_value_p50"])
+        self.assertEqual(first["value_schedule_p50"], second["value_schedule_p50"])
+
+    def test_expected_rate_matches_metro_plus_bounded_adjustment(self):
+        market = "Ohio"
+        score = 8.0
+        expected = (
+            resolve_metro_base_rate(market) + location_rate_adjustment(score)
+        ) * 100.0
+        forecast = calculate_10yr_appreciation(100_000, score, market)
+        self.assertAlmostEqual(forecast["annual_rate"], expected)
+        self.assertAlmostEqual(
+            forecast["location_adjustment"],
+            location_rate_adjustment(score) * 100.0,
+        )
 
     def test_calculate_quantum_probability_legacy(self):
         """
@@ -84,7 +179,7 @@ class TestAIUnderwriterEngine(unittest.TestCase):
         Three-argument path runs the COBYLA hybrid loop (scipy.optimize.minimize)
         and returns deterministic, bounded probabilities.
         """
-        with patch("engine.minimize", wraps=scipy_minimize) as mock_minimize:
+        with patch("quantum_portfolio.minimize", wraps=scipy_minimize) as mock_minimize:
             score_perfect = calculate_quantum_probability(1000.0, 10.0, 10.0)
             score_avg = calculate_quantum_probability(500.0, 5.0, 5.0)
 
@@ -108,7 +203,7 @@ class TestAIUnderwriterEngine(unittest.TestCase):
         score_poor = calculate_quantum_probability(0.0, 0.0, 0.0)
         self.assertEqual(score_poor, 0.0)
 
-        with patch("engine.minimize", wraps=scipy_minimize) as mock_minimize:
+        with patch("quantum_portfolio.minimize", wraps=scipy_minimize) as mock_minimize:
             calculate_quantum_probability(0.0, 0.0, 0.0)
         mock_minimize.assert_not_called()
 
@@ -126,7 +221,7 @@ class TestAIUnderwriterEngine(unittest.TestCase):
             call_records.append((cost_function, x0))
             return result
 
-        with patch("engine.minimize", side_effect=tracking_minimize):
+        with patch("quantum_portfolio.minimize", side_effect=tracking_minimize):
             risk = calculate_quantum_risk(1000.0, 10.0, 10.0)
 
         self.assertEqual(len(opt_results), 1)
@@ -166,29 +261,70 @@ class TestAIUnderwriterEngine(unittest.TestCase):
         capped_reference = calculate_quantum_risk(1000.0, 0.0, 10.0)
 
         for cash_flow, forecast_rate, location_score in extreme_cases:
-            with patch("engine.minimize", wraps=scipy_minimize) as mock_minimize:
+            with patch("quantum_portfolio.minimize", wraps=scipy_minimize) as mock_minimize:
                 risk = calculate_quantum_risk(cash_flow, forecast_rate, location_score)
 
             mock_minimize.assert_called_once()
             assert_valid_quantum_risk(self, risk)
 
         self.assertEqual(
-            calculate_quantum_risk(-1_000_000_000.0, 999_999.0, -1_000_000.0),
-            clamped_reference,
+            _qaoa_subset(calculate_quantum_risk(-1_000_000_000.0, 999_999.0, -1_000_000.0)),
+            _qaoa_subset(clamped_reference),
         )
         self.assertEqual(
-            calculate_quantum_risk(1_000_000_000.0, -500.0, 10_000.0),
-            capped_reference,
+            _qaoa_subset(calculate_quantum_risk(1_000_000_000.0, -500.0, 10_000.0)),
+            _qaoa_subset(capped_reference),
         )
         all_zero = calculate_quantum_risk(-99_999.0, -99_999.0, -99_999.0)
         assert_valid_quantum_risk(self, all_zero)
         self.assertEqual(all_zero["overall_success_pct"], 0.0)
 
-        with patch("engine.minimize", wraps=scipy_minimize) as mock_minimize:
+        with patch("quantum_portfolio.minimize", wraps=scipy_minimize) as mock_minimize:
             oversaturated = calculate_quantum_risk(50_000.0, 500.0, 500.0)
         mock_minimize.assert_called_once()
         assert_valid_quantum_risk(self, oversaturated)
-        self.assertEqual(oversaturated, GOLDEN_PERFECT_RISK)
+        self.assertEqual(_qaoa_subset(oversaturated), GOLDEN_PERFECT_RISK)
+
+    def test_classical_baseline_score_bounds_and_ordering(self):
+        """Classical scores stay in [0, 100] and rank perfect inputs above poor ones."""
+        perfect = classical_baseline_score(1000.0, 10.0, 10.0)
+        poor = classical_baseline_score(0.0, 0.0, 0.0)
+
+        for key in QUANTUM_RISK_KEYS:
+            self.assertGreaterEqual(perfect[key], 0.0)
+            self.assertLessEqual(perfect[key], 100.0)
+            self.assertGreaterEqual(poor[key], 0.0)
+            self.assertLessEqual(poor[key], 100.0)
+            self.assertGreater(perfect[key], poor[key])
+
+    def test_classical_vs_qaoa_bounds_ordering_and_golden_divergence(self):
+        """
+        Both methods return bounded scores, rank perfect above poor inputs,
+        and log max absolute divergence on golden fixtures.
+        """
+        log = logging.getLogger("test_app.quantum")
+        fixtures = (
+            ("perfect", (1000.0, 10.0, 10.0), GOLDEN_PERFECT_RISK),
+            ("average", (500.0, 5.0, 5.0), GOLDEN_AVERAGE_RISK),
+        )
+
+        for label, args, golden_qaoa in fixtures:
+            risk = calculate_quantum_risk(*args)
+            assert_valid_quantum_risk(self, risk)
+
+            for key in QUANTUM_RISK_KEYS:
+                self.assertAlmostEqual(risk[key], golden_qaoa[key], places=4)
+
+            max_diff = max(
+                abs(risk[key] - risk[f"classical_{key}"]) for key in QUANTUM_RISK_KEYS
+            )
+            log.info("golden_%s max_abs_classical_qaoa_diff=%.6f", label, max_diff)
+
+        perfect = calculate_quantum_risk(1000.0, 10.0, 10.0)
+        poor = calculate_quantum_risk(0.0, 0.0, 0.0)
+        for key in QUANTUM_RISK_KEYS:
+            self.assertGreater(perfect[key], poor[key])
+            self.assertGreater(perfect[f"classical_{key}"], poor[f"classical_{key}"])
 
     def test_quantum_simulator_uses_fixed_seed(self):
         """Every AerSimulator.run in the QAOA path must pass seed_simulator=42."""
@@ -710,8 +846,11 @@ class TestPropertyComparison(unittest.TestCase):
         self.assertGreater(metrics["one_year_roi"], -100)
         self.assertEqual(metrics["strategy"], "Balanced")
         self.assertIn("quantum_overall", metrics)
+        self.assertIn("classical_overall", metrics)
         self.assertGreaterEqual(metrics["quantum_overall"], 0.0)
         self.assertLessEqual(metrics["quantum_overall"], 100.0)
+        self.assertGreaterEqual(metrics["classical_overall"], 0.0)
+        self.assertLessEqual(metrics["classical_overall"], 100.0)
 
 
 class TestUserSavedProperties(unittest.TestCase):
@@ -932,6 +1071,68 @@ class TestHeadlessDetection(unittest.TestCase):
                 from authenticate import _headless_mode
 
                 self.assertTrue(_headless_mode())
+
+
+class TestDataProvenance(unittest.TestCase):
+    def test_price_confidence_high_when_listed(self):
+        from data_provenance import compute_field_confidence
+
+        scores = compute_field_confidence({"price": 250000, "rent": 1800, "tax_rate": 2.8})
+        self.assertGreaterEqual(scores["price"], 0.85)
+
+    def test_rent_confidence_boost_when_stated_in_listing(self):
+        from data_provenance import compute_field_confidence
+
+        research = {
+            "stated_gross_monthly_rent": 2200,
+            "listing_rent_notes": "Tenant paying $2200/mo",
+        }
+        scores = compute_field_confidence(
+            {"price": 200000, "rent": 2200, "tax_rate": 3.0},
+            research,
+        )
+        self.assertGreaterEqual(scores["rent"], 0.80)
+
+    def test_attach_provenance_adds_signal_chain(self):
+        from data_provenance import attach_data_provenance
+
+        record = {
+            "price": 180000,
+            "rent": 1500,
+            "tax_rate": 3.4,
+            "insurance": 95,
+            "sources": ["https://www.zillow.com/homedetails/example"],
+        }
+        attach_data_provenance(record, pipeline="underwriter_ui")
+        self.assertIn("confidence_score", record)
+        self.assertIn("data_provenance", record)
+        self.assertEqual(record["data_provenance"]["pipeline"], "underwriter_ui")
+        self.assertEqual(record["data_provenance"]["signal_chain"][0], "source_urls")
+
+    def test_get_final_analysis_attaches_provenance(self):
+        from engine import get_final_analysis
+
+        result = get_final_analysis(
+            {
+                "price": 200000,
+                "rent": 1600,
+                "tax_rate": 3.0,
+                "insurance": 100,
+                "predicted_value": 205000,
+                "location_score": 6.5,
+            },
+            "123 Main St, Rochester, NY",
+        )
+        self.assertIn("confidence_score", result)
+        self.assertIn("data_provenance", result)
+
+    def test_confidence_labels(self):
+        from data_provenance import confidence_label
+
+        self.assertEqual(confidence_label(0.92), "High")
+        self.assertEqual(confidence_label(0.65), "Medium")
+        self.assertEqual(confidence_label(0.45), "Low")
+        self.assertEqual(confidence_label(0.20), "Very Low")
 
 
 if __name__ == "__main__":

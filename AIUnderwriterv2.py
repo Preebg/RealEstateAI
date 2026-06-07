@@ -7,7 +7,7 @@ import streamlit as st
 from authenticate import render_auth_page
 from app_nav import INDIVIDUAL_SEARCH_PAGE, MAP_OPEN_ADDRESS_KEY, consume_nav_target
 from share_access import consume_guest_landing_address, is_guest_viewer
-from ui_theme import inject_app_css
+from ui_theme import inject_app_css, render_app_footer_glossary
 
 st.set_page_config(
     page_title="AI Property Scout",
@@ -50,13 +50,21 @@ nav_pages = [
         icon="⚖️",
         url_path="compare",
     ),
+    st.Page(
+        "pages/3_Model_Validation.py",
+        title="Model Validation",
+        icon="📊",
+        url_path="model-validation",
+    ),
 ]
 
 if not authenticated:
     # Register v2 navigation (overrides default "AIUnderwriterv2" sidebar label)
     # without showing page links on the login screen.
     st.navigation(nav_pages, position="hidden")
+    render_app_footer_glossary()
     st.stop()
 
 pg = st.navigation(nav_pages)
 pg.run()
+render_app_footer_glossary()
