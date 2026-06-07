@@ -3,7 +3,9 @@ venv/
 .streamlit/secrets.toml
 .cursor/
 .agents/
-scripts/
+scripts/backfill_zip_codes.py
+scripts/test_user_overrides.py
+scripts/setup_task.ps1
 supabase/
 __pycache__/
 property_kb.json
