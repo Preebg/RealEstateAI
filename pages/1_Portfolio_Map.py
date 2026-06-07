@@ -9,13 +9,13 @@ from typing import Any
 import pandas as pd
 import pydeck as pdk
 import streamlit as st
-from geopy.geocoders import Nominatim
 
 from authenticate import render_auth_sidebar
 from knowledge_base import (
     _fetch_canonical_properties,
     _normalize_record_numerics,
     get_ai_baseline_rent,
+    parse_zipcode_from_address,
     render_auth_page,
 )
 from market_pulse import render_market_pulse
@@ -26,6 +26,46 @@ from market_pulse import render_market_pulse
 MARKET_CITY_CENTERS: dict[str, tuple[float, float]] = {
     "Rochester, NY": (43.1566, -77.6088),
     "Syracuse, NY": (43.0481, -76.1474),
+}
+
+# High-volume ZIP centroids — instant lookup, no network calls.
+ZIP_CENTROIDS: dict[str, tuple[float, float]] = {
+    "14604": (43.1547, -77.6120),
+    "14605": (43.1680, -77.5930),
+    "14606": (43.1700, -77.6600),
+    "14607": (43.1547, -77.5772),
+    "14608": (43.1480, -77.5980),
+    "14609": (43.1759, -77.5495),
+    "14610": (43.1420, -77.5500),
+    "14611": (43.1389, -77.6278),
+    "14612": (43.2600, -77.6900),
+    "14613": (43.1650, -77.6350),
+    "14614": (43.1540, -77.6050),
+    "14615": (43.2100, -77.6400),
+    "14616": (43.2300, -77.6700),
+    "14617": (43.2200, -77.5900),
+    "14618": (43.1200, -77.5400),
+    "14619": (43.1300, -77.6200),
+    "14620": (43.1287, -77.6134),
+    "14621": (43.1750, -77.6100),
+    "14622": (43.1540, -77.6200),
+    "14623": (43.0840, -77.6700),
+    "14624": (43.1200, -77.7200),
+    "14625": (43.1300, -77.5600),
+    "14626": (43.2000, -77.7000),
+    "13202": (43.0362, -76.1398),
+    "13203": (43.0580, -76.1200),
+    "13204": (43.0471, -76.1534),
+    "13205": (43.0700, -76.1000),
+    "13206": (43.0667, -76.1067),
+    "13207": (43.0400, -76.1700),
+    "13208": (43.0800, -76.1300),
+    "13209": (43.0900, -76.1800),
+    "13210": (43.0280, -76.1165),
+    "13211": (43.1000, -76.1100),
+    "13212": (43.1200, -76.1400),
+    "13214": (43.0400, -76.0800),
+    "13215": (43.0100, -76.1600),
 }
 
 SORT_OPTIONS: dict[str, str] = {
@@ -74,6 +114,7 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
+@st.cache_data(ttl=300, show_spinner=False)
 def load_global_portfolio_properties() -> list[dict[str, Any]]:
     """
     Load every canonical property row from the shared global KB.
@@ -124,10 +165,12 @@ def build_portfolio_dataframe(properties: list[dict[str, Any]]) -> pd.DataFrame:
             or "—"
         )
         market_city = prop.get("market_city") or _infer_market_city(address) or "—"
+        zip_code = str(prop.get("zip_code") or "").strip() or parse_zipcode_from_address(address)
 
         records.append(
             {
                 "address": address,
+                "zip_code": zip_code,
                 "category": str(category),
                 "price": price,
                 "rent": rent,
@@ -158,42 +201,76 @@ def build_portfolio_dataframe(properties: list[dict[str, Any]]) -> pd.DataFrame:
     return pd.DataFrame(records)
 
 
-@st.cache_data(ttl=86_400, show_spinner=False)
-def geocode_address(address: str) -> tuple[float | None, float | None]:
-    """Resolve a single address to (lat, lon) with Nominatim, then market fallback."""
-    if not address or not address.strip():
+def _market_key_from_city(market_city: str) -> str | None:
+    """Normalize stored market_city values to MARKET_CITY_CENTERS keys."""
+    if not market_city or market_city == "—":
+        return None
+    lowered = market_city.lower()
+    if "rochester" in lowered:
+        return "Rochester, NY"
+    if "syracuse" in lowered:
+        return "Syracuse, NY"
+    return None
+
+
+def _coords_from_market_center(address: str, market_key: str) -> tuple[float, float]:
+    base_lat, base_lon = MARKET_CITY_CENTERS[market_key]
+    lat_off, lon_off = _deterministic_jitter(address)
+    return base_lat + lat_off, base_lon + lon_off
+
+
+def resolve_coordinates_local(
+    address: str,
+    zip_code: str | None,
+    market_city: str,
+) -> tuple[float | None, float | None]:
+    """
+    Instant coordinate resolution — no network I/O.
+
+    Priority: known ZIP centroid → ZIP prefix market → address/market text.
+    """
+    normalized = (address or "").strip()
+    if not normalized:
         return None, None
 
-    normalized = address.strip()
-    try:
-        geolocator = Nominatim(user_agent="realestateai_portfolio_map_v1")
-        location = geolocator.geocode(normalized, timeout=10)
-        if location is not None:
-            return float(location.latitude), float(location.longitude)
-    except Exception:
-        pass
+    zip_val = (zip_code or "").strip() or parse_zipcode_from_address(normalized) or ""
 
-    market_key = _infer_market_city(normalized)
-    if market_key and market_key in MARKET_CITY_CENTERS:
-        base_lat, base_lon = MARKET_CITY_CENTERS[market_key]
-        lat_off, lon_off = _deterministic_jitter(normalized)
+    if zip_val in ZIP_CENTROIDS:
+        base_lat, base_lon = ZIP_CENTROIDS[zip_val]
+        lat_off, lon_off = _deterministic_jitter(normalized, scale=0.006)
         return base_lat + lat_off, base_lon + lon_off
+
+    if zip_val.startswith("146"):
+        return _coords_from_market_center(normalized, "Rochester, NY")
+    if zip_val.startswith("132"):
+        return _coords_from_market_center(normalized, "Syracuse, NY")
+
+    market_key = _market_key_from_city(market_city) or _infer_market_city(normalized)
+    if market_key:
+        return _coords_from_market_center(normalized, market_key)
 
     return None, None
 
 
+@st.cache_data(ttl=300, show_spinner=False)
 def attach_coordinates(df: pd.DataFrame) -> pd.DataFrame:
-    """Geocode every unique address and merge lat/lon onto the portfolio frame."""
+    """Resolve lat/lon instantly from ZIP centroids and market fallbacks (no network)."""
     if df.empty:
         return df
 
     enriched = df.copy()
-    coords: dict[str, tuple[float | None, float | None]] = {}
-    for address in enriched["address"].unique():
-        coords[address] = geocode_address(address)
 
-    enriched["lat"] = enriched["address"].map(lambda a: coords.get(a, (None, None))[0])
-    enriched["lon"] = enriched["address"].map(lambda a: coords.get(a, (None, None))[1])
+    def _resolve_row(row: pd.Series) -> pd.Series:
+        lat, lon = resolve_coordinates_local(
+            str(row["address"]),
+            row.get("zip_code"),
+            str(row["market_city"]),
+        )
+        return pd.Series({"lat": lat, "lon": lon})
+
+    coords = enriched.apply(_resolve_row, axis=1)
+    enriched["lat"] = coords["lat"]
+    enriched["lon"] = coords["lon"]
     return enriched
 
 
@@ -380,9 +457,8 @@ sort_key = SORT_OPTIONS[sort_label]
 filtered_df = portfolio_df[portfolio_df["price"] >= min_price].copy()
 sorted_df = sort_portfolio(filtered_df, sort_key)
 
-with st.spinner("Resolving property coordinates…"):
-    geo_df = attach_coordinates(sorted_df)
-    map_df = apply_map_colors(geo_df)
+geo_df = attach_coordinates(sorted_df)
+map_df = apply_map_colors(geo_df)
 
 # --- Map ---
 st.subheader("🌐 Geospatial Portfolio View")
@@ -433,10 +509,13 @@ st.dataframe(
     },
 )
 
-geocoded_count = map_df["lat"].notna().sum()
+geocoded_count = int(map_df["lat"].notna().sum())
 if geocoded_count < len(map_df):
     st.caption(
-        f"{geocoded_count:,} of {len(map_df):,} properties geocoded. "
-        "Rochester and Syracuse addresses use city-center fallback with jitter "
-        "when exact geocoding fails."
+        f"{geocoded_count:,} of {len(map_df):,} properties mapped. "
+        "Unplaced addresses are outside Rochester/Syracuse ZIP markets."
+    )
+else:
+    st.caption(
+        "Coordinates resolved instantly from ZIP centroids and market fallbacks."
     )
