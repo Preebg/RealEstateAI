@@ -5,7 +5,7 @@ from __future__ import annotations
 import streamlit as st
 
 from authenticate import render_auth_page
-from property_nav import INDIVIDUAL_SEARCH_PAGE, MAP_OPEN_ADDRESS_KEY, consume_nav_target
+from app_nav import INDIVIDUAL_SEARCH_PAGE, MAP_OPEN_ADDRESS_KEY, consume_nav_target
 from share_access import consume_guest_landing_address, is_guest_viewer
 from ui_theme import inject_app_css
 
@@ -52,6 +52,12 @@ nav_pages = [
         icon="🔍",
         url_path="individual-search",
         default=open_individual_search,
+    ),
+    st.Page(
+        "pages/2_Compare_Properties.py",
+        title="Compare",
+        icon="⚖️",
+        url_path="compare",
     ),
 ]
 

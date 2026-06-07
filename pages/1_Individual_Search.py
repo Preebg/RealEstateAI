@@ -13,7 +13,7 @@ from finance import (
     calculate_10yr_appreciation,
     project_value_schedule,
 )
-from authenticate import get_logged_in_user, render_auth_sidebar
+from authenticate import get_logged_in_user, render_auth_page, render_auth_sidebar
 from share_access import (
     build_share_url,
     create_property_share_link,
@@ -31,7 +31,6 @@ from knowledge_base import (
     get_property_id_by_address,
     is_rent_outlier,
     lookup_property,
-    render_auth_page,
     is_property_saved_for_user,
     render_user_saved_properties_sidebar,
     save_knowledge_base,
@@ -41,6 +40,7 @@ from knowledge_base import (
     user_has_override_changes,
 )
 from market_pulse import render_market_pulse
+from portfolio_map_page import invalidate_portfolio_cache
 from property_nav import consume_map_property_selection, load_property_from_kb
 from ui_theme import render_page_hero, style_matplotlib_chart
 import matplotlib.pyplot as plt
@@ -549,7 +549,7 @@ if st.session_state.property_data:
                     if unsave_property_from_user_account(
                         _logged_in_user["id"], _account_property_id
                     ):
-                        st.cache_data.clear()
+                        invalidate_portfolio_cache()
                         st.success(f"Removed {address} from your saved properties.")
                         st.rerun()
         elif st.button("⭐ Save to My Account", type="primary", key="save_account_btn"):
@@ -592,7 +592,7 @@ if st.session_state.property_data:
                 st.error("Save failed. Check your connection and try again.")
                 st.stop()
 
-            st.cache_data.clear()
+            invalidate_portfolio_cache()
             st.success(f"Saved {address} to your account.")
             st.rerun()
     else:
@@ -643,7 +643,7 @@ if st.session_state.property_data:
             st.error("Save failed. Check your connection and try again.")
             st.stop()
 
-        st.cache_data.clear()
+        invalidate_portfolio_cache()
         st.success(
             f"Saved your assumptions for {address}."
             if from_kb

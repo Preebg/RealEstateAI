@@ -1084,7 +1084,7 @@ def get_telemetry_stats(user_id: str | None = None) -> dict[str, Any]:
     }
 
 
-from authenticate import render_auth_page  # noqa: E402 — re-export for page imports
+from authenticate import render_auth_page  # noqa: E402 — re-export for legacy imports
 
 
 __all__ = [

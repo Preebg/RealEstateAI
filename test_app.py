@@ -680,6 +680,40 @@ class TestZipcodeParsing(unittest.TestCase):
         self.assertNotIn("rent", payload)
 
 
+class TestPropertyComparison(unittest.TestCase):
+    def test_build_property_comparison_metrics(self):
+        from property_compare_page import build_property_comparison_metrics
+
+        prop = {
+            "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+            "address": "10 Main St, Rochester, NY 14609",
+            "price": 200000,
+            "tax_rate": 3.0,
+            "insurance": 150,
+            "hoa": 0,
+            "original_ai_rent": 1800,
+            "original_ai_maint": 5.0,
+            "ai_vacancy_rate": 5.0,
+            "ai_management_fee": 10.0,
+            "location_score": 7.5,
+            "predicted_value": 210000,
+            "forecast_rate": 4.5,
+            "appreciation_forecast": 320000,
+            "property_category": "Balanced",
+        }
+
+        metrics = build_property_comparison_metrics(prop)
+
+        self.assertEqual(metrics["address"], prop["address"])
+        self.assertGreater(metrics["monthly_net_cash_flow"], -5000)
+        self.assertGreater(metrics["cap_rate"], 0)
+        self.assertGreater(metrics["one_year_roi"], -100)
+        self.assertEqual(metrics["strategy"], "Balanced")
+        self.assertIn("quantum_overall", metrics)
+        self.assertGreaterEqual(metrics["quantum_overall"], 0.0)
+        self.assertLessEqual(metrics["quantum_overall"], 100.0)
+
+
 class TestUserSavedProperties(unittest.TestCase):
     def test_save_property_to_user_account_bookmarks_existing_property(self):
         from unittest.mock import MagicMock, patch

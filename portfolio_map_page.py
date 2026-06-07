@@ -24,7 +24,7 @@ from knowledge_base import (
     parse_zipcode_from_address,
 )
 from market_pulse import render_market_pulse
-from property_nav import navigate_to_individual_search
+from app_nav import navigate_to_individual_search
 from ui_theme import render_page_hero
 
 # ---------------------------------------------------------------------------
@@ -162,6 +162,15 @@ def load_global_portfolio_properties() -> list[dict[str, Any]]:
     """
     rows = _fetch_canonical_properties()
     return [_normalize_record_numerics(row) for row in rows if row.get("address")]
+
+
+def invalidate_portfolio_cache() -> None:
+    """Clear portfolio map caches without st.cache_data.clear() (avoids stale module KeyErrors)."""
+    for cached in (load_global_portfolio_properties, attach_coordinates):
+        try:
+            cached.clear()
+        except Exception:
+            pass
 
 
 def _resolve_monthly_cash_flow(prop: dict[str, Any], price: float, rent: float) -> float:
