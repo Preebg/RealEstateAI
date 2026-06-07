@@ -101,9 +101,17 @@ MAX_DISCOVERY_LISTINGS = 25
 MIN_PREFERRED_YEAR_BUILT = 1965
 MAX_DISCOVERY_PRICE = 250_000
 _TRUSTED_LISTING_DOMAINS = ("zillow.com", "redfin.com", "realtor.com")
+_LISTING_DETAIL_URL_MARKERS = (
+    "homedetails",
+    "/home/",
+    "realestateandhomes-detail",
+    "/property/",
+)
 _DISCOVERY_STATE_CODES = frozenset({"NY", "NC", "SC", "OH", "TX"})
 _US_ZIP_RE = re.compile(r"\b\d{5}(?:-\d{4})?\b")
 _STREET_NUMBER_RE = re.compile(r"(?:^|\s)(\d{1,6}[A-Za-z]?)\s+\S+")
+# Grounded discovery needs more search calls than the SDK default (10 AFC).
+DISCOVERY_MAX_REMOTE_CALLS = 25
 MAX_SYNTHESIS_PRICE = 400_000
 MAX_API_RETRIES = 5
 BACKOFF_BASE_SEC = 4.0
@@ -294,6 +302,19 @@ def _model_supports_grounding(model: str) -> bool:
     return model.startswith("gemini") or model.startswith("gemma-4")
 
 
+def _grounded_search_config(
+    *,
+    max_remote_calls: int = DISCOVERY_MAX_REMOTE_CALLS,
+) -> types.GenerateContentConfig:
+    """Config for Google Search grounding with a higher AFC remote-call budget."""
+    return types.GenerateContentConfig(
+        tools=[types.Tool(google_search=types.GoogleSearch())],
+        automatic_function_calling=types.AutomaticFunctionCallingConfig(
+            maximum_remote_calls=max_remote_calls,
+        ),
+    )
+
+
 def generate_with_retry(
     model: str,
     contents: str,
@@ -398,9 +419,7 @@ def _generate_with_grounding_retry(
     active = session or get_session()
     config = None
     if use_search:
-        config = types.GenerateContentConfig(
-            tools=[types.Tool(google_search=types.GoogleSearch())]
-        )
+        config = _grounded_search_config()
 
     last_error: BaseException | None = None
     total_wait_sec = 0.0
@@ -786,6 +805,44 @@ def _extract_grounding_web_urls(response: Any) -> list[str]:
     return urls
 
 
+def _is_listing_detail_url(url: str) -> bool:
+    lowered = url.lower()
+    return any(marker in lowered for marker in _LISTING_DETAIL_URL_MARKERS)
+
+
+def _infer_listing_url_from_grounding(
+    address: str,
+    grounding_urls: list[str],
+) -> str:
+    """Best-effort match of a listing row to a grounded search result URL."""
+    trusted = [url for url in grounding_urls if _is_trusted_listing_url(url)]
+    if not trusted:
+        return ""
+
+    zip_match = _US_ZIP_RE.search(address)
+    zip_code = zip_match.group(0)[:5] if zip_match else ""
+    street_match = _STREET_NUMBER_RE.search(address)
+    street_number = street_match.group(1) if street_match else ""
+
+    best_url = ""
+    best_score = -1
+    for url in trusted:
+        lowered = url.lower()
+        score = 0
+        if _is_listing_detail_url(url):
+            score += 2
+        if zip_code and zip_code in url:
+            score += 3
+        if street_number and street_number in lowered:
+            score += 2
+        if score > best_score:
+            best_score = score
+            best_url = url
+    if best_score >= 3:
+        return best_url
+    return ""
+
+
 def _filter_verified_discovery_listings(
     listings: list[dict[str, Any]],
     *,
@@ -799,6 +856,11 @@ def _filter_verified_discovery_listings(
         if _is_trusted_listing_url(url)
     ]
     verified: list[dict[str, Any]] = []
+    reject_counts = {
+        "address": 0,
+        "price": 0,
+        "url": 0,
+    }
     for item in listings:
         address = str(item.get("address", "")).strip()
         list_price = safe_float(item.get("list_price"))
@@ -810,9 +872,11 @@ def _filter_verified_discovery_listings(
         ).strip()
 
         if not is_plausible_discovery_address(address):
+            reject_counts["address"] += 1
             _log.info("discovery_rejected_address", address=address[:80], reason="implausible")
             continue
         if list_price <= 0 or list_price > max_price:
+            reject_counts["price"] += 1
             _log.info(
                 "discovery_rejected_price",
                 address=address[:80],
@@ -820,12 +884,21 @@ def _filter_verified_discovery_listings(
             )
             continue
         if not listing_url or not _is_trusted_listing_url(listing_url):
-            _log.info(
-                "discovery_rejected_url",
-                address=address[:80],
-                listing_url=listing_url[:120],
+            listing_url = _infer_listing_url_from_grounding(
+                address, grounding_urls or []
             )
-            continue
+        if not listing_url or not _is_trusted_listing_url(listing_url):
+            if grounded_trusted:
+                # Search grounding hit listing sites; allow address+price through.
+                listing_url = ""
+            else:
+                reject_counts["url"] += 1
+                _log.info(
+                    "discovery_rejected_url",
+                    address=address[:80],
+                    listing_url=listing_url[:120],
+                )
+                continue
 
         verified.append(
             {**item, "address": address, "list_price": list_price, "listing_url": listing_url}
@@ -835,14 +908,20 @@ def _filter_verified_discovery_listings(
             "discovery_all_rejected",
             parsed=len(listings),
             grounded_trusted=len(grounded_trusted),
+            reject_counts=reject_counts,
         )
         print(
             "[discovery] All parsed listings failed verification "
-            "(need ZIP + street number + trusted listing_url + valid price)."
+            f"(parsed={len(listings)}, rejections={reject_counts}, "
+            f"grounded_listing_sites={len(grounded_trusted)}). "
+            "Need ZIP + street number + valid price + listing URL or grounded search."
         )
     elif listings and len(verified) < len(listings):
         rejected = len(listings) - len(verified)
-        print(f"[discovery] Rejected {rejected} unverified listing(s) after parsing.")
+        print(
+            f"[discovery] Rejected {rejected} unverified listing(s) after parsing "
+            f"({reject_counts})."
+        )
     return verified
 
 
@@ -933,11 +1012,17 @@ def _build_listings_from_raw(
     if not listings:
         listings = _parse_discovery_fallback(raw)
 
+    parsed_count = len(listings)
     listings = _filter_verified_discovery_listings(
         listings,
         max_price=max_price,
         grounding_urls=grounding_urls,
     )
+    if parsed_count and not listings:
+        preview = raw.strip().replace("\n", " ")[:240]
+        print(f"[discovery] Parsed {parsed_count} row(s) from model but none passed verification.")
+        if preview:
+            print(f"[discovery] Model response preview: {preview}...")
     return _dedupe_discovery_listings(listings, max_price=max_price)
 
 
@@ -1138,6 +1223,33 @@ _DISCOVERY_API_ERRORS = (
 )
 
 
+def _discover_listings_per_market(
+    *,
+    model: str,
+    max_price: float,
+    exclude_addresses: list[str] | None,
+    seed_listings: list[dict[str, Any]] | None = None,
+) -> tuple[list[dict[str, Any]], str]:
+    """Focused per-market discovery (works better for the Gemma fallback model)."""
+    split_listings = list(seed_listings or [])
+    last_raw = ""
+    for market_name, _, _ in HOT_MARKETS:
+        if len(split_listings) >= MAX_DISCOVERY_LISTINGS:
+            break
+        found_addrs = [str(item.get("address", "")) for item in split_listings]
+        merged_exclude = list(exclude_addresses or []) + found_addrs
+        market_listings, market_raw = _run_discovery_attempt(
+            model=model,
+            max_price=max_price,
+            split_market=market_name,
+            exclude_addresses=merged_exclude,
+        )
+        last_raw = market_raw or last_raw
+        split_listings.extend(market_listings)
+        split_listings = _dedupe_discovery_listings(split_listings, max_price=max_price)
+    return split_listings, last_raw
+
+
 def _discover_listings_for_model(
     *,
     model: str,
@@ -1145,6 +1257,17 @@ def _discover_listings_for_model(
     exclude_addresses: list[str] | None,
 ) -> tuple[list[dict[str, Any]], str]:
     """Run combined discovery, then top up per market until MAX_DISCOVERY_LISTINGS."""
+    if model == DISCOVERY_FALLBACK_MODEL:
+        print(
+            f"[discovery] Using per-market searches on {model} "
+            f"(combined multi-market search is unreliable on fallback)."
+        )
+        return _discover_listings_per_market(
+            model=model,
+            max_price=max_price,
+            exclude_addresses=exclude_addresses,
+        )
+
     listings, last_raw = _run_discovery_attempt(
         model=model,
         max_price=max_price,
@@ -1176,23 +1299,12 @@ def _discover_listings_for_model(
             "retrying per market..."
         )
 
-    split_listings = list(deduped)
-    for market_name, _, _ in HOT_MARKETS:
-        if len(split_listings) >= MAX_DISCOVERY_LISTINGS:
-            break
-        found_addrs = [str(item.get("address", "")) for item in split_listings]
-        merged_exclude = list(exclude_addresses or []) + found_addrs
-        market_listings, market_raw = _run_discovery_attempt(
-            model=model,
-            max_price=max_price,
-            split_market=market_name,
-            exclude_addresses=merged_exclude,
-        )
-        last_raw = market_raw or last_raw
-        split_listings.extend(market_listings)
-        split_listings = _dedupe_discovery_listings(split_listings, max_price=max_price)
-
-    return split_listings, last_raw
+    return _discover_listings_per_market(
+        model=model,
+        max_price=max_price,
+        exclude_addresses=exclude_addresses,
+        seed_listings=deduped,
+    )
 
 
 def discover_hot_market_listings(
@@ -1230,6 +1342,10 @@ def discover_hot_market_listings(
                 print(
                     f"[discovery] {active_model} daily quota exhausted; "
                     f"switching to {fallback}..."
+                )
+                print(
+                    "[discovery] Note: 'AFC is enabled with max remote calls' is normal SDK "
+                    f"output for Google Search (budget: {DISCOVERY_MAX_REMOTE_CALLS} calls)."
                 )
                 continue
             raise

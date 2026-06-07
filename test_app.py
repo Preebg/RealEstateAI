@@ -600,6 +600,25 @@ class TestDiscoveryParsing(unittest.TestCase):
         listings = _build_listings_from_raw(raw, 250_000)
         self.assertEqual(listings, [])
 
+    def test_accepts_grounded_row_without_explicit_listing_url(self):
+        from engine import _build_listings_from_raw
+
+        row = {
+            "address": "15 Maple Dr, Rochester, NY 14609",
+            "city": "Rochester",
+            "list_price": 199000,
+        }
+        grounding_urls = [
+            "https://www.zillow.com/homedetails/15-Maple-Dr-Rochester-NY-14609/999_zpid/",
+        ]
+        listings = _build_listings_from_raw(
+            json.dumps([row]),
+            250_000,
+            grounding_urls=grounding_urls,
+        )
+        self.assertEqual(len(listings), 1)
+        self.assertIn("zillow.com", listings[0]["listing_url"])
+
 
 class TestOneYearROI(unittest.TestCase):
     def test_positive_appreciation_and_negative_cashflow(self):
