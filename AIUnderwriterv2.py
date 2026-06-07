@@ -7,7 +7,27 @@ import streamlit as st
 from authenticate import render_auth_page
 from app_nav import INDIVIDUAL_SEARCH_PAGE, MAP_OPEN_ADDRESS_KEY, consume_nav_target
 from share_access import consume_guest_landing_address, is_guest_viewer
-from ui_theme import inject_app_css, render_app_footer_glossary
+import importlib
+import ui_theme
+
+if not hasattr(ui_theme, "render_app_footer_glossary"):
+    importlib.reload(ui_theme)
+
+from ui_theme import inject_app_css
+
+if hasattr(ui_theme, "render_app_footer_glossary"):
+    render_app_footer_glossary = ui_theme.render_app_footer_glossary
+else:
+    def render_app_footer_glossary() -> None:
+        st.markdown(
+            '<p class="app-footer-glossary">'
+            "<strong>Quantum Alignment Score</strong> measures how well the QAOA optimizer "
+            "matches your investment targets (0–100%); "
+            "<strong>Hybrid Optimization Score</strong> compares classical and QAOA on the "
+            "same objective. Neither is financial risk or a market prediction."
+            "</p>",
+            unsafe_allow_html=True,
+        )
 
 st.set_page_config(
     page_title="AI Property Scout",
