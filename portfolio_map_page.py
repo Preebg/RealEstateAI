@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from typing import Any
 
 import folium
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 from streamlit_folium import st_folium
 
 from authenticate import render_auth_sidebar
@@ -394,29 +396,56 @@ def _match_click_to_address(
     return str(mappable.loc[nearest_idx, "address"])
 
 
-def _build_folium_map(df: pd.DataFrame) -> folium.Map:
+def _resolve_focus_row(
+    df: pd.DataFrame,
+    focus_address: str | None,
+) -> pd.Series | None:
+    """Return the mappable row for focus_address, if it exists."""
+    if not focus_address:
+        return None
+
+    matches = df[df["address"] == focus_address].dropna(subset=["lat", "lon"])
+    if matches.empty:
+        return None
+    return matches.iloc[0]
+
+
+def _build_folium_map(
+    df: pd.DataFrame,
+    focus_address: str | None = None,
+) -> folium.Map:
     """Interactive labeled map with profitability-colored property markers."""
     mappable = df.dropna(subset=["lat", "lon"])
     if mappable.empty:
         lat, lon, zoom = NY_STATE_OVERVIEW
         return folium.Map(location=[lat, lon], zoom_start=zoom, tiles=FOLIUM_TILES)
 
-    bounds = [
-        [float(mappable["lat"].min()), float(mappable["lon"].min())],
-        [float(mappable["lat"].max()), float(mappable["lon"].max())],
-    ]
-    center_lat = float(mappable["lat"].mean())
-    center_lon = float(mappable["lon"].mean())
+    focus_row = _resolve_focus_row(df, focus_address)
+    if focus_row is not None:
+        center_lat = float(focus_row["lat"])
+        center_lon = float(focus_row["lon"])
+        zoom_start = 15
+    else:
+        center_lat = float(mappable["lat"].mean())
+        center_lon = float(mappable["lon"].mean())
+        zoom_start = 8
 
     fmap = folium.Map(
         location=[center_lat, center_lon],
-        zoom_start=8,
+        zoom_start=zoom_start,
         tiles=FOLIUM_TILES,
         control_scale=True,
     )
-    fmap.fit_bounds(bounds, padding=(60, 60))
+
+    if focus_row is None:
+        bounds = [
+            [float(mappable["lat"].min()), float(mappable["lon"].min())],
+            [float(mappable["lat"].max()), float(mappable["lon"].max())],
+        ]
+        fmap.fit_bounds(bounds, padding=(60, 60))
 
     for row in mappable.itertuples(index=False):
+        is_focus = focus_address is not None and row.address == focus_address
         tooltip = (
             f"<b>{row.address}</b><br/>"
             f"Price: ${row.price:,.0f}<br/>"
@@ -439,14 +468,14 @@ def _build_folium_map(df: pd.DataFrame) -> folium.Map:
         )
         folium.CircleMarker(
             location=[float(row.lat), float(row.lon)],
-            radius=6,
+            radius=10 if is_focus else 6,
             popup=folium.Popup(popup, max_width=320),
             tooltip=tooltip,
-            color="#1a1a2e",
-            weight=1,
+            color="#2563eb" if is_focus else "#1a1a2e",
+            weight=2 if is_focus else 1,
             fill=True,
             fill_color=getattr(row, "marker_color", "#78dc8c"),
-            fill_opacity=0.88,
+            fill_opacity=0.95 if is_focus else 0.88,
         ).add_to(fmap)
 
     return fmap
@@ -465,7 +494,10 @@ def sort_portfolio(df: pd.DataFrame, sort_key: str) -> pd.DataFrame:
     return df.sort_values("price", ascending=False, kind="mergesort")
 
 
-def render_portfolio_map(df: pd.DataFrame) -> str | None:
+def render_portfolio_map(
+    df: pd.DataFrame,
+    focus_address: str | None = None,
+) -> str | None:
     """
     Labeled folium map with hover tooltips and click-to-select.
 
@@ -476,7 +508,7 @@ def render_portfolio_map(df: pd.DataFrame) -> str | None:
         st.info("No geocoded properties to display on the map yet.")
         return None
 
-    fmap = _build_folium_map(df)
+    fmap = _build_folium_map(df, focus_address=focus_address)
     map_state = st_folium(
         fmap,
         width=None,
@@ -501,6 +533,115 @@ def compute_top_market(df: pd.DataFrame) -> str:
     if market_stats.empty:
         return "—"
     return str(market_stats.idxmax())
+
+
+def _sync_ledger_selection_to_map() -> None:
+    """Focus the map when the user selects a property ledger row."""
+    state = st.session_state.get("property_ledger")
+    if state is None:
+        return
+
+    rows = getattr(getattr(state, "selection", None), "rows", None)
+    if not rows:
+        return
+
+    addresses = st.session_state.get("_property_ledger_addresses") or []
+    row_idx = rows[0]
+    if 0 <= row_idx < len(addresses):
+        st.session_state["map_selected_address"] = addresses[row_idx]
+
+
+def _render_ledger_dblclick_helper(addresses: list[str]) -> None:
+    """Double-click an address cell to select the ledger row and focus the map."""
+    if not addresses:
+        return
+
+    addresses_json = json.dumps(addresses)
+    components.html(
+        f"""
+        <script>
+        (function() {{
+            const ADDRESSES = {addresses_json};
+            const doc = window.parent.document;
+
+            function findLedgerGrid() {{
+                const headings = doc.querySelectorAll("h5, h6, p, span");
+                for (const heading of headings) {{
+                    if (heading.textContent.trim() !== "Property ledger") {{
+                        continue;
+                    }}
+                    const block = heading.closest('[data-testid="stVerticalBlock"]');
+                    if (!block) {{
+                        continue;
+                    }}
+                    const grid = block.querySelector('[data-testid="stDataFrameGlideDataEditor"]');
+                    if (grid) {{
+                        return grid;
+                    }}
+                }}
+                return null;
+            }}
+
+            function rowFromCell(cell) {{
+                return (
+                    cell.closest('[class*="gdg-row"]')
+                    || cell.closest('[role="row"]')
+                    || cell.closest("tr")
+                );
+            }}
+
+            function selectRow(row) {{
+                if (!row) {{
+                    return;
+                }}
+                const checkbox = row.querySelector('input[type="checkbox"]');
+                if (checkbox) {{
+                    checkbox.click();
+                }}
+            }}
+
+            function bindGrid(grid) {{
+                if (!grid || grid.dataset.ledgerDblBound === "1") {{
+                    return;
+                }}
+                grid.dataset.ledgerDblBound = "1";
+                grid.addEventListener(
+                    "dblclick",
+                    (event) => {{
+                        const cell = event.target.closest(
+                            '[class*="gdg-cell"], [role="gridcell"], td'
+                        );
+                        if (!cell) {{
+                            return;
+                        }}
+                        const text = cell.textContent.trim();
+                        if (!text) {{
+                            return;
+                        }}
+                        const matched = ADDRESSES.find(
+                            (address) => address === text || text.includes(address)
+                        );
+                        if (!matched) {{
+                            return;
+                        }}
+                        selectRow(rowFromCell(cell));
+                    }},
+                    true
+                );
+            }}
+
+            function scan() {{
+                bindGrid(findLedgerGrid());
+            }}
+
+            const observer = new MutationObserver(scan);
+            observer.observe(doc.body, {{ childList: true, subtree: true }});
+            scan();
+        }})();
+        </script>
+        """,
+        height=0,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -560,12 +701,16 @@ def render_portfolio_map_page() -> None:
     map_df = apply_map_colors(geo_df)
 
     st.markdown("##### Map")
-    st.caption("Hover for quick stats · click a marker to select · green = higher 1-yr ROI")
+    st.caption(
+        "Hover for quick stats · click a marker to select · "
+        "double-click an address in the ledger to focus the map · green = higher 1-yr ROI"
+    )
 
     if "map_selected_address" not in st.session_state:
         st.session_state["map_selected_address"] = None
 
-    clicked_address = render_portfolio_map(map_df)
+    selected_address = st.session_state.get("map_selected_address")
+    clicked_address = render_portfolio_map(map_df, focus_address=selected_address)
     if clicked_address:
         st.session_state["map_selected_address"] = clicked_address
 
@@ -608,6 +753,7 @@ def render_portfolio_map_page() -> None:
     ledger_col3.metric("Top market", top_market)
 
     st.markdown("##### Property ledger")
+    st.caption("Double-click an address to focus it on the map above.")
     display_df = map_df[
         [
             "address",
@@ -630,11 +776,19 @@ def render_portfolio_map_page() -> None:
         }
     )
 
+    st.session_state["_property_ledger_addresses"] = map_df["address"].tolist()
+
     st.dataframe(
         display_df,
         use_container_width=True,
         hide_index=True,
+        key="property_ledger",
+        on_select=_sync_ledger_selection_to_map,
+        selection_mode="single-row",
         column_config={
+            "Address": st.column_config.TextColumn(
+                help="Double-click to show this property on the map.",
+            ),
             "Price": st.column_config.NumberColumn(format="$%d"),
             "Monthly rent": st.column_config.NumberColumn(format="$%d"),
             "Cash flow": st.column_config.NumberColumn(format="$%d"),
@@ -642,6 +796,7 @@ def render_portfolio_map_page() -> None:
             "Quantum": st.column_config.NumberColumn(format="%.1f%%"),
         },
     )
+    _render_ledger_dblclick_helper(st.session_state["_property_ledger_addresses"])
 
     geocoded_count = int(map_df["lat"].notna().sum())
     if geocoded_count < len(map_df):
