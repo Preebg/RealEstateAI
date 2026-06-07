@@ -697,21 +697,22 @@ def get_kb_context(user_id: str | None = None) -> str:
 
 
 def _infer_market_city(record: dict[str, Any]) -> str | None:
+    from engine import DISCOVERY_MARKET_KEYS, _match_market_from_text
+
     explicit = record.get("market_city")
-    if explicit in ("Rochester", "Syracuse"):
+    if explicit in DISCOVERY_MARKET_KEYS:
         return explicit
-    address = str(record.get("address", "")).lower()
-    if "rochester" in address:
-        return "Rochester"
-    if "syracuse" in address:
-        return "Syracuse"
-    return None
+    address = str(record.get("address", ""))
+    matched = _match_market_from_text(address)
+    return matched or None
 
 
 def get_market_pulse(user_id: str | None = None) -> dict[str, dict[str, Any]]:
     """
-    Aggregate Rochester vs Syracuse stats for UI 'Market Pulse'.
+    Aggregate per-metro stats for UI 'Market Pulse'.
     """
+    from engine import DISCOVERY_MARKET_KEYS
+
     empty = {
         "count": 0,
         "avg_price": 0.0,
@@ -719,11 +720,10 @@ def get_market_pulse(user_id: str | None = None) -> dict[str, dict[str, Any]]:
         "avg_rent": 0.0,
         "top_label": "—",
     }
-    pulse = {"Rochester": dict(empty), "Syracuse": dict(empty)}
+    pulse = {city: dict(empty) for city in sorted(DISCOVERY_MARKET_KEYS)}
+    buckets: dict[str, list[dict[str, Any]]] = {city: [] for city in DISCOVERY_MARKET_KEYS}
 
     raw = get_kb_raw_data(user_id)
-    buckets: dict[str, list[dict[str, Any]]] = {"Rochester": [], "Syracuse": []}
-
     for record in raw.values():
         city = _infer_market_city(record)
         if city in buckets:

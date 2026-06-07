@@ -38,10 +38,59 @@ SYNTHESIS_FALLBACK_MODEL = "gemma-4-26b-a4b-it"
 PRIMARY_SEARCH_MODEL = "gemma-4-31b-it"
 SECONDARY_SEARCH_MODEL = "gemini-2.5-flash"
 
+# (market_key, search scope for prompt, per-market target when topping up)
 HOT_MARKETS: list[tuple[str, str, int]] = [
-    ("Rochester", "Rochester, NY", 10),
-    ("Syracuse", "Syracuse, NY", 10),
+    (
+        "Rochester",
+        "Rochester NY metro (city + suburbs: Henrietta, Penfield, Fairport, Pittsford, "
+        "Webster, Greece, Irondequoit, Brighton, Victor, Canandaigua)",
+        6,
+    ),
+    (
+        "Syracuse",
+        "Syracuse NY metro (city + suburbs: Camillus, Liverpool, DeWitt, Fayetteville, "
+        "Cicero, Clay, Baldwinsville, Manlius)",
+        4,
+    ),
+    (
+        "Charlotte",
+        "Charlotte NC metro (city + suburbs: Concord, Matthews, Huntersville, Mint Hill, "
+        "Indian Trail, Pineville, Mooresville)",
+        3,
+    ),
+    (
+        "Raleigh",
+        "Raleigh NC metro (city + suburbs: Cary, Apex, Morrisville, Wake Forest, "
+        "Holly Springs, Garner, Fuquay-Varina)",
+        3,
+    ),
+    (
+        "Charleston",
+        "Charleston SC metro (city + suburbs: Mount Pleasant, Summerville, North Charleston, "
+        "Goose Creek, James Island, Johns Island)",
+        2,
+    ),
+    (
+        "Ohio",
+        "Ohio metros (Cleveland, Columbus, Cincinnati and suburbs: Lakewood, Parma, Dublin, "
+        "Westerville, Mason, Fairfield, Hamilton)",
+        3,
+    ),
+    (
+        "DFW",
+        "Dallas–Fort Worth TX metro (Dallas, Fort Worth, Arlington, Plano, Frisco, Irving, "
+        "Garland, McKinney, Denton)",
+        2,
+    ),
+    (
+        "Austin",
+        "Austin TX metro (city + suburbs: Round Rock, Cedar Park, Pflugerville, Georgetown, "
+        "Leander, Kyle, Buda)",
+        2,
+    ),
 ]
+DISCOVERY_MARKET_KEYS = frozenset(name for name, _, _ in HOT_MARKETS)
+MAX_DISCOVERY_LISTINGS = 25
 MAX_DISCOVERY_PRICE = 250_000
 MAX_SYNTHESIS_PRICE = 400_000
 MAX_API_RETRIES = 5
@@ -367,17 +416,102 @@ def _coerce_discovery_list(parsed: Any) -> list[Any]:
     return []
 
 
-def _infer_discovery_city(address: str, city: str) -> str:
-    """Normalize Rochester/Syracuse from explicit city or address text."""
-    normalized = city.strip()
-    if normalized.lower() in ("rochester", "syracuse"):
-        return normalized.title()
-    address_lower = address.lower()
-    if "rochester" in address_lower:
-        return "Rochester"
-    if "syracuse" in address_lower:
-        return "Syracuse"
+# Suburb / alias keywords (lowercase) → canonical discovery market key.
+_ADDRESS_MARKET_KEYWORDS: tuple[tuple[str, str], ...] = (
+    ("rochester", "Rochester"),
+    ("henrietta", "Rochester"),
+    ("penfield", "Rochester"),
+    ("fairport", "Rochester"),
+    ("pittsford", "Rochester"),
+    ("webster", "Rochester"),
+    ("greece", "Rochester"),
+    ("irondequoit", "Rochester"),
+    ("brighton", "Rochester"),
+    ("victor", "Rochester"),
+    ("canandaigua", "Rochester"),
+    ("syracuse", "Syracuse"),
+    ("camillus", "Syracuse"),
+    ("liverpool", "Syracuse"),
+    ("dewitt", "Syracuse"),
+    ("fayetteville", "Syracuse"),
+    ("cicero", "Syracuse"),
+    ("clay", "Syracuse"),
+    ("baldwinsville", "Syracuse"),
+    ("manlius", "Syracuse"),
+    ("charlotte", "Charlotte"),
+    ("concord", "Charlotte"),
+    ("matthews", "Charlotte"),
+    ("huntersville", "Charlotte"),
+    ("mint hill", "Charlotte"),
+    ("indian trail", "Charlotte"),
+    ("pineville", "Charlotte"),
+    ("mooresville", "Charlotte"),
+    ("raleigh", "Raleigh"),
+    ("cary", "Raleigh"),
+    ("apex", "Raleigh"),
+    ("morrisville", "Raleigh"),
+    ("wake forest", "Raleigh"),
+    ("holly springs", "Raleigh"),
+    ("garner", "Raleigh"),
+    ("fuquay-varina", "Raleigh"),
+    ("charleston", "Charleston"),
+    ("mount pleasant", "Charleston"),
+    ("summerville", "Charleston"),
+    ("north charleston", "Charleston"),
+    ("goose creek", "Charleston"),
+    ("james island", "Charleston"),
+    ("johns island", "Charleston"),
+    ("cleveland", "Ohio"),
+    ("columbus", "Ohio"),
+    ("cincinnati", "Ohio"),
+    ("lakewood", "Ohio"),
+    ("parma", "Ohio"),
+    ("dublin", "Ohio"),
+    ("westerville", "Ohio"),
+    ("mason", "Ohio"),
+    ("fairfield", "Ohio"),
+    ("hamilton", "Ohio"),
+    ("dallas", "DFW"),
+    ("fort worth", "DFW"),
+    ("arlington", "DFW"),
+    ("plano", "DFW"),
+    ("frisco", "DFW"),
+    ("irving", "DFW"),
+    ("garland", "DFW"),
+    ("mckinney", "DFW"),
+    ("denton", "DFW"),
+    ("austin", "Austin"),
+    ("round rock", "Austin"),
+    ("cedar park", "Austin"),
+    ("pflugerville", "Austin"),
+    ("georgetown", "Austin"),
+    ("leander", "Austin"),
+    ("kyle", "Austin"),
+    ("buda", "Austin"),
+)
+_DISCOVERY_MARKET_LOOKUP = {name.lower(): name for name in DISCOVERY_MARKET_KEYS}
+
+
+def _match_market_from_text(text: str) -> str:
+    """Map free-text city or address to a canonical discovery market key."""
+    lowered = text.lower()
+    for keyword, market in _ADDRESS_MARKET_KEYWORDS:
+        if keyword in lowered:
+            return market
     return ""
+
+
+def _infer_discovery_city(address: str, city: str) -> str:
+    """Normalize suburb/city text to a canonical discovery market key."""
+    normalized = city.strip()
+    if normalized:
+        canonical = _DISCOVERY_MARKET_LOOKUP.get(normalized.lower())
+        if canonical:
+            return canonical
+        matched = _match_market_from_text(normalized)
+        if matched:
+            return matched
+    return _match_market_from_text(address)
 
 
 def _normalize_discovery_item(item: Any) -> dict[str, Any] | None:
@@ -425,7 +559,7 @@ def _dedupe_discovery_listings(
     listings: list[dict[str, Any]],
     *,
     max_price: float,
-    limit: int = 25,
+    limit: int = MAX_DISCOVERY_LISTINGS,
 ) -> list[dict[str, Any]]:
     seen: set[str] = set()
     unique: list[dict[str, Any]] = []
@@ -485,23 +619,38 @@ def _discovery_prompt(
         if len(exclude_addresses) > len(sample):
             exclude_block += f"\n  - ... and {len(exclude_addresses) - len(sample)} more"
 
-    return f"""You are a real estate discovery agent for Upstate NY hot markets.
+    market_keys = ", ".join(f'"{name}"' for name, _, _ in HOT_MARKETS)
+    priority_note = (
+        "Search priority: fill Upstate NY (Rochester, Syracuse) first, then Charlotte, "
+        "Raleigh, Charleston, Ohio, DFW, and Austin metros."
+    )
+    if split_market:
+        priority_note = (
+            f"Focus this search on {location} only — include city proper AND surrounding "
+            "suburbs listed in the scope (do not limit to downtown/city limits)."
+        )
+
+    return f"""You are a real estate discovery agent for US hot rental markets.
 
 Use Google Search to find {scope}.
 Each listing price must be strictly under ${max_price:,.0f}.
+{priority_note}
 
 Return ONLY a JSON array (no markdown, no commentary). Example:
 [
-  {{"address": "123 Main St, Rochester, NY 14607", "city": "Rochester", "list_price": 189000}},
-  {{"address": "456 Oak Ave, Syracuse, NY 13202", "city": "Syracuse", "list_price": 175000}}
+  {{"address": "123 Main St, Henrietta, NY 14623", "city": "Rochester", "list_price": 189000}},
+  {{"address": "456 Oak Ave, Penfield, NY 14526", "city": "Rochester", "list_price": 175000}},
+  {{"address": "789 Elm Dr, Cary, NC 27511", "city": "Raleigh", "list_price": 245000}}
 ]
 
 Rules:
 - Search Zillow, Redfin, Realtor.com, or MLS listing pages for active for-sale homes.
-- Return as many valid listings as you can find, up to 20 total.
-- Use real street addresses with city and state.
+- Include suburbs and townships — not just the core city (e.g. Henrietta/Penfield/Fairport
+  count as Rochester; Cary/Apex count as Raleigh).
+- You MUST return {MAX_DISCOVERY_LISTINGS} distinct listings when possible. Do not stop at 7–13.
+- Use real street addresses with city/town, state, and ZIP when available.
 - list_price must be the active asking price as a plain number (no $ or commas).
-- city must be exactly "Rochester" or "Syracuse".{exclude_block}"""
+- city must be the parent metro key: one of {market_keys} (NOT the suburb name).{exclude_block}"""
 
 
 def _run_discovery_attempt(
@@ -613,37 +762,55 @@ def _discover_listings_for_model(
     max_price: float,
     exclude_addresses: list[str] | None,
 ) -> tuple[list[dict[str, Any]], str]:
-    """Run combined + per-market discovery attempts for one model."""
+    """Run combined discovery, then top up per market until MAX_DISCOVERY_LISTINGS."""
     listings, last_raw = _run_discovery_attempt(
         model=model,
         max_price=max_price,
         exclude_addresses=exclude_addresses,
     )
-    if listings:
-        return listings, last_raw
+    deduped = _dedupe_discovery_listings(listings, max_price=max_price)
+    if len(deduped) >= MAX_DISCOVERY_LISTINGS:
+        return deduped, last_raw
 
-    _log.warning(
-        "discovery_empty_combined",
-        model=model,
-        raw_preview=last_raw[:400],
-    )
-    print(
-        f"[discovery] Combined search returned 0 listings on {model}; "
-        "retrying per market..."
-    )
+    if deduped:
+        _log.info(
+            "discovery_partial_combined",
+            model=model,
+            count=len(deduped),
+            target=MAX_DISCOVERY_LISTINGS,
+        )
+        print(
+            f"[discovery] Combined search returned {len(deduped)}/{MAX_DISCOVERY_LISTINGS} "
+            f"listings on {model}; topping up per market..."
+        )
+    else:
+        _log.warning(
+            "discovery_empty_combined",
+            model=model,
+            raw_preview=last_raw[:400],
+        )
+        print(
+            f"[discovery] Combined search returned 0 listings on {model}; "
+            "retrying per market..."
+        )
 
-    split_listings: list[dict[str, Any]] = []
+    split_listings = list(deduped)
     for market_name, _, _ in HOT_MARKETS:
+        if len(split_listings) >= MAX_DISCOVERY_LISTINGS:
+            break
+        found_addrs = [str(item.get("address", "")) for item in split_listings]
+        merged_exclude = list(exclude_addresses or []) + found_addrs
         market_listings, market_raw = _run_discovery_attempt(
             model=model,
             max_price=max_price,
             split_market=market_name,
-            exclude_addresses=exclude_addresses,
+            exclude_addresses=merged_exclude,
         )
         last_raw = market_raw or last_raw
         split_listings.extend(market_listings)
+        split_listings = _dedupe_discovery_listings(split_listings, max_price=max_price)
 
-    return _dedupe_discovery_listings(split_listings, max_price=max_price), last_raw
+    return split_listings, last_raw
 
 
 def discover_hot_market_listings(
@@ -653,8 +820,8 @@ def discover_hot_market_listings(
     exclude_addresses: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """
-    Stage 1 (Discovery): Search Grounding for Rochester + Syracuse.
-    Returns up to 20 listings (< max_price).
+    Stage 1 (Discovery): Search Grounding across prioritized hot markets.
+    Returns up to MAX_DISCOVERY_LISTINGS listings (< max_price).
     """
     primary_model = model or DISCOVERY_MODEL
     models_to_try = [primary_model]

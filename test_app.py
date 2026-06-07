@@ -315,7 +315,9 @@ class TestDailyQuotaDetection(unittest.TestCase):
         with patch("engine.generate_with_retry", side_effect=fake_generate):
             listings = discover_hot_market_listings()
         self.assertEqual(len(listings), 1)
-        self.assertEqual(calls, [DISCOVERY_MODEL, DISCOVERY_FALLBACK_MODEL])
+        self.assertEqual(calls[0], DISCOVERY_MODEL)
+        self.assertEqual(calls[1], DISCOVERY_FALLBACK_MODEL)
+        self.assertTrue(all(model == DISCOVERY_FALLBACK_MODEL for model in calls[1:]))
 
 
 class TestSearchGrounding(unittest.TestCase):
@@ -395,6 +397,22 @@ class TestDiscoveryParsing(unittest.TestCase):
         self.assertEqual(len(listings), 1)
         self.assertEqual(listings[0]["city"], "Rochester")
         self.assertGreater(calls["count"], 1)
+
+    def test_suburb_address_maps_to_parent_metro(self):
+        from engine import _build_listings_from_raw
+
+        raw = json.dumps(
+            [
+                {
+                    "address": "22 Suburban Ln, Henrietta, NY 14623",
+                    "city": "Rochester",
+                    "list_price": 185000,
+                }
+            ]
+        )
+        listings = _build_listings_from_raw(raw, 250_000)
+        self.assertEqual(len(listings), 1)
+        self.assertEqual(listings[0]["city"], "Rochester")
 
 
 class TestInsuranceNormalization(unittest.TestCase):

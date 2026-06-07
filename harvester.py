@@ -1,4 +1,4 @@
-# harvester.py — 3-Stage Hot Market Harvester (Rochester + Syracuse)
+# harvester.py — 3-Stage Hot Market Harvester (multi-market discovery)
 from __future__ import annotations
 
 import os
@@ -249,7 +249,7 @@ def _process_listing(
     market_city = str(listing.get("city", "")).strip()
     if not address:
         raise ValueError("Listing is missing a valid address")
-    if market_city not in ("Rochester", "Syracuse"):
+    if market_city not in engine.DISCOVERY_MARKET_KEYS:
         raise ValueError(f"Listing has unsupported market city: {market_city!r}")
 
     if is_property_already_scanned(address, user_id=admin_user_id):
@@ -316,7 +316,7 @@ def run_harvester_pipeline(admin_user_id: str) -> dict[str, Any]:
     """
     Execute the full 3-stage harvester once per run.
 
-    Stage 1: Single grounded discovery (gemini-2.5-flash) — 20 RPD max.
+    Stage 1: Single grounded discovery (gemini-2.5-flash) — up to 25 listings per run.
     Stage 2: Per-address research (gemma-4-31b-it).
     Stage 3: Synthesis + quantum + KB save (gemini-3.1-flash-lite-preview).
 
@@ -335,8 +335,7 @@ def run_harvester_pipeline(admin_user_id: str) -> dict[str, Any]:
         "already_scanned": [],
         "failed": [],
         "saved": [],
-        "rochester": [],
-        "syracuse": [],
+        **{name.lower(): [] for name, _, _ in engine.HOT_MARKETS},
     }
 
     scanned_addresses = sorted(get_scanned_addresses(admin_user_id))
@@ -435,10 +434,10 @@ def _render_streamlit_app() -> None:
     from market_pulse import render_market_pulse
 
     st.set_page_config(page_title="Hot Market Harvester", page_icon="🌾")
-    st.title("🌾 Upstate NY Hot Market Harvester")
+    st.title("🌾 Hot Market Harvester")
     st.caption(
-        "Rochester & Syracuse • Stage 1: 1× grounded discovery • "
-        "Stage 2: Gemma research • Stage 3: Synthesis + Quantum"
+        "Upstate NY (priority) → Charlotte, Raleigh, Charleston, Ohio, DFW, Austin • "
+        "Stage 1: grounded discovery • Stage 2: Gemma research • Stage 3: Synthesis + Quantum"
     )
 
     render_market_pulse()
@@ -460,8 +459,8 @@ def _render_streamlit_app() -> None:
     col3.metric("Synthesis Model", _active_synthesis_model)
 
     st.info(
-        f"Stage 1 uses **one** Search Grounding call (≤20 listings under "
-        f"${engine.MAX_DISCOVERY_PRICE:,}). Stage 3 skips Poor condition or "
+        f"Stage 1 uses Search Grounding (≤{engine.MAX_DISCOVERY_LISTINGS} listings under "
+        f"${engine.MAX_DISCOVERY_PRICE:,}, suburbs included). Stage 3 skips Poor condition or "
         f"price > ${engine.MAX_SYNTHESIS_PRICE:,}."
     )
 
@@ -470,9 +469,14 @@ def _render_streamlit_app() -> None:
             report = run_harvester_pipeline(admin_user_id)
             status.update(label="Harvest complete", state="complete")
 
+        market_summary = ", ".join(
+            f"{len(report[name.lower()])} {name}"
+            for name, _, _ in engine.HOT_MARKETS
+            if report.get(name.lower())
+        )
         st.success(
-            f"Saved {len(report['saved'])} properties "
-            f"({len(report['rochester'])} Rochester, {len(report['syracuse'])} Syracuse)"
+            f"Saved {len(report['saved'])} properties"
+            + (f" ({market_summary})" if market_summary else "")
         )
 
         if report["skipped"]:
