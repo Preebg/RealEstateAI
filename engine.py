@@ -7,6 +7,7 @@ import random
 import re
 import time
 from dataclasses import dataclass
+from datetime import date
 from typing import Any
 
 from google import genai
@@ -534,6 +535,31 @@ def safe_float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except (ValueError, TypeError):
         return default
+
+
+def parse_year_built(property_info: dict[str, Any]) -> int | None:
+    """Extract construction year from year_built or year fields."""
+    for key in ("year_built", "year"):
+        raw = property_info.get(key)
+        if raw is None:
+            continue
+        year = safe_float(raw, default=0.0)
+        if year >= 1800:
+            return int(year)
+    return None
+
+
+def calculate_property_age_years(property_info: dict[str, Any]) -> int | None:
+    """Years since the property was built (today minus built date)."""
+    year = parse_year_built(property_info)
+    if year is None:
+        return None
+    built_date = date(year, 1, 1)
+    today = date.today()
+    age = today.year - built_date.year - (
+        (today.month, today.day) < (built_date.month, built_date.day)
+    )
+    return max(age, 0)
 
 
 _SYNTHESIS_NUMERIC_KEYS = (

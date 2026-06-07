@@ -3,22 +3,24 @@
 from __future__ import annotations
 
 import hashlib
-import os
 from typing import Any
 
+import folium
 import pandas as pd
-import pydeck as pdk
 import streamlit as st
+from streamlit_folium import st_folium
 
 from authenticate import render_auth_sidebar
 from knowledge_base import (
     _fetch_canonical_properties,
     _normalize_record_numerics,
     get_ai_baseline_rent,
+    normalize_address_key,
     parse_zipcode_from_address,
     render_auth_page,
 )
 from market_pulse import render_market_pulse
+from property_nav import queue_property_for_main_tab
 
 # ---------------------------------------------------------------------------
 # Market fallbacks — city centers with deterministic per-address jitter
@@ -76,14 +78,9 @@ SORT_OPTIONS: dict[str, str] = {
 
 JITTER_SCALE_DEGREES = 0.025
 
-
-def _configure_mapbox_token() -> None:
-    """Apply Mapbox credentials when available (required for dark-v9 basemap)."""
-    token = os.getenv("MAPBOX_API_KEY", "").strip()
-    if not token and hasattr(st, "secrets") and "MAPBOX_API_KEY" in st.secrets:
-        token = str(st.secrets["MAPBOX_API_KEY"]).strip()
-    if token:
-        pdk.settings.mapbox_api_key = token
+# Labeled basemap — no API key required (unlike Mapbox dark-v9 in pydeck).
+FOLIUM_TILES = "CartoDB voyager"
+NY_STATE_OVERVIEW = (42.75, -76.0, 7)
 
 
 def _infer_market_city(address: str) -> str | None:
@@ -195,6 +192,7 @@ def build_portfolio_dataframe(properties: list[dict[str, Any]]) -> pd.DataFrame:
         records.append(
             {
                 "address": address,
+                "address_key": normalize_address_key(address),
                 "zip_code": zip_code,
                 "category": str(category),
                 "price": price,
@@ -300,28 +298,26 @@ def attach_coordinates(df: pd.DataFrame) -> pd.DataFrame:
     return enriched
 
 
-def _profitability_to_color(
+def _profitability_to_hex(
     value: float,
     min_val: float,
     max_val: float,
-) -> list[int]:
-    """Map profitability to a green (high) → amber → red (low) RGBA tuple."""
+) -> str:
+    """Map profitability to a green (high) → amber → red (low) hex color."""
     if max_val <= min_val:
-        return [120, 220, 140, 210]
+        return "#78dc8c"
 
     ratio = (value - min_val) / (max_val - min_val)
     ratio = max(0.0, min(1.0, ratio))
 
-    # Low ratio → amber/red; high ratio → bright green glow
     red = int(255 * (1.0 - ratio) + 40 * ratio)
     green = int(90 + 165 * ratio)
     blue = int(60 * (1.0 - ratio) + 100 * ratio)
-    alpha = 200
-    return [red, green, blue, alpha]
+    return f"#{red:02x}{green:02x}{blue:02x}"
 
 
 def apply_map_colors(df: pd.DataFrame) -> pd.DataFrame:
-    """Attach per-row RGBA color arrays for pydeck rendering."""
+    """Attach per-row marker colors for folium rendering."""
     if df.empty:
         return df
 
@@ -329,10 +325,87 @@ def apply_map_colors(df: pd.DataFrame) -> pd.DataFrame:
     profitability = colored["profitability_index"].fillna(0.0)
     min_p = float(profitability.min())
     max_p = float(profitability.max())
-    colored["color"] = profitability.apply(
-        lambda v: _profitability_to_color(float(v), min_p, max_p)
+    colored["marker_color"] = profitability.apply(
+        lambda v: _profitability_to_hex(float(v), min_p, max_p)
     )
     return colored
+
+
+def _match_click_to_address(
+    click: dict[str, Any] | None,
+    df: pd.DataFrame,
+) -> str | None:
+    """Resolve a folium map click to the nearest portfolio address."""
+    if not click or click.get("lat") is None or click.get("lng") is None:
+        return None
+
+    click_lat = float(click["lat"])
+    click_lng = float(click["lng"])
+    mappable = df.dropna(subset=["lat", "lon"])
+    if mappable.empty:
+        return None
+
+    distances = (mappable["lat"] - click_lat) ** 2 + (mappable["lon"] - click_lng) ** 2
+    nearest_idx = distances.idxmin()
+    if float(distances.loc[nearest_idx]) > 0.0004:
+        return None
+    return str(mappable.loc[nearest_idx, "address"])
+
+
+def _build_folium_map(df: pd.DataFrame) -> folium.Map:
+    """Interactive labeled map with profitability-colored property markers."""
+    mappable = df.dropna(subset=["lat", "lon"])
+    if mappable.empty:
+        lat, lon, zoom = NY_STATE_OVERVIEW
+        return folium.Map(location=[lat, lon], zoom_start=zoom, tiles=FOLIUM_TILES)
+
+    bounds = [
+        [float(mappable["lat"].min()), float(mappable["lon"].min())],
+        [float(mappable["lat"].max()), float(mappable["lon"].max())],
+    ]
+    center_lat = float(mappable["lat"].mean())
+    center_lon = float(mappable["lon"].mean())
+
+    fmap = folium.Map(
+        location=[center_lat, center_lon],
+        zoom_start=8,
+        tiles=FOLIUM_TILES,
+        control_scale=True,
+    )
+    fmap.fit_bounds(bounds, padding=(60, 60))
+
+    for row in mappable.itertuples(index=False):
+        tooltip = (
+            f"<b>{row.address}</b><br/>"
+            f"Price: ${row.price:,.0f}<br/>"
+            f"Rent: ${row.rent:,.0f}/mo<br/>"
+            f"Profitability: {row.profitability_index:.2f}%<br/>"
+            f"Quantum: {row.quantum_success:.1f}%<br/>"
+            f"<i>Click to select</i>"
+        )
+        popup = (
+            f"<div style='min-width:220px'>"
+            f"<b>{row.address}</b><br/>"
+            f"{row.category}<br/>"
+            f"Price: ${row.price:,.0f}<br/>"
+            f"Rent: ${row.rent:,.0f}/mo<br/>"
+            f"Cap / CoC: {row.profitability_index:.2f}%<br/>"
+            f"Quantum Success: {row.quantum_success:.1f}%"
+            f"</div>"
+        )
+        folium.CircleMarker(
+            location=[float(row.lat), float(row.lon)],
+            radius=9,
+            popup=folium.Popup(popup, max_width=320),
+            tooltip=tooltip,
+            color="#1a1a2e",
+            weight=1,
+            fill=True,
+            fill_color=getattr(row, "marker_color", "#78dc8c"),
+            fill_opacity=0.88,
+        ).add_to(fmap)
+
+    return fmap
 
 
 def sort_portfolio(df: pd.DataFrame, sort_key: str) -> pd.DataFrame:
@@ -348,70 +421,27 @@ def sort_portfolio(df: pd.DataFrame, sort_key: str) -> pd.DataFrame:
     return df.sort_values("price", ascending=False, kind="mergesort")
 
 
-def render_portfolio_map(df: pd.DataFrame) -> None:
-    """Dark-themed pydeck map with profitability-colored 3D pillars."""
+def render_portfolio_map(df: pd.DataFrame) -> str | None:
+    """
+    Labeled folium map with hover tooltips and click-to-select.
+
+    Returns the selected address when the user clicks a marker.
+    """
     mappable = df.dropna(subset=["lat", "lon"])
     if mappable.empty:
         st.info("No geocoded properties to display on the map yet.")
-        return
+        return None
 
-    _configure_mapbox_token()
-
-    center_lat = float(mappable["lat"].mean())
-    center_lon = float(mappable["lon"].mean())
-
-    tooltip = {
-        "html": (
-            "<b>{address}</b><br/>"
-            "Price: ${price:,.0f}<br/>"
-            "Rent: ${rent:,.0f}/mo<br/>"
-            "Profitability: {profitability_index:.2f}%<br/>"
-            "Quantum Success: {quantum_success:.1f}%"
-        ),
-        "style": {"backgroundColor": "#1a1a2e", "color": "#e8e8f0"},
-    }
-
-    max_price = max(float(mappable["price"].max()), 1.0)
-    elevation_scale = 50.0 / max_price
-
-    column_layer = pdk.Layer(
-        "ColumnLayer",
-        data=mappable,
-        get_position="[lon, lat]",
-        get_elevation="price",
-        elevation_scale=elevation_scale,
-        radius=250,
-        get_fill_color="color",
-        pickable=True,
-        auto_highlight=True,
+    fmap = _build_folium_map(df)
+    map_state = st_folium(
+        fmap,
+        width=None,
+        height=520,
+        returned_objects=["last_object_clicked"],
+        use_container_width=True,
+        key="portfolio_map",
     )
-
-    scatter_layer = pdk.Layer(
-        "ScatterplotLayer",
-        data=mappable,
-        get_position="[lon, lat]",
-        get_fill_color="color",
-        get_radius=180,
-        radius_min_pixels=4,
-        radius_max_pixels=14,
-        pickable=True,
-    )
-
-    view_state = pdk.ViewState(
-        latitude=center_lat,
-        longitude=center_lon,
-        zoom=9,
-        pitch=45,
-        bearing=0,
-    )
-
-    deck = pdk.Deck(
-        map_style="mapbox://styles/mapbox/dark-v9",
-        initial_view_state=view_state,
-        layers=[column_layer, scatter_layer],
-        tooltip=tooltip,
-    )
-    st.pydeck_chart(deck, use_container_width=True)
+    return _match_click_to_address(map_state.get("last_object_clicked"), df)
 
 
 def compute_top_market(df: pd.DataFrame) -> str:
@@ -489,7 +519,44 @@ map_df = apply_map_colors(geo_df)
 
 # --- Map ---
 st.subheader("🌐 Geospatial Portfolio View")
-render_portfolio_map(map_df)
+st.caption(
+    "Hover a marker for quick metrics. Click a property, then open the full "
+    "underwriting view on the main analyzer tab."
+)
+
+if "map_selected_address" not in st.session_state:
+    st.session_state["map_selected_address"] = None
+
+clicked_address = render_portfolio_map(map_df)
+if clicked_address:
+    st.session_state["map_selected_address"] = clicked_address
+
+selected_address = st.session_state.get("map_selected_address")
+if selected_address:
+    selected_row = map_df[map_df["address"] == selected_address]
+    if not selected_row.empty:
+        row = selected_row.iloc[0]
+        st.markdown("#### 📍 Selected Property")
+        sel_col1, sel_col2, sel_col3, sel_col4 = st.columns(4)
+        sel_col1.metric("List Price", f"${row['price']:,.0f}")
+        sel_col2.metric("Monthly Rent", f"${row['rent']:,.0f}")
+        sel_col3.metric("Profitability", f"{row['profitability_index']:.2f}%")
+        sel_col4.metric("Quantum Success", f"{row['quantum_success']:.1f}%")
+        st.write(f"**{row['address']}** · {row['category']} · {row['market_city']}")
+
+        open_col, clear_col = st.columns([2, 1])
+        with open_col:
+            if st.button(
+                "Open Full Analysis on Main Tab →",
+                type="primary",
+                use_container_width=True,
+            ):
+                queue_property_for_main_tab(selected_address)
+                st.switch_page("AIUnderwriterv2.py")
+        with clear_col:
+            if st.button("Clear Selection", use_container_width=True):
+                st.session_state["map_selected_address"] = None
+                st.rerun()
 
 # --- Aggregates ---
 st.subheader("📊 Market Ledger")
@@ -544,5 +611,6 @@ if geocoded_count < len(map_df):
     )
 else:
     st.caption(
-        "Coordinates resolved instantly from ZIP centroids and market fallbacks."
+        "Map uses CartoDB Voyager tiles (state/city labels, no API key). "
+        "Coordinates resolved from ZIP centroids and market fallbacks."
     )

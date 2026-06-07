@@ -1,7 +1,13 @@
 import streamlit as st
 import datetime 
 import pandas as pd 
-from engine import calculate_quantum_risk, get_initial_analysis, get_final_analysis, safe_float
+from engine import (
+    calculate_property_age_years,
+    calculate_quantum_risk,
+    get_initial_analysis,
+    get_final_analysis,
+    safe_float,
+)
 from finance import (
     analyze_investment,
     calculate_10yr_appreciation,
@@ -25,6 +31,7 @@ from knowledge_base import (
     user_has_override_changes,
 )
 from market_pulse import render_market_pulse
+from property_nav import consume_map_property_selection, load_property_from_kb
 import matplotlib.pyplot as plt
 from pdf_generator import generate_property_pdf
 import tldextract
@@ -33,6 +40,19 @@ st.set_page_config(page_title="AI Property Scout", page_icon="🏠", layout="wid
 
 if not render_auth_page():
     st.stop()
+
+_map_address = consume_map_property_selection()
+if _map_address:
+    st.session_state["address_input"] = _map_address
+    _map_loaded = load_property_from_kb(_map_address)
+    if _map_loaded:
+        st.session_state["property_data"] = _map_loaded
+        st.toast(f"Loaded {_map_address} from Portfolio Map", icon="🗺️")
+    else:
+        st.warning(
+            f"Could not load cached data for **{_map_address}**. "
+            "Run **Analyze Property** to research it."
+        )
 
 #Helper function to clean source names for display
 
@@ -125,7 +145,6 @@ if st.session_state.property_data:
         
     # Extract values from the dictionary 
     price=safe_float(property_info.get("price"))
-    year_built=safe_float(property_info.get("year"))
     monthly_rent=get_effective_display_rent(property_info)
     tax_rate=safe_float(property_info.get("tax_rate"))
     monthly_HOA=safe_float(property_info.get("hoa"))
@@ -361,7 +380,11 @@ if st.session_state.property_data:
         df= pd.DataFrame(table_data)
         st.table(df)
 
-        st.info(f"Property Age: {datetime.datetime.now().year - year_built} years.")
+        property_age = calculate_property_age_years(property_info)
+        if property_age is not None:
+            st.info(f"Property Age: {property_age} years.")
+        else:
+            st.info("Property Age: Unknown")
         st.info(f"Total Investment: ${total_investment:,.2f}")
         st.caption("Disclaimer: This is an AI-powered tool for educational purposes. Always verify financial data with a professional before making investment decisions.")
         st.sidebar.write(f"💸 Total Cash Required: **${total_investment:,.2f}**")
