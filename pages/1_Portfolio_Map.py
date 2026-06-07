@@ -11,9 +11,11 @@ import streamlit as st
 from streamlit_folium import st_folium
 
 from authenticate import render_auth_sidebar
+from finance import analyze_investment, calculate_10yr_appreciation, calculate_one_year_roi
 from knowledge_base import (
     _fetch_canonical_properties,
     _normalize_record_numerics,
+    get_ai_baseline_maint,
     get_ai_baseline_rent,
     normalize_address_key,
     parse_zipcode_from_address,
@@ -68,10 +70,21 @@ ZIP_CENTROIDS: dict[str, tuple[float, float]] = {
     "13212": (43.1200, -76.1400),
     "13214": (43.0400, -76.0800),
     "13215": (43.0100, -76.1600),
+    # Northern Syracuse suburbs (discovery priority)
+    "13039": (43.1890, -76.1190),
+    "13041": (43.1850, -76.1720),
+    "13088": (43.1060, -76.2090),
+    "13090": (43.1650, -76.2200),
 }
 
+# Default underwriting assumptions when recomputing cash flow for ROI.
+DEFAULT_DOWN_PAYMENT_PCT = 25.0
+DEFAULT_INTEREST_RATE = 6.0
+DEFAULT_LOAN_TERM = 30
+DEFAULT_CLOSING_COSTS_PCT = 3.0
+
 SORT_OPTIONS: dict[str, str] = {
-    "Highest Profitability (Cap Rate / Cash-on-Cash)": "profitability_index",
+    "Highest One-Year ROI": "one_year_roi",
     "Lowest Quantum Risk": "quantum_success",
     "Highest Total Value": "price",
 }
@@ -148,25 +161,53 @@ def load_global_portfolio_properties() -> list[dict[str, Any]]:
     return [_normalize_record_numerics(row) for row in rows if row.get("address")]
 
 
-def _resolve_profitability(prop: dict[str, Any], price: float, rent: float) -> tuple[float, str]:
+def _resolve_monthly_cash_flow(prop: dict[str, Any], price: float, rent: float) -> float:
+    """Return stored monthly net cash flow or recompute with default loan assumptions."""
+    if prop.get("monthly_net_cash_flow") is not None:
+        return _safe_float(prop["monthly_net_cash_flow"])
+
+    if price <= 0 or rent <= 0:
+        return 0.0
+
+    analysis = analyze_investment(
+        price=price,
+        down_payment_pct=DEFAULT_DOWN_PAYMENT_PCT,
+        interest_rate=DEFAULT_INTEREST_RATE,
+        loan_term=DEFAULT_LOAN_TERM,
+        closing_costs_pct=DEFAULT_CLOSING_COSTS_PCT,
+        tax_rate=_safe_float(prop.get("tax_rate")),
+        monthly_insurance=_safe_float(prop.get("insurance")),
+        monthly_hoa=_safe_float(prop.get("hoa")),
+        maint_percent=get_ai_baseline_maint(prop),
+        monthly_rent=rent,
+        vacancy_reserve_pct=_safe_float(prop.get("ai_vacancy_rate"), 5.0),
+        management_fee_pct=_safe_float(prop.get("ai_management_fee"), 10.0),
+    )
+    return analysis["monthly_net_cash_flow"]
+
+
+def _resolve_one_year_roi(prop: dict[str, Any], price: float, rent: float) -> float:
     """
-    Return (profitability_index, source_label).
-
-    Prefers stored cash-on-cash or cap rate; otherwise applies the 50% OpEx
-    baseline cap-rate fallback: (annual_rent * 0.5) / price.
+    One-year ROI: (projected 1yr value gain + annual cash flow) / (down payment + closing).
     """
-    if prop.get("cash_on_cash") is not None:
-        return _safe_float(prop["cash_on_cash"]), "cash_on_cash"
+    if price <= 0:
+        return 0.0
 
-    if prop.get("cap_rate") is not None:
-        return _safe_float(prop["cap_rate"]), "cap_rate"
+    predicted_value = _safe_float(prop.get("predicted_value"))
+    forecast_rate = _safe_float(prop.get("forecast_rate"))
+    if forecast_rate <= 0:
+        location_score = _safe_float(prop.get("location_score"), 5.0)
+        forecast_rate = calculate_10yr_appreciation(price, location_score)["annual_rate"]
 
-    if price > 0 and rent > 0:
-        annual_rent = rent * 12.0
-        baseline = (annual_rent * 0.5) / price * 100.0
-        return baseline, "baseline_cap_rate"
-
-    return 0.0, "unavailable"
+    monthly_cash_flow = _resolve_monthly_cash_flow(prop, price, rent)
+    return calculate_one_year_roi(
+        current_price=price,
+        predicted_value=predicted_value,
+        forecast_rate_pct=forecast_rate,
+        monthly_net_cash_flow=monthly_cash_flow,
+        down_payment_pct=DEFAULT_DOWN_PAYMENT_PCT,
+        closing_costs_pct=DEFAULT_CLOSING_COSTS_PCT,
+    )
 
 
 def build_portfolio_dataframe(properties: list[dict[str, Any]]) -> pd.DataFrame:
@@ -179,7 +220,8 @@ def build_portfolio_dataframe(properties: list[dict[str, Any]]) -> pd.DataFrame:
 
         price = _safe_float(prop.get("price"))
         rent = get_ai_baseline_rent(prop)
-        profitability, profit_source = _resolve_profitability(prop, price, rent)
+        monthly_cash_flow = _resolve_monthly_cash_flow(prop, price, rent)
+        one_year_roi = _resolve_one_year_roi(prop, price, rent)
         quantum_success = _safe_float(prop.get("quantum_risk_score"))
         category = (
             prop.get("property_category")
@@ -197,8 +239,8 @@ def build_portfolio_dataframe(properties: list[dict[str, Any]]) -> pd.DataFrame:
                 "category": str(category),
                 "price": price,
                 "rent": rent,
-                "profitability_index": profitability,
-                "profitability_source": profit_source,
+                "monthly_cash_flow": monthly_cash_flow,
+                "one_year_roi": one_year_roi,
                 "quantum_success": quantum_success,
                 "market_city": str(market_city),
             }
@@ -211,8 +253,8 @@ def build_portfolio_dataframe(properties: list[dict[str, Any]]) -> pd.DataFrame:
                 "category",
                 "price",
                 "rent",
-                "profitability_index",
-                "profitability_source",
+                "monthly_cash_flow",
+                "one_year_roi",
                 "quantum_success",
                 "market_city",
                 "lat",
@@ -266,7 +308,7 @@ def resolve_coordinates_local(
 
     if zip_val.startswith("146"):
         return _coords_from_market_center(normalized, "Rochester, NY")
-    if zip_val.startswith("132"):
+    if zip_val.startswith(("132", "130")):
         return _coords_from_market_center(normalized, "Syracuse, NY")
 
     market_key = _market_key_from_city(market_city_text) or _infer_market_city(normalized)
@@ -322,10 +364,10 @@ def apply_map_colors(df: pd.DataFrame) -> pd.DataFrame:
         return df
 
     colored = df.copy()
-    profitability = colored["profitability_index"].fillna(0.0)
-    min_p = float(profitability.min())
-    max_p = float(profitability.max())
-    colored["marker_color"] = profitability.apply(
+    roi_values = colored["one_year_roi"].fillna(0.0)
+    min_p = float(roi_values.min())
+    max_p = float(roi_values.max())
+    colored["marker_color"] = roi_values.apply(
         lambda v: _profitability_to_hex(float(v), min_p, max_p)
     )
     return colored
@@ -379,7 +421,8 @@ def _build_folium_map(df: pd.DataFrame) -> folium.Map:
             f"<b>{row.address}</b><br/>"
             f"Price: ${row.price:,.0f}<br/>"
             f"Rent: ${row.rent:,.0f}/mo<br/>"
-            f"Profitability: {row.profitability_index:.2f}%<br/>"
+            f"Cash Flow: ${row.monthly_cash_flow:,.0f}/mo<br/>"
+            f"1-Yr ROI: {row.one_year_roi:.2f}%<br/>"
             f"Quantum: {row.quantum_success:.1f}%<br/>"
             f"<i>Click to select</i>"
         )
@@ -389,7 +432,8 @@ def _build_folium_map(df: pd.DataFrame) -> folium.Map:
             f"{row.category}<br/>"
             f"Price: ${row.price:,.0f}<br/>"
             f"Rent: ${row.rent:,.0f}/mo<br/>"
-            f"Cap / CoC: {row.profitability_index:.2f}%<br/>"
+            f"Cash Flow: ${row.monthly_cash_flow:,.0f}/mo<br/>"
+            f"1-Yr ROI: {row.one_year_roi:.2f}%<br/>"
             f"Quantum Success: {row.quantum_success:.1f}%"
             f"</div>"
         )
@@ -416,8 +460,8 @@ def sort_portfolio(df: pd.DataFrame, sort_key: str) -> pd.DataFrame:
     if sort_key == "quantum_success":
         # Lowest quantum risk → highest success probability first
         return df.sort_values("quantum_success", ascending=False, kind="mergesort")
-    if sort_key == "profitability_index":
-        return df.sort_values("profitability_index", ascending=False, kind="mergesort")
+    if sort_key == "one_year_roi":
+        return df.sort_values("one_year_roi", ascending=False, kind="mergesort")
     return df.sort_values("price", ascending=False, kind="mergesort")
 
 
@@ -445,13 +489,13 @@ def render_portfolio_map(df: pd.DataFrame) -> str | None:
 
 
 def compute_top_market(df: pd.DataFrame) -> str:
-    """Return the market city with the highest average profitability index."""
+    """Return the market city with the highest average one-year ROI."""
     if df.empty or "market_city" not in df.columns:
         return "—"
 
     market_stats = (
         df[df["market_city"] != "—"]
-        .groupby("market_city")["profitability_index"]
+        .groupby("market_city")["one_year_roi"]
         .mean()
     )
     if market_stats.empty:
@@ -468,7 +512,7 @@ if not render_auth_page():
 st.title("🗺️ Global Portfolio Map")
 st.caption(
     "Macro-market view of every property in the shared knowledge base — "
-    "sorted, filtered, and plotted by profitability and quantum success."
+    "sorted, filtered, and plotted by one-year ROI and quantum success."
 )
 
 with st.sidebar:
@@ -537,11 +581,12 @@ if selected_address:
     if not selected_row.empty:
         row = selected_row.iloc[0]
         st.markdown("#### 📍 Selected Property")
-        sel_col1, sel_col2, sel_col3, sel_col4 = st.columns(4)
+        sel_col1, sel_col2, sel_col3, sel_col4, sel_col5 = st.columns(5)
         sel_col1.metric("List Price", f"${row['price']:,.0f}")
         sel_col2.metric("Monthly Rent", f"${row['rent']:,.0f}")
-        sel_col3.metric("Profitability", f"{row['profitability_index']:.2f}%")
-        sel_col4.metric("Quantum Success", f"{row['quantum_success']:.1f}%")
+        sel_col3.metric("Monthly Cash Flow", f"${row['monthly_cash_flow']:,.0f}")
+        sel_col4.metric("One-Year ROI", f"{row['one_year_roi']:.2f}%")
+        sel_col5.metric("Quantum Success", f"{row['quantum_success']:.1f}%")
         st.write(f"**{row['address']}** · {row['category']} · {row['market_city']}")
 
         open_col, clear_col = st.columns([2, 1])
@@ -562,11 +607,11 @@ if selected_address:
 st.subheader("📊 Market Ledger")
 metric_col1, metric_col2, metric_col3 = st.columns(3)
 
-avg_cap = map_df["profitability_index"].mean() if not map_df.empty else 0.0
+avg_roi = map_df["one_year_roi"].mean() if not map_df.empty else 0.0
 top_market = compute_top_market(map_df)
 
 metric_col1.metric("Total Assets Evaluated", f"{len(map_df):,}")
-metric_col2.metric("Market-Wide Average Cap Rate", f"{avg_cap:.2f}%")
+metric_col2.metric("Market-Wide Avg 1-Yr ROI", f"{avg_roi:.2f}%")
 metric_col3.metric("Top Performing Market", top_market)
 
 # --- Detail table ---
@@ -577,7 +622,8 @@ display_df = map_df[
         "category",
         "price",
         "rent",
-        "profitability_index",
+        "monthly_cash_flow",
+        "one_year_roi",
         "quantum_success",
     ]
 ].rename(
@@ -586,7 +632,8 @@ display_df = map_df[
         "category": "Category",
         "price": "Price",
         "rent": "Monthly Rent",
-        "profitability_index": "Profitability Index",
+        "monthly_cash_flow": "Monthly Cash Flow",
+        "one_year_roi": "One-Year ROI",
         "quantum_success": "Quantum Success Metric",
     }
 )
@@ -598,7 +645,8 @@ st.dataframe(
     column_config={
         "Price": st.column_config.NumberColumn(format="$%d"),
         "Monthly Rent": st.column_config.NumberColumn(format="$%d"),
-        "Profitability Index": st.column_config.NumberColumn(format="%.2f%%"),
+        "Monthly Cash Flow": st.column_config.NumberColumn(format="$%d"),
+        "One-Year ROI": st.column_config.NumberColumn(format="%.2f%%"),
         "Quantum Success Metric": st.column_config.NumberColumn(format="%.1f%%"),
     },
 )

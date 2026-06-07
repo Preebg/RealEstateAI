@@ -48,8 +48,8 @@ HOT_MARKETS: list[tuple[str, str, int]] = [
     ),
     (
         "Syracuse",
-        "Syracuse NY metro (city + suburbs: Camillus, Liverpool, DeWitt, Fayetteville, "
-        "Cicero, Clay, Baldwinsville, Manlius)",
+        "northern Syracuse suburbs — prioritize Cicero, Clay, Liverpool, and North Syracuse "
+        "(secondary: Camillus, Baldwinsville; de-emphasize downtown Syracuse proper)",
         4,
     ),
     (
@@ -429,13 +429,14 @@ _ADDRESS_MARKET_KEYWORDS: tuple[tuple[str, str], ...] = (
     ("brighton", "Rochester"),
     ("victor", "Rochester"),
     ("canandaigua", "Rochester"),
-    ("syracuse", "Syracuse"),
-    ("camillus", "Syracuse"),
-    ("liverpool", "Syracuse"),
-    ("dewitt", "Syracuse"),
-    ("fayetteville", "Syracuse"),
+    ("north syracuse", "Syracuse"),
     ("cicero", "Syracuse"),
     ("clay", "Syracuse"),
+    ("liverpool", "Syracuse"),
+    ("syracuse", "Syracuse"),
+    ("camillus", "Syracuse"),
+    ("dewitt", "Syracuse"),
+    ("fayetteville", "Syracuse"),
     ("baldwinsville", "Syracuse"),
     ("manlius", "Syracuse"),
     ("charlotte", "Charlotte"),
@@ -622,13 +623,19 @@ def _discovery_prompt(
     market_keys = ", ".join(f'"{name}"' for name, _, _ in HOT_MARKETS)
     priority_note = (
         "Search priority: fill Upstate NY (Rochester, Syracuse) first, then Charlotte, "
-        "Raleigh, Charleston, Ohio, DFW, and Austin metros."
+        "Raleigh, Charleston, Ohio, DFW, and Austin metros. For Syracuse, favor Cicero, "
+        "Clay, Liverpool, and North Syracuse over downtown Syracuse."
     )
     if split_market:
         priority_note = (
             f"Focus this search on {location} only — include city proper AND surrounding "
             "suburbs listed in the scope (do not limit to downtown/city limits)."
         )
+        if split_market == "Syracuse":
+            priority_note += (
+                " Weight searches toward Cicero, Clay, Liverpool, and North Syracuse ZIPs "
+                "(13039, 13041, 13088, 13212) before central Syracuse."
+            )
 
     return f"""You are a real estate discovery agent for US hot rental markets.
 
@@ -646,7 +653,7 @@ Return ONLY a JSON array (no markdown, no commentary). Example:
 Rules:
 - Search Zillow, Redfin, Realtor.com, or MLS listing pages for active for-sale homes.
 - Include suburbs and townships — not just the core city (e.g. Henrietta/Penfield/Fairport
-  count as Rochester; Cary/Apex count as Raleigh).
+  count as Rochester; Cicero/Clay/Liverpool/North Syracuse count as Syracuse).
 - You MUST return {MAX_DISCOVERY_LISTINGS} distinct listings when possible. Do not stop at 7–13.
 - Use real street addresses with city/town, state, and ZIP when available.
 - list_price must be the active asking price as a plain number (no $ or commas).

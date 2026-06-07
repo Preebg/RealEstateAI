@@ -197,6 +197,37 @@ def project_value_schedule(
     return [base_value * ((1.0 + rate) ** year) for year in range(num_years)]
 
 
+def calculate_one_year_roi(
+    *,
+    current_price: float,
+    predicted_value: float,
+    forecast_rate_pct: float,
+    monthly_net_cash_flow: float,
+    down_payment_pct: float = 25.0,
+    closing_costs_pct: float = 3.0,
+) -> float:
+    """
+    One-year ROI: (1yr appreciation gain + annual cash flow) / cash invested.
+
+    Appreciation gain = projected value after one year minus purchase price.
+    Cash invested = down payment + closing costs.
+    """
+    if current_price <= 0:
+        return 0.0
+
+    base_value = predicted_value if predicted_value > 0 else current_price
+    value_after_one_year = base_value * (1.0 + forecast_rate_pct / 100.0)
+    appreciation_gain = value_after_one_year - current_price
+    annual_cash_flow = monthly_net_cash_flow * 12.0
+    closing_costs_total = calculate_closing_costs(current_price, closing_costs_pct)
+    total_investment = calculate_total_investment(
+        current_price, down_payment_pct, closing_costs_total
+    )
+    if total_investment <= 0:
+        return 0.0
+    return ((appreciation_gain + annual_cash_flow) / total_investment) * 100.0
+
+
 def analyze_investment(
     price: float,
     down_payment_pct: float,

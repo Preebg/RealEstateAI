@@ -415,6 +415,41 @@ class TestDiscoveryParsing(unittest.TestCase):
         self.assertEqual(listings[0]["city"], "Rochester")
 
 
+class TestOneYearROI(unittest.TestCase):
+    def test_positive_appreciation_and_negative_cashflow(self):
+        from finance import calculate_one_year_roi
+
+        # $200k purchase, $210k predicted, 4% annual growth, -$500/mo cash flow
+        roi = calculate_one_year_roi(
+            current_price=200_000,
+            predicted_value=210_000,
+            forecast_rate_pct=4.0,
+            monthly_net_cash_flow=-500,
+            down_payment_pct=25.0,
+            closing_costs_pct=3.0,
+        )
+        value_after_one_year = 210_000 * 1.04
+        appreciation_gain = value_after_one_year - 200_000
+        annual_cash_flow = -500 * 12
+        investment = 200_000 * 0.25 + 200_000 * 0.03
+        expected = ((appreciation_gain + annual_cash_flow) / investment) * 100.0
+        self.assertAlmostEqual(roi, expected, places=2)
+        self.assertLess(roi, appreciation_gain / investment * 100)
+
+    def test_zero_price_returns_zero(self):
+        from finance import calculate_one_year_roi
+
+        self.assertEqual(
+            calculate_one_year_roi(
+                current_price=0,
+                predicted_value=100_000,
+                forecast_rate_pct=4.0,
+                monthly_net_cash_flow=100,
+            ),
+            0.0,
+        )
+
+
 class TestInsuranceNormalization(unittest.TestCase):
     def test_converts_likely_annual_premium_to_monthly(self):
         from finance import normalize_monthly_insurance
