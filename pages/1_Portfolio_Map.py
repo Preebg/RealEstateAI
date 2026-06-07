@@ -1,0 +1,442 @@
+"""Global portfolio map — macro-market geospatial view of the shared knowledge base."""
+
+from __future__ import annotations
+
+import hashlib
+import os
+from typing import Any
+
+import pandas as pd
+import pydeck as pdk
+import streamlit as st
+from geopy.geocoders import Nominatim
+
+from authenticate import render_auth_sidebar
+from knowledge_base import (
+    _fetch_canonical_properties,
+    _normalize_record_numerics,
+    get_ai_baseline_rent,
+    render_auth_page,
+)
+from market_pulse import render_market_pulse
+
+# ---------------------------------------------------------------------------
+# Market fallbacks — city centers with deterministic per-address jitter
+# ---------------------------------------------------------------------------
+MARKET_CITY_CENTERS: dict[str, tuple[float, float]] = {
+    "Rochester, NY": (43.1566, -77.6088),
+    "Syracuse, NY": (43.0481, -76.1474),
+}
+
+SORT_OPTIONS: dict[str, str] = {
+    "Highest Profitability (Cap Rate / Cash-on-Cash)": "profitability_index",
+    "Lowest Quantum Risk": "quantum_success",
+    "Highest Total Value": "price",
+}
+
+JITTER_SCALE_DEGREES = 0.025
+
+
+def _configure_mapbox_token() -> None:
+    """Apply Mapbox credentials when available (required for dark-v9 basemap)."""
+    token = os.getenv("MAPBOX_API_KEY", "").strip()
+    if not token and hasattr(st, "secrets") and "MAPBOX_API_KEY" in st.secrets:
+        token = str(st.secrets["MAPBOX_API_KEY"]).strip()
+    if token:
+        pdk.settings.mapbox_api_key = token
+
+
+def _infer_market_city(address: str) -> str | None:
+    """Return a known market key when the address belongs to Rochester or Syracuse."""
+    lowered = address.lower()
+    if "rochester" in lowered:
+        return "Rochester, NY"
+    if "syracuse" in lowered:
+        return "Syracuse, NY"
+    return None
+
+
+def _deterministic_jitter(address: str, scale: float = JITTER_SCALE_DEGREES) -> tuple[float, float]:
+    """Stable lat/lon offsets so fallback markers do not stack on the city center."""
+    digest = hashlib.md5(address.encode("utf-8")).hexdigest()
+    seed = int(digest[:8], 16)
+    lat_offset = ((seed % 1000) / 1000.0 - 0.5) * scale
+    lon_offset = (((seed // 1000) % 1000) / 1000.0 - 0.5) * scale
+    return lat_offset, lon_offset
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def load_global_portfolio_properties() -> list[dict[str, Any]]:
+    """
+    Load every canonical property row from the shared global KB.
+
+    Uses the same Supabase ``properties`` table as ``get_kb_raw_data`` / harvester
+    saves — one row per address across all users and harvest loops.
+    """
+    rows = _fetch_canonical_properties()
+    return [_normalize_record_numerics(row) for row in rows if row.get("address")]
+
+
+def _resolve_profitability(prop: dict[str, Any], price: float, rent: float) -> tuple[float, str]:
+    """
+    Return (profitability_index, source_label).
+
+    Prefers stored cash-on-cash or cap rate; otherwise applies the 50% OpEx
+    baseline cap-rate fallback: (annual_rent * 0.5) / price.
+    """
+    if prop.get("cash_on_cash") is not None:
+        return _safe_float(prop["cash_on_cash"]), "cash_on_cash"
+
+    if prop.get("cap_rate") is not None:
+        return _safe_float(prop["cap_rate"]), "cap_rate"
+
+    if price > 0 and rent > 0:
+        annual_rent = rent * 12.0
+        baseline = (annual_rent * 0.5) / price * 100.0
+        return baseline, "baseline_cap_rate"
+
+    return 0.0, "unavailable"
+
+
+def build_portfolio_dataframe(properties: list[dict[str, Any]]) -> pd.DataFrame:
+    """Normalize raw KB rows into an analytics-ready DataFrame."""
+    records: list[dict[str, Any]] = []
+    for prop in properties:
+        address = str(prop.get("address") or "").strip()
+        if not address:
+            continue
+
+        price = _safe_float(prop.get("price"))
+        rent = get_ai_baseline_rent(prop)
+        profitability, profit_source = _resolve_profitability(prop, price, rent)
+        quantum_success = _safe_float(prop.get("quantum_risk_score"))
+        category = (
+            prop.get("property_category")
+            or prop.get("property_label")
+            or "—"
+        )
+        market_city = prop.get("market_city") or _infer_market_city(address) or "—"
+
+        records.append(
+            {
+                "address": address,
+                "category": str(category),
+                "price": price,
+                "rent": rent,
+                "profitability_index": profitability,
+                "profitability_source": profit_source,
+                "quantum_success": quantum_success,
+                "market_city": str(market_city),
+            }
+        )
+
+    if not records:
+        return pd.DataFrame(
+            columns=[
+                "address",
+                "category",
+                "price",
+                "rent",
+                "profitability_index",
+                "profitability_source",
+                "quantum_success",
+                "market_city",
+                "lat",
+                "lon",
+                "color",
+            ]
+        )
+
+    return pd.DataFrame(records)
+
+
+@st.cache_data(ttl=86_400, show_spinner=False)
+def geocode_address(address: str) -> tuple[float | None, float | None]:
+    """Resolve a single address to (lat, lon) with Nominatim, then market fallback."""
+    if not address or not address.strip():
+        return None, None
+
+    normalized = address.strip()
+    try:
+        geolocator = Nominatim(user_agent="realestateai_portfolio_map_v1")
+        location = geolocator.geocode(normalized, timeout=10)
+        if location is not None:
+            return float(location.latitude), float(location.longitude)
+    except Exception:
+        pass
+
+    market_key = _infer_market_city(normalized)
+    if market_key and market_key in MARKET_CITY_CENTERS:
+        base_lat, base_lon = MARKET_CITY_CENTERS[market_key]
+        lat_off, lon_off = _deterministic_jitter(normalized)
+        return base_lat + lat_off, base_lon + lon_off
+
+    return None, None
+
+
+def attach_coordinates(df: pd.DataFrame) -> pd.DataFrame:
+    """Geocode every unique address and merge lat/lon onto the portfolio frame."""
+    if df.empty:
+        return df
+
+    enriched = df.copy()
+    coords: dict[str, tuple[float | None, float | None]] = {}
+    for address in enriched["address"].unique():
+        coords[address] = geocode_address(address)
+
+    enriched["lat"] = enriched["address"].map(lambda a: coords.get(a, (None, None))[0])
+    enriched["lon"] = enriched["address"].map(lambda a: coords.get(a, (None, None))[1])
+    return enriched
+
+
+def _profitability_to_color(
+    value: float,
+    min_val: float,
+    max_val: float,
+) -> list[int]:
+    """Map profitability to a green (high) → amber → red (low) RGBA tuple."""
+    if max_val <= min_val:
+        return [120, 220, 140, 210]
+
+    ratio = (value - min_val) / (max_val - min_val)
+    ratio = max(0.0, min(1.0, ratio))
+
+    # Low ratio → amber/red; high ratio → bright green glow
+    red = int(255 * (1.0 - ratio) + 40 * ratio)
+    green = int(90 + 165 * ratio)
+    blue = int(60 * (1.0 - ratio) + 100 * ratio)
+    alpha = 200
+    return [red, green, blue, alpha]
+
+
+def apply_map_colors(df: pd.DataFrame) -> pd.DataFrame:
+    """Attach per-row RGBA color arrays for pydeck rendering."""
+    if df.empty:
+        return df
+
+    colored = df.copy()
+    min_p = colored["profitability_index"].min()
+    max_p = colored["profitability_index"].max()
+    colored["color"] = colored["profitability_index"].apply(
+        lambda v: _profitability_to_color(v, min_p, max_p)
+    )
+    return colored
+
+
+def sort_portfolio(df: pd.DataFrame, sort_key: str) -> pd.DataFrame:
+    """Sort the portfolio frame according to the selected analytical vector."""
+    if df.empty:
+        return df
+
+    if sort_key == "quantum_success":
+        # Lowest quantum risk → highest success probability first
+        return df.sort_values("quantum_success", ascending=False, kind="mergesort")
+    if sort_key == "profitability_index":
+        return df.sort_values("profitability_index", ascending=False, kind="mergesort")
+    return df.sort_values("price", ascending=False, kind="mergesort")
+
+
+def render_portfolio_map(df: pd.DataFrame) -> None:
+    """Dark-themed pydeck map with profitability-colored 3D pillars."""
+    mappable = df.dropna(subset=["lat", "lon"])
+    if mappable.empty:
+        st.info("No geocoded properties to display on the map yet.")
+        return
+
+    _configure_mapbox_token()
+
+    center_lat = float(mappable["lat"].mean())
+    center_lon = float(mappable["lon"].mean())
+
+    tooltip = {
+        "html": (
+            "<b>{address}</b><br/>"
+            "Price: ${price:,.0f}<br/>"
+            "Rent: ${rent:,.0f}/mo<br/>"
+            "Profitability: {profitability_index:.2f}%<br/>"
+            "Quantum Success: {quantum_success:.1f}%"
+        ),
+        "style": {"backgroundColor": "#1a1a2e", "color": "#e8e8f0"},
+    }
+
+    max_price = max(float(mappable["price"].max()), 1.0)
+    elevation_scale = 50.0 / max_price
+
+    column_layer = pdk.Layer(
+        "ColumnLayer",
+        data=mappable,
+        get_position="[lon, lat]",
+        get_elevation="price",
+        elevation_scale=elevation_scale,
+        radius=250,
+        get_fill_color="color",
+        pickable=True,
+        auto_highlight=True,
+    )
+
+    scatter_layer = pdk.Layer(
+        "ScatterplotLayer",
+        data=mappable,
+        get_position="[lon, lat]",
+        get_fill_color="color",
+        get_radius=180,
+        radius_min_pixels=4,
+        radius_max_pixels=14,
+        pickable=True,
+    )
+
+    view_state = pdk.ViewState(
+        latitude=center_lat,
+        longitude=center_lon,
+        zoom=9,
+        pitch=45,
+        bearing=0,
+    )
+
+    deck = pdk.Deck(
+        map_style="mapbox://styles/mapbox/dark-v9",
+        initial_view_state=view_state,
+        layers=[column_layer, scatter_layer],
+        tooltip=tooltip,
+    )
+    st.pydeck_chart(deck, use_container_width=True)
+
+
+def compute_top_market(df: pd.DataFrame) -> str:
+    """Return the market city with the highest average profitability index."""
+    if df.empty or "market_city" not in df.columns:
+        return "—"
+
+    market_stats = (
+        df[df["market_city"] != "—"]
+        .groupby("market_city")["profitability_index"]
+        .mean()
+    )
+    if market_stats.empty:
+        return "—"
+    return str(market_stats.idxmax())
+
+
+# ---------------------------------------------------------------------------
+# Page entry
+# ---------------------------------------------------------------------------
+if not render_auth_page():
+    st.stop()
+
+st.title("🗺️ Global Portfolio Map")
+st.caption(
+    "Macro-market view of every property in the shared knowledge base — "
+    "sorted, filtered, and plotted by profitability and quantum success."
+)
+
+with st.sidebar:
+    render_auth_sidebar()
+    st.divider()
+    render_market_pulse()
+
+properties = load_global_portfolio_properties()
+portfolio_df = build_portfolio_dataframe(properties)
+
+if portfolio_df.empty:
+    st.warning("No properties found in the global knowledge base yet.")
+    st.stop()
+
+# --- Filters & sorting ---
+st.subheader("🔎 Portfolio Controls")
+filter_col1, filter_col2 = st.columns([2, 1])
+
+price_values = portfolio_df["price"].dropna()
+price_min = int(price_values.min()) if not price_values.empty else 0
+price_max = int(price_values.max()) if not price_values.empty else 1_000_000
+if price_max <= price_min:
+    price_max = price_min + 1
+
+with filter_col1:
+    min_price = st.slider(
+        "Minimum Acquisition Price ($)",
+        min_value=price_min,
+        max_value=price_max,
+        value=price_min,
+        step=max(1_000, (price_max - price_min) // 100 or 1_000),
+        format="$%d",
+    )
+
+with filter_col2:
+    sort_label = st.selectbox(
+        "Primary Sort Vector",
+        options=list(SORT_OPTIONS.keys()),
+        index=0,
+    )
+sort_key = SORT_OPTIONS[sort_label]
+
+filtered_df = portfolio_df[portfolio_df["price"] >= min_price].copy()
+sorted_df = sort_portfolio(filtered_df, sort_key)
+
+with st.spinner("Resolving property coordinates…"):
+    geo_df = attach_coordinates(sorted_df)
+    map_df = apply_map_colors(geo_df)
+
+# --- Map ---
+st.subheader("🌐 Geospatial Portfolio View")
+render_portfolio_map(map_df)
+
+# --- Aggregates ---
+st.subheader("📊 Market Ledger")
+metric_col1, metric_col2, metric_col3 = st.columns(3)
+
+avg_cap = map_df["profitability_index"].mean() if not map_df.empty else 0.0
+top_market = compute_top_market(map_df)
+
+metric_col1.metric("Total Assets Evaluated", f"{len(map_df):,}")
+metric_col2.metric("Market-Wide Average Cap Rate", f"{avg_cap:.2f}%")
+metric_col3.metric("Top Performing Market", top_market)
+
+# --- Detail table ---
+st.subheader("📋 Sorted Property Ledger")
+display_df = map_df[
+    [
+        "address",
+        "category",
+        "price",
+        "rent",
+        "profitability_index",
+        "quantum_success",
+    ]
+].rename(
+    columns={
+        "address": "Address",
+        "category": "Category",
+        "price": "Price",
+        "rent": "Monthly Rent",
+        "profitability_index": "Profitability Index",
+        "quantum_success": "Quantum Success Metric",
+    }
+)
+
+st.dataframe(
+    display_df,
+    use_container_width=True,
+    hide_index=True,
+    column_config={
+        "Price": st.column_config.NumberColumn(format="$%d"),
+        "Monthly Rent": st.column_config.NumberColumn(format="$%d"),
+        "Profitability Index": st.column_config.NumberColumn(format="%.2f%%"),
+        "Quantum Success Metric": st.column_config.NumberColumn(format="%.1f%%"),
+    },
+)
+
+geocoded_count = map_df["lat"].notna().sum()
+if geocoded_count < len(map_df):
+    st.caption(
+        f"{geocoded_count:,} of {len(map_df):,} properties geocoded. "
+        "Rochester and Syracuse addresses use city-center fallback with jitter "
+        "when exact geocoding fails."
+    )
