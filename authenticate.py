@@ -84,14 +84,28 @@ def get_supabase() -> Client:
         return create_client(url, key)
 
 
+def _normalize_app_url(url: str) -> str:
+    """Canonical app origin for OAuth redirects (no path/query/trailing slash)."""
+    cleaned = url.strip().rstrip("/")
+    if not cleaned:
+        return cleaned
+    # st.context.url may include ?query on Streamlit Cloud; keep origin only.
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(cleaned)
+    if parts.scheme and parts.netloc:
+        return f"{parts.scheme}://{parts.netloc}"
+    return cleaned
+
+
 def _get_redirect_url() -> str:
     """OAuth redirect URL — must match Supabase Auth redirect allow-list."""
     explicit = os.getenv("OAUTH_REDIRECT_URL")
     if explicit:
-        return explicit.rstrip("/")
+        return _normalize_app_url(explicit)
     if "OAUTH_REDIRECT_URL" in st.secrets:
-        return str(st.secrets["OAUTH_REDIRECT_URL"]).rstrip("/")
-    base = str(st.context.url).rstrip("/")
+        return _normalize_app_url(str(st.secrets["OAUTH_REDIRECT_URL"]))
+    base = _normalize_app_url(str(st.context.url))
     if base:
         return base
     return "http://localhost:8501"
@@ -198,7 +212,12 @@ def _query_param(name: str) -> str | None:
     return str(value) if value is not None else None
 
 
-def _clear_oauth_query_params() -> None:
+def _clear_query_param(name: str) -> None:
+    if name in st.query_params:
+        del st.query_params[name]
+
+
+def _clear_oauth_query_params(*, keep_handoff: bool = False) -> None:
     """Remove OAuth callback params so the user can retry cleanly."""
     for key in (
         "code",
@@ -208,8 +227,9 @@ def _clear_oauth_query_params() -> None:
         "pkce_verifier",
         "pkce_sid",
     ):
-        if key in st.query_params:
-            del st.query_params[key]
+        _clear_query_param(key)
+    if not keep_handoff:
+        _clear_query_param("auth_handoff")
 
 
 def _extract_verifier_from_auth_client(supabase: Client) -> str | None:
@@ -263,6 +283,71 @@ def _read_pkce_verifier(supabase: Client | None = None) -> str | None:
     return None
 
 
+def _save_auth_handoff(handoff_id: str, session: Any) -> None:
+    """Persist completed OAuth session for post-redirect recovery on Streamlit Cloud."""
+    supabase = get_supabase()
+    supabase.rpc(
+        "store_oauth_auth_handoff",
+        {
+            "p_handoff_id": handoff_id,
+            "p_access_token": session.access_token,
+            "p_refresh_token": session.refresh_token or "",
+            "p_user_id": session.user.id,
+            "p_user_email": session.user.email or "",
+        },
+    ).execute()
+    log.info("oauth_handoff_stored", handoff_id=handoff_id[:8] + "…")
+
+
+def _restore_auth_handoff() -> bool:
+    """
+    Recover session tokens after OAuth redirect when Streamlit session_state reset.
+    Returns True when a handoff was consumed and auth state was restored.
+    """
+    handoff_id = _query_param("auth_handoff")
+    if not handoff_id:
+        return False
+
+    if get_logged_in_user():
+        try:
+            supabase = get_supabase()
+            supabase.rpc(
+                "consume_oauth_auth_handoff", {"p_handoff_id": handoff_id}
+            ).execute()
+        except APIError:
+            pass
+        _clear_query_param("auth_handoff")
+        return True
+
+    supabase = get_supabase()
+    try:
+        response = supabase.rpc(
+            "consume_oauth_auth_handoff", {"p_handoff_id": handoff_id}
+        ).execute()
+    except APIError as exc:
+        report_error(log, "oauth_handoff_consume_failed", exc, level="warning")
+        _clear_query_param("auth_handoff")
+        return False
+
+    rows = response.data or []
+    if not rows:
+        log.warning("oauth_handoff_not_found", handoff_id=handoff_id[:8] + "…")
+        _clear_query_param("auth_handoff")
+        return False
+
+    row = rows[0]
+    st.session_state["sb_access_token"] = row.get("access_token")
+    st.session_state["sb_refresh_token"] = row.get("refresh_token") or ""
+    st.session_state["user"] = {
+        "id": str(row.get("user_id")),
+        "email": row.get("user_email") or "",
+    }
+    st.session_state.pop("google_oauth_url", None)
+    _clear_query_param("auth_handoff")
+    log.info("oauth_handoff_restored", handoff_id=handoff_id[:8] + "…")
+    return True
+
+
 def _persist_session(session: Any) -> None:
     st.session_state["sb_access_token"] = session.access_token
     st.session_state["sb_refresh_token"] = session.refresh_token
@@ -290,6 +375,11 @@ def _clear_auth_state() -> None:
         ):
             st.session_state.pop(key, None)
     _clear_pending_pkce()
+
+
+def _oauth_handoff_id() -> str:
+    """Stable id echoed in redirect_to and reused for post-login handoff."""
+    return _query_param("pkce_sid") or _get_pkce_session_id()
 
 
 def process_auth_callback() -> bool:
@@ -323,8 +413,12 @@ def process_auth_callback() -> bool:
             response = supabase.auth.exchange_code_for_session(
                 {"auth_code": code, "code_verifier": code_verifier}
             )
+            handoff_id = _oauth_handoff_id()
+            _save_auth_handoff(handoff_id, response.session)
             _persist_session(response.session)
-            _clear_oauth_query_params()
+            # Keep auth_handoff in the URL so a fresh Streamlit session can recover tokens.
+            st.query_params["auth_handoff"] = handoff_id
+            _clear_oauth_query_params(keep_handoff=True)
             st.rerun()
         except (APIError, ValueError, TypeError) as exc:
             report_error(log, "oauth_exchange_failed", exc)
@@ -356,11 +450,12 @@ def login_with_google() -> str:
             verifier = _extract_verifier_from_auth_client(supabase)
             if verifier:
                 _save_pending_pkce(verifier)
-            return response.url
+                return response.url
+            log.warning("oauth_verifier_not_extracted")
     except (APIError, ValueError, TypeError) as exc:
         report_error(log, "oauth_sign_in_sdk_failed", exc, level="warning")
 
-    # Fallback: manual authorize URL (no custom state — that causes "state is invalid").
+    # Fallback: manual authorize URL when SDK path fails or verifier was not persisted.
     code_verifier, code_challenge = _generate_pkce_pair()
     _save_pending_pkce(code_verifier, code_challenge)
 
@@ -600,7 +695,11 @@ def render_login_page() -> bool:
     Returns True when the user is authenticated.
     """
     process_auth_callback()
+    handoff_restored = _restore_auth_handoff()
     restore_session_from_tokens()
+
+    if handoff_restored and get_logged_in_user():
+        st.rerun()
 
     if get_logged_in_user():
         return True
