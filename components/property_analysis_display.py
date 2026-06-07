@@ -11,7 +11,7 @@ import streamlit as st
 import tldextract
 
 from components.property_share import render_share_popover
-from engine import CLASSICAL_QAOA_DIVERGENCE_HELP, calculate_property_age_years, safe_float
+from engine import calculate_property_age_years, safe_float
 from finance import calculate_10yr_appreciation
 from pdf_generator import generate_property_pdf
 from ui_theme import render_metric_with_confidence, style_matplotlib_chart
@@ -81,41 +81,29 @@ def render_analysis_results(
 
     with header_col2:
         st.metric(
-            label="⚛️ Cash Flow Hybrid Optimization Score",
-            value=(
-                f"Classical {quantum_risk['classical_cashflow_success_pct']:.1f}% · "
-                f"QAOA {quantum_risk['cashflow_success_pct']:.1f}%"
-            ),
-            help=CLASSICAL_QAOA_DIVERGENCE_HELP,
+            label="⚛️ Cash Flow Success",
+            value=f"{quantum_risk['cashflow_success_pct']:.1f}%",
+            help="QAOA alignment with positive cash-flow targets (0–100%).",
         )
     with header_col3:
         st.metric(
-            label="📈 Appreciation Hybrid Optimization Score",
-            value=(
-                f"Classical {quantum_risk['classical_appreciation_success_pct']:.1f}% · "
-                f"QAOA {quantum_risk['appreciation_success_pct']:.1f}%"
-            ),
-            help=CLASSICAL_QAOA_DIVERGENCE_HELP,
+            label="📈 Appreciation Success",
+            value=f"{quantum_risk['appreciation_success_pct']:.1f}%",
+            help="QAOA alignment with appreciation forecast targets (0–100%).",
         )
 
     qcol1, qcol2 = st.columns(2)
     with qcol1:
         st.metric(
-            label="💰 Combined Wealth Hybrid Optimization Score",
-            value=(
-                f"Classical {quantum_risk['classical_combined_wealth_success_pct']:.1f}% · "
-                f"QAOA {quantum_risk['combined_wealth_success_pct']:.1f}%"
-            ),
-            help=CLASSICAL_QAOA_DIVERGENCE_HELP,
+            label="💰 Combined Wealth Success",
+            value=f"{quantum_risk['combined_wealth_success_pct']:.1f}%",
+            help="Joint cash-flow and appreciation alignment from QAOA (0–100%).",
         )
     with qcol2:
         st.metric(
             label="⚛️ Quantum Alignment Score",
-            value=(
-                f"Classical {quantum_risk['classical_overall_success_pct']:.1f}% · "
-                f"QAOA {quantum_risk['overall_success_pct']:.1f}%"
-            ),
-            help=CLASSICAL_QAOA_DIVERGENCE_HELP,
+            value=f"{quantum_risk['overall_success_pct']:.1f}%",
+            help="Weighted overall QAOA alignment across cash flow, appreciation, and location.",
         )
 
     tab1 = st.tabs(["📋 Detailed Metrics"])[0]

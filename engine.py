@@ -26,9 +26,7 @@ from data_provenance import attach_data_provenance
 from knowledge_base import get_kb_context, lookup_property
 from quantum_portfolio import (
     ALIGNMENT_SCORE_KEYS,
-    CLASSICAL_QAOA_DIVERGENCE_HELP,
     PortfolioInputs,
-    classical_baseline,
     score_portfolio,
 )
 
@@ -2163,11 +2161,6 @@ def _portfolio_inputs_from_legacy(
         forecast_rate=forecast_rate,
         location_score=location_score,
     )
-
-
-def classical_baseline_score(*args: float, **kwargs: float) -> dict[str, float]:
-    """Backward-compatible wrapper around :func:`quantum_portfolio.classical_baseline`."""
-    return classical_baseline(_portfolio_inputs_from_legacy(*args, **kwargs)).to_dict()
 
 
 def calculate_quantum_risk(*args: float, **kwargs: float) -> dict[str, float]:

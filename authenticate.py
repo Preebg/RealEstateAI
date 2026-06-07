@@ -796,13 +796,13 @@ def get_signup_policy_text() -> str:
 **Effective date:** {effective_date}
 
 #### 1) What this app is
-This application is an AI-assisted, educational real-estate analysis tool. It may generate estimates, summaries, and optimization-alignment scores (quantum alignment and hybrid classical/QAOA metrics) based on user inputs and third-party information. It is **not** a broker, lender, or financial advisor.
+This application is an AI-assisted, educational real-estate analysis tool. It may generate estimates, summaries, and QAOA quantum alignment scores based on user inputs and third-party information. It is **not** a broker, lender, or financial advisor.
 
 #### 2) Data we collect
 When you create an account or use the app, we may collect:
 - **Account data**: email address and Supabase user identifier (UID)
 - **Usage data**: properties you analyze and any values you save to your Knowledge Base
-- **Generated outputs**: AI summaries, forecasts, and simulated quantum alignment / hybrid optimization scores
+- **Generated outputs**: AI summaries, forecasts, and simulated quantum alignment scores
 
 We do **not** sell personal information.
 

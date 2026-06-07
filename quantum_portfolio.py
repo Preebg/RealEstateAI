@@ -4,11 +4,8 @@ from __future__ import annotations
 
 __all__ = (
     "ALIGNMENT_SCORE_KEYS",
-    "CLASSICAL_QAOA_DIVERGENCE_HELP",
     "AlignmentBreakdown",
     "PortfolioInputs",
-    "QuantumResult",
-    "classical_baseline",
     "score_portfolio",
 )
 
@@ -28,12 +25,6 @@ ALIGNMENT_SCORE_KEYS: Final[tuple[str, ...]] = (
     "location_success_pct",
     "combined_wealth_success_pct",
     "overall_success_pct",
-)
-
-CLASSICAL_QAOA_DIVERGENCE_HELP: Final[str] = (
-    "Classical and QAOA optimize the same alignment cost on cash flow, appreciation, "
-    "and location. They diverge when finite QAOA shots, COBYLA iteration limits, or "
-    "circuit parameter bounds prevent the quantum sampler from reaching the classical optimum."
 )
 
 COUPLING_WEIGHT: Final[float] = 0.15
@@ -74,24 +65,6 @@ class AlignmentBreakdown:
         }
 
 
-@dataclass(frozen=True, slots=True)
-class QuantumResult:
-    """QAOA alignment scores with parallel classical baselines."""
-
-    qaoa: AlignmentBreakdown
-    classical: AlignmentBreakdown
-
-    @property
-    def overall_success_pct(self) -> float:
-        return self.qaoa.overall_success_pct
-
-    def to_dict(self) -> dict[str, float]:
-        merged = dict(self.qaoa.to_dict())
-        for key, value in self.classical.to_dict().items():
-            merged[f"classical_{key}"] = value
-        return merged
-
-
 def _success_targets(
     cash_flow: float, forecast_rate: float, location_score: float
 ) -> tuple[float, float, float]:
@@ -119,24 +92,6 @@ def _alignment_cost(
     return misalignment + coupling
 
 
-def _scores_from_binary_state(
-    x0: int, x1: int, x2: int, *, cf_t: float, rate_t: float, loc_t: float
-) -> AlignmentBreakdown:
-    """Map a {0,1}^3 alignment state to interpretable success percentages."""
-    cf_pct = 100.0 * cf_t * x0
-    app_pct = 100.0 * rate_t * x1
-    loc_pct = 100.0 * loc_t * x2
-    combined = 100.0 * cf_t * rate_t * x0 * x1
-    overall = 0.45 * cf_pct + 0.35 * app_pct + 0.20 * loc_pct
-    return AlignmentBreakdown(
-        cashflow_success_pct=min(max(cf_pct, 0.0), 100.0),
-        appreciation_success_pct=min(max(app_pct, 0.0), 100.0),
-        location_success_pct=min(max(loc_pct, 0.0), 100.0),
-        combined_wealth_success_pct=min(max(combined, 0.0), 100.0),
-        overall_success_pct=min(max(overall, 0.0), 100.0),
-    )
-
-
 def _zero_alignment_breakdown() -> AlignmentBreakdown:
     return AlignmentBreakdown(0.0, 0.0, 0.0, 0.0, 0.0)
 
@@ -144,40 +99,6 @@ def _zero_alignment_breakdown() -> AlignmentBreakdown:
 def _legacy_location_only_breakdown(loc_t: float) -> AlignmentBreakdown:
     loc_pct = loc_t * 100.0
     return AlignmentBreakdown(loc_pct, loc_pct, loc_pct, loc_pct, loc_pct)
-
-
-def classical_baseline(inputs: PortfolioInputs) -> AlignmentBreakdown:
-    """
-    Classical optimum for the same alignment objective minimized by QAOA.
-
-    Exhaustively searches {0,1}^3 for the bitstring that minimizes squared
-    target misalignment plus pairwise coupling, then maps that state to
-    the same alignment scores as the quantum path.
-    """
-    cash_flow = inputs.monthly_cash_flow
-    forecast_rate = inputs.forecast_rate
-    location_score = inputs.location_score
-    cf_t, rate_t, loc_t = _success_targets(cash_flow, forecast_rate, location_score)
-
-    if cf_t == 0.0 and rate_t == 0.0 and loc_t == 0.0:
-        return _zero_alignment_breakdown()
-
-    if cf_t == 0.0 and rate_t == 0.0 and location_score > 0:
-        return _legacy_location_only_breakdown(loc_t)
-
-    best_cost = float("inf")
-    best_state = (0, 0, 0)
-    for x0 in (0, 1):
-        for x1 in (0, 1):
-            for x2 in (0, 1):
-                cost = _alignment_cost(x0, x1, x2, cf_t=cf_t, rate_t=rate_t, loc_t=loc_t)
-                state = (x0, x1, x2)
-                if cost < best_cost or (cost == best_cost and state > best_state):
-                    best_cost = cost
-                    best_state = state
-
-    x0, x1, x2 = best_state
-    return _scores_from_binary_state(x0, x1, x2, cf_t=cf_t, rate_t=rate_t, loc_t=loc_t)
 
 
 def _probabilities_from_measurement_counts(
@@ -312,24 +233,17 @@ def _run_qaoa_alignment(
     )
 
 
-def score_portfolio(inputs: PortfolioInputs) -> QuantumResult:
-    """
-    QAOA simulation returning cash-flow, appreciation, and combined wealth success odds,
-    plus classical baseline scores from the same alignment objective.
-    """
+def score_portfolio(inputs: PortfolioInputs) -> AlignmentBreakdown:
+    """QAOA simulation returning cash-flow, appreciation, and combined wealth success odds."""
     cash_flow = inputs.monthly_cash_flow
     forecast_rate = inputs.forecast_rate
     location_score = inputs.location_score
     cf_t, rate_t, loc_t = _success_targets(cash_flow, forecast_rate, location_score)
-    classical = classical_baseline(inputs)
 
     if cf_t == 0.0 and rate_t == 0.0 and loc_t == 0.0:
-        return QuantumResult(qaoa=_zero_alignment_breakdown(), classical=classical)
+        return _zero_alignment_breakdown()
 
     if cf_t == 0.0 and rate_t == 0.0 and location_score > 0:
-        return QuantumResult(
-            qaoa=_legacy_location_only_breakdown(loc_t), classical=classical
-        )
+        return _legacy_location_only_breakdown(loc_t)
 
-    qaoa = _run_qaoa_alignment(cf_t=cf_t, rate_t=rate_t, loc_t=loc_t)
-    return QuantumResult(qaoa=qaoa, classical=classical)
+    return _run_qaoa_alignment(cf_t=cf_t, rate_t=rate_t, loc_t=loc_t)

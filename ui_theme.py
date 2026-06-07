@@ -116,9 +116,7 @@ def render_app_footer_glossary() -> None:
     st.markdown(
         '<p class="app-footer-glossary">'
         "<strong>Quantum Alignment Score</strong> measures how well the QAOA optimizer "
-        "matches your investment targets (0–100%); "
-        "<strong>Hybrid Optimization Score</strong> compares classical and QAOA on the "
-        "same objective. Neither is financial risk or a market prediction."
+        "matches your investment targets (0–100%). It is not financial risk or a market prediction."
         "</p>",
         unsafe_allow_html=True,
     )

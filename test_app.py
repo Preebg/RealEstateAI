@@ -24,7 +24,6 @@ with patch("streamlit.secrets", {"GEMINI_API_KEY": "fake_key"}):
         ALIGNMENT_SCORE_KEYS,
         calculate_quantum_probability,
         calculate_quantum_risk,
-        classical_baseline_score,
     )
     from engine import (
         DISCOVERY_FALLBACK_MODEL,
@@ -56,9 +55,7 @@ from qiskit_aer import AerSimulator
 
 QUANTUM_RISK_KEYS = ALIGNMENT_SCORE_KEYS
 
-CLASSICAL_RISK_KEYS = tuple(f"classical_{key}" for key in ALIGNMENT_SCORE_KEYS)
-
-ALL_RISK_KEYS = QUANTUM_RISK_KEYS + CLASSICAL_RISK_KEYS
+ALL_RISK_KEYS = QUANTUM_RISK_KEYS
 
 # Deterministic snapshots with AerSimulator(seed_simulator=42) and COBYLA (maxiter=30).
 GOLDEN_PERFECT_RISK = {
@@ -79,7 +76,7 @@ GOLDEN_AVERAGE_RISK = {
 
 
 def assert_valid_quantum_risk(test_case: unittest.TestCase, risk: dict[str, float]) -> None:
-    """All QAOA and classical breakdown fields must be finite and within [0, 100]."""
+    """All QAOA breakdown fields must be finite and within [0, 100]."""
     for key in ALL_RISK_KEYS:
         test_case.assertIn(key, risk)
         value = risk[key]
@@ -302,46 +299,24 @@ class TestAIUnderwriterEngine(unittest.TestCase):
         assert_valid_quantum_risk(self, oversaturated)
         self.assertEqual(_qaoa_subset(oversaturated), GOLDEN_PERFECT_RISK)
 
-    def test_classical_baseline_score_bounds_and_ordering(self):
-        """Classical scores stay in [0, 100] and rank perfect inputs above poor ones."""
-        perfect = classical_baseline_score(1000.0, 10.0, 10.0)
-        poor = classical_baseline_score(0.0, 0.0, 0.0)
-
-        for key in QUANTUM_RISK_KEYS:
-            self.assertGreaterEqual(perfect[key], 0.0)
-            self.assertLessEqual(perfect[key], 100.0)
-            self.assertGreaterEqual(poor[key], 0.0)
-            self.assertLessEqual(poor[key], 100.0)
-            self.assertGreater(perfect[key], poor[key])
-
-    def test_classical_vs_qaoa_bounds_ordering_and_golden_divergence(self):
-        """
-        Both methods return bounded scores, rank perfect above poor inputs,
-        and log max absolute divergence on golden fixtures.
-        """
-        log = logging.getLogger("test_app.quantum")
+    def test_quantum_risk_bounds_ordering_and_golden(self):
+        """QAOA scores are bounded, rank perfect above poor inputs, and match golden fixtures."""
         fixtures = (
             ("perfect", (1000.0, 10.0, 10.0), GOLDEN_PERFECT_RISK),
             ("average", (500.0, 5.0, 5.0), GOLDEN_AVERAGE_RISK),
         )
 
-        for label, args, golden_qaoa in fixtures:
+        for _label, args, golden_qaoa in fixtures:
             risk = calculate_quantum_risk(*args)
             assert_valid_quantum_risk(self, risk)
 
             for key in QUANTUM_RISK_KEYS:
                 self.assertAlmostEqual(risk[key], golden_qaoa[key], places=4)
 
-            max_diff = max(
-                abs(risk[key] - risk[f"classical_{key}"]) for key in QUANTUM_RISK_KEYS
-            )
-            log.info("golden_%s max_abs_classical_qaoa_diff=%.6f", label, max_diff)
-
         perfect = calculate_quantum_risk(1000.0, 10.0, 10.0)
         poor = calculate_quantum_risk(0.0, 0.0, 0.0)
         for key in QUANTUM_RISK_KEYS:
             self.assertGreater(perfect[key], poor[key])
-            self.assertGreater(perfect[f"classical_{key}"], poor[f"classical_{key}"])
 
     def test_quantum_simulator_uses_fixed_seed(self):
         """Every AerSimulator.run in the QAOA path must pass seed_simulator=42."""
@@ -931,11 +906,8 @@ class TestPropertyComparison(unittest.TestCase):
         self.assertGreater(metrics["one_year_roi"], -100)
         self.assertEqual(metrics["strategy"], "Balanced")
         self.assertIn("quantum_overall", metrics)
-        self.assertIn("classical_overall", metrics)
         self.assertGreaterEqual(metrics["quantum_overall"], 0.0)
         self.assertLessEqual(metrics["quantum_overall"], 100.0)
-        self.assertGreaterEqual(metrics["classical_overall"], 0.0)
-        self.assertLessEqual(metrics["classical_overall"], 100.0)
 
 
 class TestUserSavedProperties(unittest.TestCase):
