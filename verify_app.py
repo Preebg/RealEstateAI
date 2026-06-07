@@ -4,7 +4,7 @@ APP_PASSWORD = st.secrets["APP_PASSWORD"]
 def run_verification():
     print("Starting App...")
     # Initialize the AppTest with the main entry point
-    at = AppTest.from_file("AIUnderwriterv2.py").run()
+    at = AppTest.from_file("pages/1_Individual_Search.py").run()
 
     print("Authenticating...")
     # Set the password in the first text input and run to trigger authentication

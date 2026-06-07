@@ -1,528 +1,666 @@
+"""Global portfolio map — macro-market geospatial view of the shared knowledge base."""
+
+from __future__ import annotations
+
+import hashlib
+from typing import Any
+
+import folium
+import pandas as pd
 import streamlit as st
-import datetime 
-import pandas as pd 
-from engine import (
-    calculate_property_age_years,
-    calculate_quantum_risk,
-    get_initial_analysis,
-    get_final_analysis,
-    safe_float,
-)
-from finance import (
-    analyze_investment,
-    calculate_10yr_appreciation,
-    project_value_schedule,
-)
-from authenticate import get_logged_in_user, render_auth_sidebar
+from streamlit_folium import st_folium
+
+from authenticate import render_auth_sidebar
+from finance import analyze_investment, calculate_10yr_appreciation, calculate_one_year_roi
 from knowledge_base import (
-    compute_rent_deviation_pct,
+    _fetch_canonical_properties,
+    _normalize_record_numerics,
     get_ai_baseline_maint,
     get_ai_baseline_rent,
-    get_effective_display_maint,
-    get_effective_display_management_fee,
-    get_effective_display_rent,
-    get_effective_display_vacancy,
-    get_property_id_by_address,
-    is_rent_outlier,
-    lookup_property,
+    normalize_address_key,
+    parse_zipcode_from_address,
     render_auth_page,
-    save_knowledge_base,
-    save_user_property_override,
-    user_has_override_changes,
 )
 from market_pulse import render_market_pulse
-from property_nav import consume_map_property_selection, load_property_from_kb
-import matplotlib.pyplot as plt
-from pdf_generator import generate_property_pdf
-import tldextract
+from property_nav import queue_property_for_main_tab
 
-st.set_page_config(page_title="AI Property Scout", page_icon="🏠", layout="wide")
+st.set_page_config(page_title="AI Property Scout", page_icon="🗺️", layout="wide")
 
+# ---------------------------------------------------------------------------
+# Market fallbacks — city centers with deterministic per-address jitter
+# ---------------------------------------------------------------------------
+MARKET_CITY_CENTERS: dict[str, tuple[float, float]] = {
+    "Rochester, NY": (43.1566, -77.6088),
+    "Syracuse, NY": (43.0481, -76.1474),
+}
+
+# High-volume ZIP centroids — instant lookup, no network calls.
+ZIP_CENTROIDS: dict[str, tuple[float, float]] = {
+    "14604": (43.1547, -77.6120),
+    "14605": (43.1680, -77.5930),
+    "14606": (43.1700, -77.6600),
+    "14607": (43.1547, -77.5772),
+    "14608": (43.1480, -77.5980),
+    "14609": (43.1759, -77.5495),
+    "14610": (43.1420, -77.5500),
+    "14611": (43.1389, -77.6278),
+    "14612": (43.2600, -77.6900),
+    "14613": (43.1650, -77.6350),
+    "14614": (43.1540, -77.6050),
+    "14615": (43.2100, -77.6400),
+    "14616": (43.2300, -77.6700),
+    "14617": (43.2200, -77.5900),
+    "14618": (43.1200, -77.5400),
+    "14619": (43.1300, -77.6200),
+    "14620": (43.1287, -77.6134),
+    "14621": (43.1750, -77.6100),
+    "14622": (43.1540, -77.6200),
+    "14623": (43.0840, -77.6700),
+    "14624": (43.1200, -77.7200),
+    "14625": (43.1300, -77.5600),
+    "14626": (43.2000, -77.7000),
+    "13202": (43.0362, -76.1398),
+    "13203": (43.0580, -76.1200),
+    "13204": (43.0471, -76.1534),
+    "13205": (43.0700, -76.1000),
+    "13206": (43.0667, -76.1067),
+    "13207": (43.0400, -76.1700),
+    "13208": (43.0800, -76.1300),
+    "13209": (43.0900, -76.1800),
+    "13210": (43.0280, -76.1165),
+    "13211": (43.1000, -76.1100),
+    "13212": (43.1200, -76.1400),
+    "13214": (43.0400, -76.0800),
+    "13215": (43.0100, -76.1600),
+    # Northern Syracuse suburbs (discovery priority)
+    "13039": (43.1890, -76.1190),
+    "13041": (43.1850, -76.1720),
+    "13088": (43.1060, -76.2090),
+    "13090": (43.1650, -76.2200),
+}
+
+# Default underwriting assumptions when recomputing cash flow for ROI.
+DEFAULT_DOWN_PAYMENT_PCT = 25.0
+DEFAULT_INTEREST_RATE = 6.0
+DEFAULT_LOAN_TERM = 30
+DEFAULT_CLOSING_COSTS_PCT = 3.0
+
+SORT_OPTIONS: dict[str, str] = {
+    "Highest One-Year ROI": "one_year_roi",
+    "Lowest Quantum Risk": "quantum_success",
+    "Highest Total Value": "price",
+}
+
+JITTER_SCALE_DEGREES = 0.025
+
+# Labeled basemap — no API key required (unlike Mapbox dark-v9 in pydeck).
+FOLIUM_TILES = "CartoDB voyager"
+NY_STATE_OVERVIEW = (42.75, -76.0, 7)
+
+
+def _infer_market_city(address: str) -> str | None:
+    """Return a known market key when the address belongs to Rochester or Syracuse."""
+    lowered = address.lower()
+    if "rochester" in lowered:
+        return "Rochester, NY"
+    if "syracuse" in lowered:
+        return "Syracuse, NY"
+    return None
+
+
+def _deterministic_jitter(address: str, scale: float = JITTER_SCALE_DEGREES) -> tuple[float, float]:
+    """Stable lat/lon offsets so fallback markers do not stack on the city center."""
+    digest = hashlib.md5(address.encode("utf-8")).hexdigest()
+    seed = int(digest[:8], 16)
+    lat_offset = ((seed % 1000) / 1000.0 - 0.5) * scale
+    lon_offset = (((seed // 1000) % 1000) / 1000.0 - 0.5) * scale
+    return lat_offset, lon_offset
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _normalize_zip_code(zip_code: Any, address: str | None = None) -> str:
+    """Coerce zip_code from DB/DataFrame (float, NaN, int, str) to a 5-digit string."""
+    if zip_code is not None:
+        try:
+            if pd.isna(zip_code):
+                zip_code = None
+        except (TypeError, ValueError):
+            pass
+
+    if zip_code not in (None, ""):
+        text = str(zip_code).strip()
+        if text:
+            try:
+                return f"{int(float(text)):05d}"
+            except (TypeError, ValueError):
+                if len(text) >= 5 and text[:5].isdigit():
+                    return text[:5]
+
+    if address:
+        parsed = parse_zipcode_from_address(str(address).strip())
+        if parsed:
+            return parsed
+    return ""
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_global_portfolio_properties() -> list[dict[str, Any]]:
+    """
+    Load every canonical property row from the shared global KB.
+
+    Uses the same Supabase ``properties`` table as ``get_kb_raw_data`` / harvester
+    saves — one row per address across all users and harvest loops.
+    """
+    rows = _fetch_canonical_properties()
+    return [_normalize_record_numerics(row) for row in rows if row.get("address")]
+
+
+def _resolve_monthly_cash_flow(prop: dict[str, Any], price: float, rent: float) -> float:
+    """Return stored monthly net cash flow or recompute with default loan assumptions."""
+    if prop.get("monthly_net_cash_flow") is not None:
+        return _safe_float(prop["monthly_net_cash_flow"])
+
+    if price <= 0 or rent <= 0:
+        return 0.0
+
+    analysis = analyze_investment(
+        price=price,
+        down_payment_pct=DEFAULT_DOWN_PAYMENT_PCT,
+        interest_rate=DEFAULT_INTEREST_RATE,
+        loan_term=DEFAULT_LOAN_TERM,
+        closing_costs_pct=DEFAULT_CLOSING_COSTS_PCT,
+        tax_rate=_safe_float(prop.get("tax_rate")),
+        monthly_insurance=_safe_float(prop.get("insurance")),
+        monthly_hoa=_safe_float(prop.get("hoa")),
+        maint_percent=get_ai_baseline_maint(prop),
+        monthly_rent=rent,
+        vacancy_reserve_pct=_safe_float(prop.get("ai_vacancy_rate"), 5.0),
+        management_fee_pct=_safe_float(prop.get("ai_management_fee"), 10.0),
+    )
+    return analysis["monthly_net_cash_flow"]
+
+
+def _resolve_one_year_roi(prop: dict[str, Any], price: float, rent: float) -> float:
+    """
+    One-year ROI: (projected 1yr value gain + annual cash flow) / (down payment + closing).
+    """
+    if price <= 0:
+        return 0.0
+
+    predicted_value = _safe_float(prop.get("predicted_value"))
+    forecast_rate = _safe_float(prop.get("forecast_rate"))
+    if forecast_rate <= 0:
+        location_score = _safe_float(prop.get("location_score"), 5.0)
+        forecast_rate = calculate_10yr_appreciation(price, location_score)["annual_rate"]
+
+    monthly_cash_flow = _resolve_monthly_cash_flow(prop, price, rent)
+    return calculate_one_year_roi(
+        current_price=price,
+        predicted_value=predicted_value,
+        forecast_rate_pct=forecast_rate,
+        monthly_net_cash_flow=monthly_cash_flow,
+        down_payment_pct=DEFAULT_DOWN_PAYMENT_PCT,
+        closing_costs_pct=DEFAULT_CLOSING_COSTS_PCT,
+    )
+
+
+def build_portfolio_dataframe(properties: list[dict[str, Any]]) -> pd.DataFrame:
+    """Normalize raw KB rows into an analytics-ready DataFrame."""
+    records: list[dict[str, Any]] = []
+    for prop in properties:
+        address = str(prop.get("address") or "").strip()
+        if not address:
+            continue
+
+        price = _safe_float(prop.get("price"))
+        rent = get_ai_baseline_rent(prop)
+        monthly_cash_flow = _resolve_monthly_cash_flow(prop, price, rent)
+        one_year_roi = _resolve_one_year_roi(prop, price, rent)
+        quantum_success = _safe_float(prop.get("quantum_risk_score"))
+        category = (
+            prop.get("property_category")
+            or prop.get("property_label")
+            or "—"
+        )
+        market_city = prop.get("market_city") or _infer_market_city(address) or "—"
+        zip_code = _normalize_zip_code(prop.get("zip_code"), address)
+
+        records.append(
+            {
+                "address": address,
+                "address_key": normalize_address_key(address),
+                "zip_code": zip_code,
+                "category": str(category),
+                "price": price,
+                "rent": rent,
+                "monthly_cash_flow": monthly_cash_flow,
+                "one_year_roi": one_year_roi,
+                "quantum_success": quantum_success,
+                "market_city": str(market_city),
+            }
+        )
+
+    if not records:
+        return pd.DataFrame(
+            columns=[
+                "address",
+                "category",
+                "price",
+                "rent",
+                "monthly_cash_flow",
+                "one_year_roi",
+                "quantum_success",
+                "market_city",
+                "lat",
+                "lon",
+                "color",
+            ]
+        )
+
+    return pd.DataFrame(records)
+
+
+def _market_key_from_city(market_city: str) -> str | None:
+    """Normalize stored market_city values to MARKET_CITY_CENTERS keys."""
+    if not market_city or market_city == "—":
+        return None
+    lowered = market_city.lower()
+    if "rochester" in lowered:
+        return "Rochester, NY"
+    if "syracuse" in lowered:
+        return "Syracuse, NY"
+    return None
+
+
+def _coords_from_market_center(address: str, market_key: str) -> tuple[float, float]:
+    base_lat, base_lon = MARKET_CITY_CENTERS[market_key]
+    lat_off, lon_off = _deterministic_jitter(address)
+    return base_lat + lat_off, base_lon + lon_off
+
+
+def resolve_coordinates_local(
+    address: Any,
+    zip_code: Any,
+    market_city: Any,
+) -> tuple[float | None, float | None]:
+    """
+    Instant coordinate resolution — no network I/O.
+
+    Priority: known ZIP centroid → ZIP prefix market → address/market text.
+    """
+    normalized = str(address or "").strip()
+    if not normalized:
+        return None, None
+
+    zip_val = _normalize_zip_code(zip_code, normalized)
+    market_city_text = str(market_city or "").strip()
+
+    if zip_val in ZIP_CENTROIDS:
+        base_lat, base_lon = ZIP_CENTROIDS[zip_val]
+        lat_off, lon_off = _deterministic_jitter(normalized, scale=0.006)
+        return base_lat + lat_off, base_lon + lon_off
+
+    if zip_val.startswith("146"):
+        return _coords_from_market_center(normalized, "Rochester, NY")
+    if zip_val.startswith(("132", "130")):
+        return _coords_from_market_center(normalized, "Syracuse, NY")
+
+    market_key = _market_key_from_city(market_city_text) or _infer_market_city(normalized)
+    if market_key:
+        return _coords_from_market_center(normalized, market_key)
+
+    return None, None
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def attach_coordinates(df: pd.DataFrame) -> pd.DataFrame:
+    """Resolve lat/lon instantly from ZIP centroids and market fallbacks (no network)."""
+    if df.empty:
+        return df
+
+    enriched = df.copy()
+
+    def _resolve_row(row: pd.Series) -> pd.Series:
+        lat, lon = resolve_coordinates_local(
+            str(row["address"]),
+            row.get("zip_code"),
+            str(row["market_city"]),
+        )
+        return pd.Series({"lat": lat, "lon": lon})
+
+    coords = enriched.apply(_resolve_row, axis=1)
+    enriched["lat"] = coords["lat"]
+    enriched["lon"] = coords["lon"]
+    return enriched
+
+
+def _profitability_to_hex(
+    value: float,
+    min_val: float,
+    max_val: float,
+) -> str:
+    """Map profitability to a green (high) → amber → red (low) hex color."""
+    if max_val <= min_val:
+        return "#78dc8c"
+
+    ratio = (value - min_val) / (max_val - min_val)
+    ratio = max(0.0, min(1.0, ratio))
+
+    red = int(255 * (1.0 - ratio) + 40 * ratio)
+    green = int(90 + 165 * ratio)
+    blue = int(60 * (1.0 - ratio) + 100 * ratio)
+    return f"#{red:02x}{green:02x}{blue:02x}"
+
+
+def apply_map_colors(df: pd.DataFrame) -> pd.DataFrame:
+    """Attach per-row marker colors for folium rendering."""
+    if df.empty:
+        return df
+
+    colored = df.copy()
+    roi_values = colored["one_year_roi"].fillna(0.0)
+    min_p = float(roi_values.min())
+    max_p = float(roi_values.max())
+    colored["marker_color"] = roi_values.apply(
+        lambda v: _profitability_to_hex(float(v), min_p, max_p)
+    )
+    return colored
+
+
+def _match_click_to_address(
+    click: dict[str, Any] | None,
+    df: pd.DataFrame,
+) -> str | None:
+    """Resolve a folium map click to the nearest portfolio address."""
+    if not click or click.get("lat") is None or click.get("lng") is None:
+        return None
+
+    click_lat = float(click["lat"])
+    click_lng = float(click["lng"])
+    mappable = df.dropna(subset=["lat", "lon"])
+    if mappable.empty:
+        return None
+
+    distances = (mappable["lat"] - click_lat) ** 2 + (mappable["lon"] - click_lng) ** 2
+    nearest_idx = distances.idxmin()
+    if float(distances.loc[nearest_idx]) > 0.0004:
+        return None
+    return str(mappable.loc[nearest_idx, "address"])
+
+
+def _build_folium_map(df: pd.DataFrame) -> folium.Map:
+    """Interactive labeled map with profitability-colored property markers."""
+    mappable = df.dropna(subset=["lat", "lon"])
+    if mappable.empty:
+        lat, lon, zoom = NY_STATE_OVERVIEW
+        return folium.Map(location=[lat, lon], zoom_start=zoom, tiles=FOLIUM_TILES)
+
+    bounds = [
+        [float(mappable["lat"].min()), float(mappable["lon"].min())],
+        [float(mappable["lat"].max()), float(mappable["lon"].max())],
+    ]
+    center_lat = float(mappable["lat"].mean())
+    center_lon = float(mappable["lon"].mean())
+
+    fmap = folium.Map(
+        location=[center_lat, center_lon],
+        zoom_start=8,
+        tiles=FOLIUM_TILES,
+        control_scale=True,
+    )
+    fmap.fit_bounds(bounds, padding=(60, 60))
+
+    for row in mappable.itertuples(index=False):
+        tooltip = (
+            f"<b>{row.address}</b><br/>"
+            f"Price: ${row.price:,.0f}<br/>"
+            f"Rent: ${row.rent:,.0f}/mo<br/>"
+            f"Cash Flow: ${row.monthly_cash_flow:,.0f}/mo<br/>"
+            f"1-Yr ROI: {row.one_year_roi:.2f}%<br/>"
+            f"Quantum: {row.quantum_success:.1f}%<br/>"
+            f"<i>Click to select</i>"
+        )
+        popup = (
+            f"<div style='min-width:220px'>"
+            f"<b>{row.address}</b><br/>"
+            f"{row.category}<br/>"
+            f"Price: ${row.price:,.0f}<br/>"
+            f"Rent: ${row.rent:,.0f}/mo<br/>"
+            f"Cash Flow: ${row.monthly_cash_flow:,.0f}/mo<br/>"
+            f"1-Yr ROI: {row.one_year_roi:.2f}%<br/>"
+            f"Quantum Success: {row.quantum_success:.1f}%"
+            f"</div>"
+        )
+        folium.CircleMarker(
+            location=[float(row.lat), float(row.lon)],
+            radius=6,
+            popup=folium.Popup(popup, max_width=320),
+            tooltip=tooltip,
+            color="#1a1a2e",
+            weight=1,
+            fill=True,
+            fill_color=getattr(row, "marker_color", "#78dc8c"),
+            fill_opacity=0.88,
+        ).add_to(fmap)
+
+    return fmap
+
+
+def sort_portfolio(df: pd.DataFrame, sort_key: str) -> pd.DataFrame:
+    """Sort the portfolio frame according to the selected analytical vector."""
+    if df.empty:
+        return df
+
+    if sort_key == "quantum_success":
+        # Lowest quantum risk → highest success probability first
+        return df.sort_values("quantum_success", ascending=False, kind="mergesort")
+    if sort_key == "one_year_roi":
+        return df.sort_values("one_year_roi", ascending=False, kind="mergesort")
+    return df.sort_values("price", ascending=False, kind="mergesort")
+
+
+def render_portfolio_map(df: pd.DataFrame) -> str | None:
+    """
+    Labeled folium map with hover tooltips and click-to-select.
+
+    Returns the selected address when the user clicks a marker.
+    """
+    mappable = df.dropna(subset=["lat", "lon"])
+    if mappable.empty:
+        st.info("No geocoded properties to display on the map yet.")
+        return None
+
+    fmap = _build_folium_map(df)
+    map_state = st_folium(
+        fmap,
+        width=None,
+        height=520,
+        returned_objects=["last_object_clicked"],
+        use_container_width=True,
+        key="portfolio_map",
+    )
+    return _match_click_to_address(map_state.get("last_object_clicked"), df)
+
+
+def compute_top_market(df: pd.DataFrame) -> str:
+    """Return the market city with the highest average one-year ROI."""
+    if df.empty or "market_city" not in df.columns:
+        return "—"
+
+    market_stats = (
+        df[df["market_city"] != "—"]
+        .groupby("market_city")["one_year_roi"]
+        .mean()
+    )
+    if market_stats.empty:
+        return "—"
+    return str(market_stats.idxmax())
+
+
+# ---------------------------------------------------------------------------
+# Page entry
+# ---------------------------------------------------------------------------
 if not render_auth_page():
     st.stop()
 
-_map_address = consume_map_property_selection()
-if _map_address:
-    st.session_state["address_input"] = _map_address
-    _map_loaded = load_property_from_kb(_map_address)
-    if _map_loaded:
-        st.session_state["property_data"] = _map_loaded
-        st.toast(f"Loaded {_map_address} from Portfolio Map", icon="🗺️")
-    else:
-        st.warning(
-            f"Could not load cached data for **{_map_address}**. "
-            "Run **Analyze Property** to research it."
-        )
+st.title("🗺️ Global Portfolio Map")
+st.caption(
+    "Macro-market view of every property in the shared knowledge base — "
+    "sorted, filtered, and plotted by one-year ROI and quantum success."
+)
 
-#Helper function to clean source names for display
-
-def get_pretty_label(url):
-    try:
-        # Peel back the brand name (Zillow, Redfin, etc.)
-        ext = tldextract.extract(url)
-        brand = ext.domain.capitalize()
-        if brand and brand != "Google":
-            return f"{brand}.{ext.suffix}"
-        return "View Source"
-    except Exception:
-        return "View Source"
-
-# 1. Setup the Web Interface
-st.title("🏠 AI Property Analyzer")
-st.write("Enter details below to get an AI-calculated Risk-Adjusted ROI.")
-
-# 2. Sidebar for Inputs (Instead of hardcoded variables)
 with st.sidebar:
     render_auth_sidebar()
     st.divider()
     render_market_pulse()
-    st.divider()
-    st.header("Investment Parameters")
-    down_payment=st.number_input("Expected Down Payment (%)", value=25)
-    loan_term=st.number_input("Loan Term (yrs)", value=30)
-    interest_rate=st.number_input("Your Mortgage Rate (%)", value=6.000)
-address = st.text_input(label='Property Address', key='address_input', placeholder="123 Main St, New York, NY")# 3. The Analysis Logic
-if "property_data" not in st.session_state:
-    st.session_state["property_data"] = None
 
-if st.button("Analyze Property"):
-    if address:
-        st.warning(
-            "**LEGAL DISCLOSURE:** This is an AI-powered educational tool. Quantum-probabilistic scores are simulations, not financial guarantees. Consult a professional before making investment decisions in NY, NC, FL, TX, AL,  PA, or SC."
-        )
-        st.session_state.property_data = None
+properties = load_global_portfolio_properties()
+portfolio_df = build_portfolio_dataframe(properties)
 
-        with st.status("🔍 Researching property and estimating value...") as status:
-            # Instant Pull: check Knowledge Base before any AI engine calls
-            cached = lookup_property(address)
-            if cached:
-                status.update(
-                    label="⚡ Instant Pull from Knowledge Base",
-                    state="running",
-                )
-                initial_data = cached
-                from_kb = True
-                research_results = None
-            else:
-                status.update(
-                    label="🔍 No cache hit — running AI research...",
-                    state="running",
-                )
-                initial_data, from_kb, research_results = get_initial_analysis(address)
+if portfolio_df.empty:
+    st.warning("No properties found in the global knowledge base yet.")
+    st.stop()
 
-            # Exception Case: Price is 0
-            if not from_kb and safe_float(initial_data.get("price")) == 0:
-                st.error("Error Fetching Property Data... The AI could not find a valid listing price. Please verify the address and try again.")
-                st.stop()
+# --- Filters & sorting ---
+st.subheader("🔎 Portfolio Controls")
+filter_col1, filter_col2 = st.columns([2, 1])
 
-            # Immediate Display of Summary and Forecast
-            st.markdown("### 📝 AI Property Summary")
-            st.write(initial_data.get("summary", "No summary available."))
+price_values = portfolio_df["price"].dropna()
+price_min = int(price_values.min()) if not price_values.empty else 0
+price_max = int(price_values.max()) if not price_values.empty else 1_000_000
+if price_max <= price_min:
+    price_max = price_min + 1
 
-            loc_score = safe_float(initial_data.get("location_score"))
-            pred_val = safe_float(initial_data.get("predicted_value"))
-            forecast = calculate_10yr_appreciation(pred_val, loc_score)
-
-            st.subheader("📈 10-Year Appreciation Forecast")
-            st.write(f"**Estimated Value in 2034:** ${forecast['future_value']:,.2f}")
-            st.write(f"**Projected Annual Growth:** {forecast['annual_rate']:.2f}%")
-
-            status.update(label="✅ Verifying data and calculating ROI...", state="running")
-            final_result = get_final_analysis(initial_data, address, research_results)
-            st.session_state.property_data = final_result
-            done_label = (
-                "✅ Loaded from Knowledge Base (Instant Pull)"
-                if from_kb
-                else "✅ Analysis Complete!"
-            )
-            status.update(label=done_label, state="complete")
-
-    else:
-        st.warning("Please enter a property address.")
-if st.session_state.property_data:
-    property_info=st.session_state.property_data
-
-        
-    # Extract values from the dictionary 
-    price=safe_float(property_info.get("price"))
-    monthly_rent=get_effective_display_rent(property_info)
-    tax_rate=safe_float(property_info.get("tax_rate"))
-    monthly_HOA=safe_float(property_info.get("hoa"))
-    monthly_insurance=safe_float(property_info.get("insurance"))
-    ai_maint_percent=get_effective_display_maint(property_info)
-
-    # HITL: preserve AI baselines; official rent/maint are written on user save.
-    if property_info.get("original_ai_rent") is None:
-        property_info["original_ai_rent"] = monthly_rent
-    if property_info.get("original_ai_maint") is None:
-        property_info["original_ai_maint"] = ai_maint_percent
-    original_ai_rent = get_ai_baseline_rent(property_info)
-    original_ai_maint = get_ai_baseline_maint(property_info)
-    
-    # New Predicted Value Fields
-    predicted_value = safe_float(property_info.get("predicted_value"))
-    prediction_reasoning = property_info.get("prediction_reasoning", "No reasoning provided.")
-    location_score = safe_float(property_info.get("location_score"))
-    
-    ai_vacancy_baseline = safe_float(property_info.get("ai_vacancy_rate"))
-    ai_mgmt_baseline = safe_float(property_info.get("ai_management_fee"))
-    appreciation_forecast = safe_float(property_info.get("appreciation_forecast"))
-    forecast_rate = safe_float(property_info.get("forecast_rate"))
-    
-    sources=property_info.get("sources", [])
-    from_kb = property_info.get("from_kb", False)
-    property_id = property_info.get("id") or get_property_id_by_address(address)
-
-    st.sidebar.markdown("---")
-    st.sidebar.write("### 🤖 AI Baselines (read-only)")
-    st.sidebar.caption(f"Rent: ${original_ai_rent:,.0f}/mo")
-    st.sidebar.caption(f"Maintenance: {original_ai_maint:.1f}%")
-    st.sidebar.caption(f"Vacancy: {ai_vacancy_baseline:.1f}%")
-    st.sidebar.caption(f"Management: {ai_mgmt_baseline:.1f}%")
-
-    # Personal assumptions — each user can adjust without changing shared AI data.
-    st.sidebar.markdown("---")
-    st.sidebar.write("### 🛠️ Your Assumptions")
-    
-    rent_min, rent_max = 800.0, 4000.0
-    clamped_rent = max(rent_min, min(rent_max, float(get_effective_display_rent(property_info))))
-    final_monthly_rent = st.sidebar.slider(
-        "Adjust Monthly Rent ($)", 
-        rent_min, rent_max, 
-        value = clamped_rent,
-        step=25.0,
-        help="The AI suggested the initial value, but you can override it here."
-    )
-    
-    maint_min, maint_max = 1.0, 15.0
-    clamped_maint = max(maint_min, min(maint_max, float(ai_maint_percent)))
-    final_maint_percent = st.sidebar.slider(
-        "Adjust Maintenance %", 
-        maint_min, maint_max, 
-        value = clamped_maint,
-        step=0.1,
-        help="The AI suggested the initial value, but you can override it here."
+with filter_col1:
+    min_price = st.slider(
+        "Minimum Acquisition Price ($)",
+        min_value=price_min,
+        max_value=price_max,
+        value=price_min,
+        step=max(1_000, (price_max - price_min) // 100 or 1_000),
+        format="$%d",
     )
 
-    vac_min, vac_max = 1.0, 10.0
-    clamped_vac = max(vac_min, min(vac_max, get_effective_display_vacancy(property_info)))
-    user_vacancy_reserve = st.sidebar.slider(
-        "Your Vacancy Reserve %", 
-        vac_min, vac_max, 
-        value = clamped_vac,
-        step=0.1,         
-        help="Your personal vacancy assumption (AI baseline shown above)."
+with filter_col2:
+    sort_label = st.selectbox(
+        "Primary Sort Vector",
+        options=list(SORT_OPTIONS.keys()),
+        index=0,
     )
+sort_key = SORT_OPTIONS[sort_label]
 
-    mgmt_min, mgmt_max = 8.0, 12.0
-    clamped_mgmt = max(mgmt_min, min(mgmt_max, get_effective_display_management_fee(property_info)))
-    user_management_fee = st.sidebar.slider(
-        "Your Management Fee %", 
-        mgmt_min, mgmt_max, 
-        value = clamped_mgmt,
-        step=0.1,           
-        help="Your personal management fee assumption (AI baseline shown above)."
+filtered_df = portfolio_df[portfolio_df["price"] >= min_price].copy()
+sorted_df = sort_portfolio(filtered_df, sort_key)
+
+geo_df = attach_coordinates(sorted_df)
+map_df = apply_map_colors(geo_df)
+
+# --- Map ---
+st.subheader("🌐 Geospatial Portfolio View")
+st.caption(
+    "Hover a marker for quick metrics. Click a property, then open the full "
+    "underwriting view on the main analyzer tab."
+)
+
+if "map_selected_address" not in st.session_state:
+    st.session_state["map_selected_address"] = None
+
+clicked_address = render_portfolio_map(map_df)
+if clicked_address:
+    st.session_state["map_selected_address"] = clicked_address
+
+selected_address = st.session_state.get("map_selected_address")
+if selected_address:
+    selected_row = map_df[map_df["address"] == selected_address]
+    if not selected_row.empty:
+        row = selected_row.iloc[0]
+        st.markdown("#### 📍 Selected Property")
+        sel_col1, sel_col2, sel_col3, sel_col4, sel_col5 = st.columns(5)
+        sel_col1.metric("List Price", f"${row['price']:,.0f}")
+        sel_col2.metric("Monthly Rent", f"${row['rent']:,.0f}")
+        sel_col3.metric("Monthly Cash Flow", f"${row['monthly_cash_flow']:,.0f}")
+        sel_col4.metric("One-Year ROI", f"{row['one_year_roi']:.2f}%")
+        sel_col5.metric("Quantum Success", f"{row['quantum_success']:.1f}%")
+        st.write(f"**{row['address']}** · {row['category']} · {row['market_city']}")
+
+        open_col, clear_col = st.columns([2, 1])
+        with open_col:
+            if st.button(
+                "Open Full Analysis →",
+                type="primary",
+                use_container_width=True,
+            ):
+                queue_property_for_main_tab(selected_address)
+                st.switch_page("pages/1_Individual_Search.py")
+        with clear_col:
+            if st.button("Clear Selection", use_container_width=True):
+                st.session_state["map_selected_address"] = None
+                st.rerun()
+
+# --- Aggregates ---
+st.subheader("📊 Market Ledger")
+metric_col1, metric_col2, metric_col3 = st.columns(3)
+
+avg_roi = map_df["one_year_roi"].mean() if not map_df.empty else 0.0
+top_market = compute_top_market(map_df)
+
+metric_col1.metric("Total Assets Evaluated", f"{len(map_df):,}")
+metric_col2.metric("Market-Wide Avg 1-Yr ROI", f"{avg_roi:.2f}%")
+metric_col3.metric("Top Performing Market", top_market)
+
+# --- Detail table ---
+st.subheader("📋 Sorted Property Ledger")
+display_df = map_df[
+    [
+        "address",
+        "category",
+        "price",
+        "rent",
+        "monthly_cash_flow",
+        "one_year_roi",
+        "quantum_success",
+    ]
+].rename(
+    columns={
+        "address": "Address",
+        "category": "Category",
+        "price": "Price",
+        "rent": "Monthly Rent",
+        "monthly_cash_flow": "Monthly Cash Flow",
+        "one_year_roi": "One-Year ROI",
+        "quantum_success": "Quantum Success Metric",
+    }
+)
+
+st.dataframe(
+    display_df,
+    use_container_width=True,
+    hide_index=True,
+    column_config={
+        "Price": st.column_config.NumberColumn(format="$%d"),
+        "Monthly Rent": st.column_config.NumberColumn(format="$%d"),
+        "Monthly Cash Flow": st.column_config.NumberColumn(format="$%d"),
+        "One-Year ROI": st.column_config.NumberColumn(format="%.2f%%"),
+        "Quantum Success Metric": st.column_config.NumberColumn(format="%.1f%%"),
+    },
+)
+
+geocoded_count = int(map_df["lat"].notna().sum())
+if geocoded_count < len(map_df):
+    st.caption(
+        f"{geocoded_count:,} of {len(map_df):,} properties mapped. "
+        "Unplaced addresses are outside Rochester/Syracuse ZIP markets."
     )
-
-    closing_min, closing_max = 0.0, 10.0
-    clamped_closing = max(closing_min, min(closing_max, 3.0))
-    user_closing_costs_pct = st.sidebar.slider(
-        "Adjust Closing Costs (%)",
-        closing_min, closing_max,
-        value=clamped_closing,
-        step=0.1,
-        help = "Standard closing costs are around 3-5% of the purchase price."
+else:
+    st.caption(
+        "Map uses CartoDB Voyager tiles (state/city labels, no API key). "
+        "Coordinates resolved from ZIP centroids and market fallbacks."
     )
-        
-    analysis = analyze_investment(
-        price=price,
-        down_payment_pct=down_payment,
-        interest_rate=interest_rate,
-        loan_term=int(loan_term),
-        closing_costs_pct=user_closing_costs_pct,
-        tax_rate=tax_rate,
-        monthly_insurance=monthly_insurance,
-        monthly_hoa=monthly_HOA,
-        maint_percent=final_maint_percent,
-        monthly_rent=final_monthly_rent,
-        vacancy_reserve_pct=user_vacancy_reserve,
-        management_fee_pct=user_management_fee,
-    )
-    monthly_mortgage = analysis["monthly_mortgage"]
-    user_closing_costs_total = analysis["closing_costs_total"]
-    op_ex = analysis["operating_expenses"]
-    operating_expenses = op_ex["total"]
-    monthly_taxes = op_ex["monthly_taxes"]
-    calculated_monthly_maint = op_ex["monthly_maintenance"]
-    actual_vacancy_reserve = op_ex["vacancy_reserve"]
-    actual_management_fee = op_ex["management_fee"]
-    total_monthly_expenses = analysis["total_monthly_expenses"]
-    monthly_net_cash_flow = analysis["monthly_net_cash_flow"]
-    total_investment = analysis["total_investment"]
-    cap_rate = analysis["cap_rate"]
-    cash_on_cash = analysis["cash_on_cash"]
-
-    st.sidebar.caption(f"Estimated Closing Costs: ${user_closing_costs_total:,.2f}")
-
-    branding_label = property_info.get("property_label", "Balanced")
-
-    with st.spinner("⚛️ Running Quantum Simulation..."):
-        quantum_risk = calculate_quantum_risk(
-            monthly_net_cash_flow,
-            forecast_rate,
-            location_score,
-        )
-        property_info["quantum_risk_score"] = quantum_risk["overall_success_pct"]
-        property_info["quantum_risk"] = quantum_risk
-
-    # 4. Display Results
-    st.divider()
-    header_col1, header_col2, header_col3 = st.columns([2, 1, 1])
-    with header_col1:
-        st.subheader("📊 Analysis Overview")
-
-    with header_col2:
-        st.metric(
-            label="⚛️ Cash Flow Success",
-            value=f"{quantum_risk['cashflow_success_pct']:.1f}%",
-            help="Quantum probability of positive monthly cash-flow returns.",
-        )
-    with header_col3:
-        st.metric(
-            label="📈 Appreciation Success",
-            value=f"{quantum_risk['appreciation_success_pct']:.1f}%",
-            help="Quantum probability of appreciation-driven wealth growth.",
-        )
-
-    qcol1, qcol2 = st.columns(2)
-    with qcol1:
-        st.metric(
-            label="💰 Combined Wealth Success",
-            value=f"{quantum_risk['combined_wealth_success_pct']:.1f}%",
-            help="Chance of making money from both cash flow and appreciation together.",
-        )
-    with qcol2:
-        st.metric(
-            label="⚛️ Overall Quantum Success",
-            value=f"{quantum_risk['overall_success_pct']:.1f}%",
-            help="Full QAOA alignment across cash flow, appreciation, and location.",
-        )
-
-    tab1 = st.tabs(["📋 Detailed Metrics"])[0]
-
-    with tab1:
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Monthly Take-Home", f"${monthly_net_cash_flow:,.2f}")
-        col2.metric("Risk-Adjusted Cap Rate", f"{cap_rate:.2f}%")
-        col3.metric("Cash On Cash", f"{cash_on_cash:.2f}%")
-        
-        st.markdown(f"**Strategy Status:** :blue[{branding_label}]")
-        st.subheader("🎯 AI Valuation")
-        st.info(f"**Predicted Market Value:** ${predicted_value:,.2f}\n\n**Reasoning:** {prediction_reasoning}")
-        
-        with st.expander("📈 10-Year Appreciation Forecast"):
-            st.write(f"**Estimated Value in 2036:** ${appreciation_forecast:,.2f}")
-            st.write(f"**Projected Annual Growth:** {forecast_rate:.2f}%")
-            st.info(f"**Logic:** The forecast uses a compound growth formula. The rate is dynamically adjusted based on the Location Score ({location_score}/10).")
-            st.markdown("**Methodology:** This app utilizes a Compound Growth Model to project future value based on historical neighborhood trends and location-weighted growth rates.")
-            
-            start_year = datetime.datetime.now().year
-            years = list(range(start_year, start_year + 11))
-            values = project_value_schedule(predicted_value, forecast_rate)
-            
-            fig, ax = plt.subplots(figsize=(8, 4))
-            ax.plot(years, values, marker='o', color='#2ecc71', linewidth=2)
-            ax.set_title("Projected Property Value Growth", fontsize=14)
-            ax.set_xlabel("Year")
-            ax.set_ylabel("Estimated Value ($)")
-            ax.grid(True, linestyle='--', alpha=0.6)
-            ax.ticklabel_format(style='plain', axis='y')
-            
-            st.pyplot(fig)
-
-    # Display the summary from the AI search
-    st.markdown("### 📝 AI Property Summary")
-    st.write(property_info.get("summary", "No summary available."))
-    
-    # 5. The Cash Flow Table (Hidden by Default)
-    with st.expander("View Detailed Monthly Breakdown"):
-        st.write("Property Listed Price: ${:,.2f}".format(price))
-        st.write("Monthly Cash Flow")
-
-        table_data={
-            "Description": [
-                "Gross Monthly Rent",
-                "Mortgage Payment (P&I)",
-                "Property Taxes",
-                "Insurance",
-                "HOA Fee",
-                "Maintenance (CapEx)",
-                "Vacancy Reserve",  
-                "Management Fee",
-                "Total Costs",
-                "Cash Flow Monthly"             
-                            
-            ],
-            "Amount": [
-                f"${final_monthly_rent:,.2f}",
-                f"-${monthly_mortgage:,.2f}",
-                f"-${monthly_taxes:,.2f}",
-                f"-${monthly_insurance:,.2f}",
-                f"-${monthly_HOA:,.2f}",
-                f"-${calculated_monthly_maint:,.2f}",
-                f"-${actual_vacancy_reserve:,.2f}",
-                f"-${actual_management_fee:,.2f}",
-                f"${total_monthly_expenses:,.2f}",
-                f"${monthly_net_cash_flow:,.2f}"
-
-            ]
-        }
-        df= pd.DataFrame(table_data)
-        st.table(df)
-
-        property_age = calculate_property_age_years(property_info)
-        if property_age is not None:
-            st.info(f"Property Age: {property_age} years.")
-        else:
-            st.info("Property Age: Unknown")
-        st.info(f"Total Investment: ${total_investment:,.2f}")
-        st.caption("Disclaimer: This is an AI-powered tool for educational purposes. Always verify financial data with a professional before making investment decisions.")
-        st.sidebar.write(f"💸 Total Cash Required: **${total_investment:,.2f}**")
-        
-        investment_params = {
-            "Down Payment": f"{down_payment}%",
-            "Interest Rate": f"{interest_rate}%",
-            "Loan Term": f"{loan_term} Years"
-        }
-
-        pdf_metrics = {
-            "Risk-Adjusted Cap Rate": f"{cap_rate:.2f}%",
-            "Cash on Cash Return": f"{cash_on_cash:.2f}%",
-            "Monthly Net Cash Flow": f"${monthly_net_cash_flow:,.2f}",
-            "Total Cash Required": f"${total_investment:,.2f}"
-        }
-
-        # The PDF Button
-        st.write("---")
-        pdf_bytes = generate_property_pdf(
-            address,
-            property_info,
-            pdf_metrics,
-            table_data,
-            investment_params,
-            location_score,
-            quantum_risk=quantum_risk,
-        )
-
-        st.download_button(
-            label="📩 Download Full PDF Report",
-            data=pdf_bytes,
-            file_name=f"Analysis_{address.replace(' ', '_')}.pdf",
-            mime="application/pdf"
-        )
-
-    has_assumption_changes = user_has_override_changes(
-        property_info,
-        rent=final_monthly_rent,
-        maint_percent=final_maint_percent,
-        vacancy_rate=user_vacancy_reserve,
-        management_fee=user_management_fee,
-    )
-
-    st.divider()
-    if from_kb:
-        st.subheader("💾 Your Saved Assumptions")
-        if property_info.get("has_user_override"):
-            st.info("You have saved personal assumptions for this property.")
-        else:
-            st.info(
-                "Shared AI property data is loaded. Adjust sliders and save "
-                "**your** rent, fees, and maintenance assumptions below."
-            )
-    else:
-        st.subheader("Improve the Algorithm")
-        st.info(
-            "Save this property to the shared catalog and store **your** "
-            "personal underwriting assumptions."
-        )
-        sources = property_info.get("sources", [])
-        with st.popover("View Data Sources 🔗"):
-            if not sources:
-                st.write("No sources found.")
-            else:
-                for link in set(sources):
-                    pretty_name = get_pretty_label(link)
-                    st.markdown(f"- [{pretty_name}]({link})")
-
-    rent_deviation = compute_rent_deviation_pct(original_ai_rent, final_monthly_rent)
-    hitl_is_outlier = is_rent_outlier(original_ai_rent, final_monthly_rent)
-    if hitl_is_outlier:
-        st.warning(
-            f"Your rent (${final_monthly_rent:,.0f}) differs from the AI suggestion "
-            f"(${original_ai_rent:,.0f}) by **{rent_deviation:.0f}%**. "
-            "Please add a brief **Override Note** below so we can learn from expert judgment."
-        )
-    override_notes = st.text_area(
-        "Override Note (required for large rent changes)",
-        value=property_info.get("override_notes") or "",
-        placeholder="e.g. Section 8 contract, major renovation, or comp mismatch in AI research.",
-        disabled=not hitl_is_outlier,
-        help="Required when your rent override is more than 50% away from the AI estimate.",
-    )
-
-    save_label = (
-        "💾 Save My Assumptions"
-        if from_kb
-        else "✅ Save Property + My Assumptions"
-    )
-    if st.button(save_label, disabled=from_kb and not has_assumption_changes):
-        if hitl_is_outlier and not str(override_notes).strip():
-            st.error("An override note is required when rent differs by more than 50% from the AI.")
-            st.stop()
-
-        user = get_logged_in_user()
-        if not user:
-            st.error("You must be signed in to save.")
-            st.stop()
-
-        override_payload = {
-            "rent": final_monthly_rent,
-            "maint_percent": final_maint_percent,
-            "vacancy_rate": user_vacancy_reserve,
-            "management_fee": user_management_fee,
-            "is_outlier": hitl_is_outlier,
-            "override_notes": str(override_notes).strip(),
-        }
-
-        if from_kb:
-            pid = property_id or get_property_id_by_address(address)
-            if not pid:
-                st.error("Could not resolve property ID for this address.")
-                st.stop()
-            result = save_user_property_override(
-                user["id"], pid, override_payload
-            )
-        else:
-            property_info["address"] = address
-            property_info["from_kb"] = True
-            property_info["location_score"] = location_score
-            property_info["appreciation_forecast"] = appreciation_forecast
-            property_info["property_category"] = branding_label
-            property_info.update(override_payload)
-            result = save_knowledge_base(property_info, user_id=user["id"])
-
-        if result is None:
-            st.error("Save failed. Check your connection and try again.")
-            st.stop()
-
-        st.cache_data.clear()
-        st.success(
-            f"Saved your assumptions for {address}."
-            if from_kb
-            else f"Saved {address} to the shared catalog with your assumptions."
-        )
-        st.rerun()
-    elif from_kb and not has_assumption_changes:
-        st.caption("Adjust a slider above to enable saving your personal assumptions.")
-    
-   

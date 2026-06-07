@@ -91,6 +91,7 @@ HOT_MARKETS: list[tuple[str, str, int]] = [
 ]
 DISCOVERY_MARKET_KEYS = frozenset(name for name, _, _ in HOT_MARKETS)
 MAX_DISCOVERY_LISTINGS = 25
+MIN_PREFERRED_YEAR_BUILT = 1965
 MAX_DISCOVERY_PRICE = 250_000
 MAX_SYNTHESIS_PRICE = 400_000
 MAX_API_RETRIES = 5
@@ -655,6 +656,8 @@ Rules:
 - Include suburbs and townships — not just the core city (e.g. Henrietta/Penfield/Fairport
   count as Rochester; Cicero/Clay/Liverpool/North Syracuse count as Syracuse).
 - You MUST return {MAX_DISCOVERY_LISTINGS} distinct listings when possible. Do not stop at 7–13.
+- Prefer homes built in {MIN_PREFERRED_YEAR_BUILT} or later when year built is visible on the listing.
+  If choosing between similar listings, pick newer construction over pre-{MIN_PREFERRED_YEAR_BUILT}.
 - Use real street addresses with city/town, state, and ZIP when available.
 - list_price must be the active asking price as a plain number (no $ or commas).
 - city must be the parent metro key: one of {market_keys} (NOT the suburb name).{exclude_block}"""
