@@ -7,13 +7,11 @@ import hashlib
 import os
 import secrets
 import datetime
-from html import escape
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
 
 import streamlit as st
-import streamlit.components.v1 as components
 from postgrest.exceptions import APIError
 from supabase import Client, create_client
 
@@ -24,104 +22,67 @@ log = configure_logging("authenticate")
 _GOOGLE_G_LOGO_PATH = Path(__file__).resolve().parent / "assets" / "google-g-logo.png"
 
 
-@st.cache_data(show_spinner=False)
-def _google_g_logo_data_uri() -> str:
-    """Inline the Google G logo so the sign-in button works on Streamlit Cloud."""
-    if not _GOOGLE_G_LOGO_PATH.is_file():
-        return ""
-    encoded = base64.b64encode(_GOOGLE_G_LOGO_PATH.read_bytes()).decode("ascii")
-    return f"data:image/png;base64,{encoded}"
-
-
 def _render_google_signin_button(oauth_url: str) -> None:
     """Google-branded sign-in control with the official-style G logo."""
-    logo_uri = _google_g_logo_data_uri()
-    safe_url = escape(oauth_url, quote=True)
-    logo_markup = (
-        f'<img src="{logo_uri}" alt="" class="google-signin-btn__logo" />'
-        if logo_uri
-        else '<span class="google-signin-btn__logo-fallback" aria-hidden="true">G</span>'
+    st.markdown(
+        """
+        <style>
+        div[data-testid="stVerticalBlockBorderWrapper"]:has(.google-signin-shell-marker) {
+            background: #ffffff;
+            border-color: #dadce0 !important;
+            border-radius: 8px !important;
+            box-shadow: 0 1px 2px rgba(60, 64, 67, 0.08);
+            padding: 0.15rem 0.35rem 0.15rem 0.75rem !important;
+        }
+        div[data-testid="stVerticalBlockBorderWrapper"]:has(.google-signin-shell-marker)
+            div[data-testid="stLinkButton"] a {
+            background: transparent !important;
+            border: none !important;
+            box-shadow: none !important;
+            color: #3c4043 !important;
+            font-weight: 500 !important;
+            min-height: 40px !important;
+            justify-content: center;
+        }
+        div[data-testid="stVerticalBlockBorderWrapper"]:has(.google-signin-shell-marker)
+            div[data-testid="stLinkButton"] a:hover {
+            background: transparent !important;
+            color: #202124 !important;
+        }
+        div[data-testid="stVerticalBlockBorderWrapper"]:has(.google-signin-shell-marker)
+            div[data-testid="stLinkButton"] a:active {
+            color: #202124 !important;
+        }
+        div[data-testid="stVerticalBlockBorderWrapper"]:has(.google-signin-shell-marker)
+            div[data-testid="stImage"] img {
+            margin-top: 0.35rem;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
     )
 
-    components.html(
-        f"""
-        <!DOCTYPE html>
-        <html lang="en">
-        <head>
-            <meta charset="utf-8" />
-            <style>
-            html, body {{
-                margin: 0;
-                padding: 0;
-                background: transparent;
-            }}
-            .google-signin-btn {{
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                gap: 12px;
-                width: 100%;
-                min-height: 44px;
-                padding: 0 16px;
-                border: 1px solid #dadce0;
-                border-radius: 8px;
-                background: #ffffff;
-                color: #3c4043 !important;
-                font-family: "Google Sans", "Segoe UI", Roboto, Arial, sans-serif;
-                font-size: 15px;
-                font-weight: 500;
-                line-height: 1;
-                text-decoration: none !important;
-                box-shadow: 0 1px 2px rgba(60, 64, 67, 0.08);
-                transition: background 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
-                box-sizing: border-box;
-            }}
-            .google-signin-btn:hover {{
-                background: #f8f9fa;
-                border-color: #c6c9cc;
-                box-shadow: 0 1px 3px rgba(60, 64, 67, 0.14);
-                color: #202124 !important;
-            }}
-            .google-signin-btn:active {{
-                background: #f1f3f4;
-                box-shadow: inset 0 1px 2px rgba(60, 64, 67, 0.12);
-            }}
-            .google-signin-btn__logo {{
-                width: 20px;
-                height: 20px;
-                display: block;
-                flex: 0 0 20px;
-                object-fit: contain;
-            }}
-            .google-signin-btn__logo-fallback {{
-                width: 20px;
-                height: 20px;
-                display: inline-flex;
-                align-items: center;
-                justify-content: center;
-                border-radius: 50%;
-                background: #4285f4;
-                color: #ffffff;
-                font-size: 12px;
-                font-weight: 700;
-                flex: 0 0 20px;
-            }}
-            .google-signin-btn__label {{
-                white-space: nowrap;
-            }}
-            </style>
-        </head>
-        <body>
-            <a class="google-signin-btn" href="{safe_url}" target="_top">
-                {logo_markup}
-                <span class="google-signin-btn__label">Continue with Google</span>
-            </a>
-        </body>
-        </html>
-        """,
-        height=52,
-        scrolling=False,
-    )
+    with st.container(border=True):
+        st.markdown('<span class="google-signin-shell-marker"></span>', unsafe_allow_html=True)
+        logo_col, btn_col = st.columns([0.1, 0.9], gap="small", vertical_alignment="center")
+        with logo_col:
+            if _GOOGLE_G_LOGO_PATH.is_file():
+                st.image(str(_GOOGLE_G_LOGO_PATH), width=22)
+            else:
+                st.markdown(
+                    '<span style="display:inline-flex;width:22px;height:22px;align-items:center;'
+                    'justify-content:center;border-radius:50%;background:#4285f4;color:#fff;'
+                    'font-size:12px;font-weight:700;">G</span>',
+                    unsafe_allow_html=True,
+                )
+        with btn_col:
+            st.link_button(
+                "Continue with Google",
+                oauth_url,
+                use_container_width=True,
+                type="secondary",
+                key="google_oauth_link",
+            )
 
 
 class StreamlitAuthStorage:
