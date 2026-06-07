@@ -1000,3 +1000,8 @@ button[data-testid="baseButton-secondary"][arial-label="Open terms popup"] p{
             st.caption("Already have an account? Use the **Log in** tab.")
 
     return False
+
+
+def render_auth_page() -> bool:
+    """Login / sign-up gate for app entry. Returns True when authenticated."""
+    return render_login_page()

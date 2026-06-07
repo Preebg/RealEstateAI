@@ -806,17 +806,7 @@ def get_telemetry_stats(user_id: str | None = None) -> dict[str, Any]:
     }
 
 
-def render_auth_page() -> bool:
-    """
-    Login / sign-up screen for the app.
-    Returns True when the user is authenticated (caller may continue rendering).
-    """
-    if st is None:
-        raise RuntimeError("render_auth_page requires Streamlit.")
-
-    from authenticate import render_login_page
-
-    return render_login_page()
+from authenticate import render_auth_page  # noqa: E402 — re-export for page imports
 
 
 __all__ = [
