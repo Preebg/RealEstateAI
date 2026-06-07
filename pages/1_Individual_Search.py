@@ -32,6 +32,7 @@ from knowledge_base import (
 )
 from market_pulse import render_market_pulse
 from property_nav import consume_map_property_selection, load_property_from_kb
+from ui_theme import render_page_hero
 import matplotlib.pyplot as plt
 from pdf_generator import generate_property_pdf
 import tldextract
@@ -66,8 +67,10 @@ def get_pretty_label(url):
         return "View Source"
 
 # 1. Setup the Web Interface
-st.title("🔍 Individual Property Search")
-st.write("Enter an address below to get an AI-calculated Risk-Adjusted ROI.")
+render_page_hero(
+    "🔍 Individual Property Search",
+    "Research any address with AI underwriting, quantum risk, and exportable reports.",
+)
 
 # 2. Sidebar for Inputs (Instead of hardcoded variables)
 with st.sidebar:

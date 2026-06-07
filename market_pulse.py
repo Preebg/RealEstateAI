@@ -4,35 +4,46 @@ from __future__ import annotations
 
 import streamlit as st
 
-from engine import HOT_MARKETS
 from knowledge_base import get_market_pulse
 
-_MARKET_LABELS = {name: scope.split("(")[0].strip() for name, scope, _ in HOT_MARKETS}
+MARKET_DISPLAY_NAMES: dict[str, str] = {
+    "Rochester": "Rochester, NY",
+    "Syracuse": "Syracuse, NY",
+    "Charlotte": "Charlotte, NC",
+    "Raleigh": "Raleigh, NC",
+    "Charleston": "Charleston, SC",
+    "Ohio": "Ohio",
+    "DFW": "Dallas–Fort Worth",
+    "Austin": "Austin, TX",
+}
+
+
+def _render_market_card(name: str, stats: dict[str, float | int | str]) -> None:
+    label = MARKET_DISPLAY_NAMES.get(name, name)
+    count = int(stats["count"])
+    st.markdown(f'<div class="pulse-market-title">{label}</div>', unsafe_allow_html=True)
+    if count == 0:
+        st.caption("No properties yet")
+        return
+    st.metric("Tracked", count)
+    st.metric("Avg price", f"${stats['avg_price']:,.0f}")
+    st.caption(f"Avg quantum {stats['avg_quantum']:.1f}% · {stats['top_label']}")
 
 
 def render_market_pulse() -> None:
-    """Display per-metro hot-market stats."""
-    st.subheader("📡 Hot Market Pulse")
+    """Display per-metro hot-market stats in the sidebar."""
+    st.markdown("##### 📡 Hot Market Pulse")
     pulse = get_market_pulse()
-    priority, expansion = HOT_MARKETS[:2], HOT_MARKETS[2:]
 
-    st.caption("Priority: Upstate NY • Expansion: Southeast, Ohio, Texas")
-    cols = st.columns(2)
-    for col, (name, _, _) in zip(cols, priority):
-        stats = pulse[name]
+    upstate = ("Rochester", "Syracuse")
+    col_r, col_s = st.columns(2)
+    for col, city in ((col_r, upstate[0]), (col_s, upstate[1])):
         with col:
-            st.markdown(f"**{_MARKET_LABELS.get(name, name)}**")
-            st.metric("Properties Tracked", stats["count"])
-            st.metric("Avg List Price", f"${stats['avg_price']:,.0f}")
-            st.metric("Avg Quantum Score", f"{stats['avg_quantum']:.1f}%")
-            st.caption(f"Top strategy: {stats['top_label']}")
+            _render_market_card(city, pulse[city])
 
-    with st.expander("Expansion markets"):
-        exp_cols = st.columns(3)
-        for idx, (name, _, _) in enumerate(expansion):
-            stats = pulse[name]
-            with exp_cols[idx % 3]:
-                st.markdown(f"**{_MARKET_LABELS.get(name, name)}**")
-                st.metric("Tracked", stats["count"])
-                st.metric("Avg Price", f"${stats['avg_price']:,.0f}")
-                st.caption(f"Quantum: {stats['avg_quantum']:.1f}%")
+    st.markdown('<div class="pulse-market-sub">Other active markets</div>', unsafe_allow_html=True)
+    other = [name for name in MARKET_DISPLAY_NAMES if name not in upstate]
+    other_cols = st.columns(3)
+    for idx, name in enumerate(other):
+        with other_cols[idx % 3]:
+            _render_market_card(name, pulse[name])
