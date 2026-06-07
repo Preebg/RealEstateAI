@@ -639,8 +639,17 @@ def _configure_stdio() -> None:
 
 def main() -> None:
     _configure_stdio()
-    admin_user_id = require_harvest_config()
-    run_harvester_pipeline(admin_user_id)
+    print("Harvester starting (headless CLI)...", flush=True)
+    try:
+        admin_user_id = require_harvest_config()
+        run_harvester_pipeline(admin_user_id)
+        print("Harvester finished successfully.", flush=True)
+    except SystemExit:
+        raise
+    except Exception as exc:
+        report_error(log, "harvest_fatal", exc)
+        print(f"Harvester failed: {exc}", flush=True)
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -724,4 +733,7 @@ if __name__ == "__main__":
     if _running_under_streamlit():
         _render_streamlit_app()
     else:
-        main()
+        try:
+            main()
+        except SystemExit as exc:
+            raise SystemExit(exc.code) from exc

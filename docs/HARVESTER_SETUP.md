@@ -67,6 +67,7 @@ Copy `.streamlit/secrets.toml` from your dev machine **or** create it with:
 | `GEMINI_API_KEY` | Yes |
 | `SUPABASE_URL` | Yes |
 | `SUPABASE_KEY` | Yes (anon/publishable) |
+| `SUPABASE_SERVICE_ROLE_KEY` | **Yes for Task Scheduler / CLI** |
 | `ADMIN_USER_ID` | Yes (your Auth User UID) |
 
 `OAUTH_REDIRECT_URL` is only needed for the Streamlit login app, not the harvester.
@@ -109,9 +110,12 @@ Logs append to `harvester_scheduled.log` in the project root.
 3. **Triggers** → New → **Daily**, repeat every **1 hour 30 minutes** for duration **Indefinitely**
 4. **Actions** → New
    - Action: Start a program
-   - Program: `C:\RealEstateAI\venv\Scripts\python.exe`
-   - Arguments: `harvester.py`
+   - Program: `powershell.exe`
+   - Arguments: `-NoProfile -ExecutionPolicy Bypass -File "C:\RealEstateAI\scripts\run_harvester.ps1"`
    - Start in: `C:\RealEstateAI`
+
+   Do **not** point the task directly at `python.exe harvester.py` — use the script above so
+   logs capture errors and Streamlit stderr warnings do not kill the run.
 5. **Conditions**: Uncheck “Start only on AC power” if on a laptop
 6. Save
 
@@ -163,6 +167,8 @@ Same `ADMIN_USER_ID` in secrets. This is for manual “Run Full Harvest” only,
 
 | Symptom | Fix |
 |---------|-----|
+| Log shows only `=== Harvest started ===` | Use `scripts\run_harvester.ps1` in Task Scheduler (not raw `python.exe`). Check log for `exit 1` and stderr. |
+| `SUPABASE_SERVICE_ROLE_KEY is required` | Add service role key to `.streamlit/secrets.toml` on the harvest machine |
 | `ADMIN_USER_ID is not set` | Fill UUID in `.streamlit/secrets.toml` |
 | `Harvest save skipped` | Same as above; restart after saving secrets |
 | Runs but no DB rows | Check Supabase RLS policies / use service role for harvest |
