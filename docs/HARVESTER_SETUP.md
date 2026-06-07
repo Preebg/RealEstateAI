@@ -108,14 +108,19 @@ Logs append to `harvester_scheduled.log` in the project root.
    - Run whether user is logged on or not (if you want it while logged off, provide password)
    - Run with highest privileges: optional
 3. **Triggers** → New → **Daily**, repeat every **1 hour 30 minutes** for duration **Indefinitely**
-4. **Actions** → New
-   - Action: Start a program
+4. **Actions** → New (pick **one**)
+
+   **Option A — CMD wrapper (most reliable for Task Scheduler):**
+   - Program: `C:\RealEstateAI\scripts\run_harvester.cmd`
+   - Arguments: *(leave empty)*
+   - Start in: `C:\RealEstateAI`
+
+   **Option B — PowerShell:**
    - Program: `powershell.exe`
    - Arguments: `-NoProfile -ExecutionPolicy Bypass -File "C:\RealEstateAI\scripts\run_harvester.ps1"`
    - Start in: `C:\RealEstateAI`
 
-   Do **not** point the task directly at `python.exe harvester.py` — use the script above so
-   logs capture errors and Streamlit stderr warnings do not kill the run.
+   Do **not** point the task directly at `python.exe harvester.py` — logs will miss errors.
 5. **Conditions**: Uncheck “Start only on AC power” if on a laptop
 6. Save
 
@@ -167,7 +172,7 @@ Same `ADMIN_USER_ID` in secrets. This is for manual “Run Full Harvest” only,
 
 | Symptom | Fix |
 |---------|-----|
-| Log shows only `=== Harvest started ===` | Use `scripts\run_harvester.ps1` in Task Scheduler (not raw `python.exe`). Check log for `exit 1` and stderr. |
+| Log shows only `=== Harvest started ===` then nothing | Harvest may still be running (discovery takes minutes). New scripts stream output live — pull latest `scripts\run_harvester.cmd`. Wait for `=== Harvest finished ===`. If missing after 30+ min, check venv/secrets paths in log. |
 | `SUPABASE_SERVICE_ROLE_KEY is required` | Add service role key to `.streamlit/secrets.toml` on the harvest machine |
 | `ADMIN_USER_ID is not set` | Fill UUID in `.streamlit/secrets.toml` |
 | `Harvest save skipped` | Same as above; restart after saving secrets |
