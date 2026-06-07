@@ -716,5 +716,32 @@ class TestOAuthRedirectUrl(unittest.TestCase):
                     self.assertEqual(_get_redirect_url(), "http://localhost:8501")
 
 
+class TestHeadlessDetection(unittest.TestCase):
+    def test_streamlit_script_context_is_not_headless(self):
+        from unittest.mock import MagicMock, patch
+
+        with patch.dict("os.environ", {}, clear=True):
+            with patch(
+                "streamlit.runtime.scriptrunner.get_script_run_ctx",
+                return_value=MagicMock(),
+            ):
+                from authenticate import _headless_mode, in_streamlit_app
+
+                self.assertFalse(_headless_mode())
+                self.assertTrue(in_streamlit_app())
+
+    def test_cli_without_streamlit_context_is_headless(self):
+        from unittest.mock import patch
+
+        with patch.dict("os.environ", {}, clear=True):
+            with patch(
+                "streamlit.runtime.scriptrunner.get_script_run_ctx",
+                return_value=None,
+            ):
+                from authenticate import _headless_mode
+
+                self.assertTrue(_headless_mode())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -9,7 +9,7 @@ from uuid import UUID
 from postgrest.exceptions import APIError
 
 from app_logging import configure_logging, report_error
-from authenticate import get_db_client, get_logged_in_user
+from authenticate import get_db_client, get_logged_in_user, in_streamlit_app
 from finance import (
     normalize_monthly_insurance,
     normalize_percent_rate,
@@ -69,7 +69,7 @@ def get_client():
 def _resolve_user_id(user_id: str | None) -> str | None:
     if user_id and is_valid_uuid(user_id):
         return str(user_id).strip()
-    if os.environ.get("STREAMLIT_RUNTIME_ENV"):
+    if in_streamlit_app():
         user = get_logged_in_user()
         return user["id"] if user else None
     return None

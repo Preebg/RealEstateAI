@@ -49,7 +49,21 @@ def _get_secret(name: str) -> str:
 
 def _headless_mode() -> bool:
     """True for CLI harvester and other non-Streamlit runs."""
-    return not os.environ.get("STREAMLIT_RUNTIME_ENV")
+    if os.environ.get("STREAMLIT_RUNTIME_ENV"):
+        return False
+    try:
+        from streamlit.runtime.scriptrunner import get_script_run_ctx
+
+        if get_script_run_ctx() is not None:
+            return False
+    except Exception:
+        pass
+    return True
+
+
+def in_streamlit_app() -> bool:
+    """True when code is executing inside a Streamlit app runtime."""
+    return not _headless_mode()
 
 
 def _get_optional_secret(name: str) -> str | None:
@@ -447,7 +461,7 @@ def _persist_session(session: Any) -> None:
     st.session_state["sb_access_token"] = session.access_token
     st.session_state["sb_refresh_token"] = session.refresh_token
     st.session_state["user"] = {
-        "id": session.user.id,
+        "id": str(session.user.id),
         "email": session.user.email or "",
     }
     st.session_state.pop("pkce_code_verifier", None)
@@ -800,6 +814,13 @@ def render_login_page() -> bool:
 
     if get_logged_in_user():
         return True
+
+    handoff_id = _query_param("auth_handoff")
+    if handoff_id:
+        st.warning(
+            "Google sign-in could not be completed in this browser session. "
+            "Click **Refresh Google sign-in link**, then **Continue with Google** again."
+        )
 
     left, center, right = st.columns([1, 1.2, 1])
     with center:
