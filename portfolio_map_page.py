@@ -29,11 +29,55 @@ from ui_theme import render_page_hero
 
 # ---------------------------------------------------------------------------
 # Market fallbacks — city centers with deterministic per-address jitter
+# Keys match engine.DISCOVERY_MARKET_KEYS (Rochester, Charlotte, DFW, …).
 # ---------------------------------------------------------------------------
 MARKET_CITY_CENTERS: dict[str, tuple[float, float]] = {
-    "Rochester, NY": (43.1566, -77.6088),
-    "Syracuse, NY": (43.0481, -76.1474),
+    "Rochester": (43.1566, -77.6088),
+    "Syracuse": (43.0481, -76.1474),
+    "Charlotte": (35.2271, -80.8431),
+    "Raleigh": (35.7796, -78.6382),
+    "Charleston": (32.7765, -79.9311),
+    "Ohio": (40.0634, -82.9001),
+    "DFW": (32.7767, -96.7970),
+    "Austin": (30.2672, -97.7431),
 }
+
+# Ohio harvest scope spans several metros — place by suburb/city when possible.
+OHIO_METRO_KEYWORDS: tuple[tuple[str, tuple[float, float]], ...] = (
+    ("cleveland", (41.4993, -81.6944)),
+    ("lakewood", (41.4810, -81.7980)),
+    ("parma", (41.4048, -81.7229)),
+    ("columbus", (39.9612, -82.9988)),
+    ("dublin", (40.0992, -83.1141)),
+    ("westerville", (40.1262, -82.9291)),
+    ("cincinnati", (39.1031, -84.5120)),
+    ("mason", (39.3601, -84.3099)),
+    ("fairfield", (39.3459, -84.5603)),
+    ("hamilton", (39.3995, -84.5613)),
+)
+
+# ZIP-prefix → discovery market when no centroid is in ZIP_CENTROIDS.
+_ZIP_PREFIX_MARKETS: tuple[tuple[str, str], ...] = (
+    ("146", "Rochester"),
+    ("132", "Syracuse"),
+    ("130", "Syracuse"),
+    ("282", "Charlotte"),
+    ("280", "Charlotte"),
+    ("276", "Raleigh"),
+    ("275", "Raleigh"),
+    ("294", "Charleston"),
+    ("441", "Ohio"),
+    ("440", "Ohio"),
+    ("432", "Ohio"),
+    ("430", "Ohio"),
+    ("452", "Ohio"),
+    ("451", "Ohio"),
+    ("752", "DFW"),
+    ("761", "DFW"),
+    ("750", "DFW"),
+    ("787", "Austin"),
+    ("786", "Austin"),
+)
 
 # High-volume ZIP centroids — instant lookup, no network calls.
 ZIP_CENTROIDS: dict[str, tuple[float, float]] = {
@@ -100,13 +144,11 @@ NY_STATE_OVERVIEW = (42.75, -76.0, 7)
 
 
 def _infer_market_city(address: str) -> str | None:
-    """Return a known market key when the address belongs to Rochester or Syracuse."""
-    lowered = address.lower()
-    if "rochester" in lowered:
-        return "Rochester, NY"
-    if "syracuse" in lowered:
-        return "Syracuse, NY"
-    return None
+    """Return a discovery market key inferred from address text."""
+    from engine import _match_market_from_text
+
+    matched = _match_market_from_text(address)
+    return matched or None
 
 
 def _deterministic_jitter(address: str, scale: float = JITTER_SCALE_DEGREES) -> tuple[float, float]:
@@ -284,20 +326,33 @@ def build_portfolio_dataframe(properties: list[dict[str, Any]]) -> pd.DataFrame:
 
 def _market_key_from_city(market_city: str) -> str | None:
     """Normalize stored market_city values to MARKET_CITY_CENTERS keys."""
+    from engine import DISCOVERY_MARKET_KEYS, _match_market_from_text
+
     if not market_city or market_city == "—":
         return None
-    lowered = market_city.lower()
-    if "rochester" in lowered:
-        return "Rochester, NY"
-    if "syracuse" in lowered:
-        return "Syracuse, NY"
-    return None
+    text = str(market_city).strip()
+    if text in DISCOVERY_MARKET_KEYS:
+        return text
+    matched = _match_market_from_text(text)
+    return matched or None
 
 
 def _coords_from_market_center(address: str, market_key: str) -> tuple[float, float]:
     base_lat, base_lon = MARKET_CITY_CENTERS[market_key]
     lat_off, lon_off = _deterministic_jitter(address)
     return base_lat + lat_off, base_lon + lon_off
+
+
+def _coords_for_market(address: str, market_key: str) -> tuple[float, float]:
+    """Market-center fallback; Ohio listings use sub-metro centers when matched."""
+    if market_key == "Ohio":
+        lowered = address.lower()
+        for keyword, center in OHIO_METRO_KEYWORDS:
+            if keyword in lowered:
+                base_lat, base_lon = center
+                lat_off, lon_off = _deterministic_jitter(address)
+                return base_lat + lat_off, base_lon + lon_off
+    return _coords_from_market_center(address, market_key)
 
 
 def resolve_coordinates_local(
@@ -322,14 +377,13 @@ def resolve_coordinates_local(
         lat_off, lon_off = _deterministic_jitter(normalized, scale=0.006)
         return base_lat + lat_off, base_lon + lon_off
 
-    if zip_val.startswith("146"):
-        return _coords_from_market_center(normalized, "Rochester, NY")
-    if zip_val.startswith(("132", "130")):
-        return _coords_from_market_center(normalized, "Syracuse, NY")
+    for prefix, market_key in _ZIP_PREFIX_MARKETS:
+        if zip_val.startswith(prefix):
+            return _coords_for_market(normalized, market_key)
 
     market_key = _market_key_from_city(market_city_text) or _infer_market_city(normalized)
-    if market_key:
-        return _coords_from_market_center(normalized, market_key)
+    if market_key and market_key in MARKET_CITY_CENTERS:
+        return _coords_for_market(normalized, market_key)
 
     return None, None
 

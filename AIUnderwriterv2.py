@@ -7,6 +7,7 @@ import streamlit as st
 from authenticate import render_auth_page
 from app_nav import INDIVIDUAL_SEARCH_PAGE, MAP_OPEN_ADDRESS_KEY, consume_nav_target
 from share_access import consume_guest_landing_address, is_guest_viewer
+from validation.backtest import render_backtest_page
 import importlib
 import ui_theme
 
@@ -71,7 +72,7 @@ nav_pages = [
         url_path="compare",
     ),
     st.Page(
-        "pages/3_Model_Validation.py",
+        render_backtest_page,
         title="Model Validation",
         icon="📊",
         url_path="model-validation",
