@@ -80,6 +80,10 @@ def sync_quantum_recompute_queue(
 def _run_comps_task(address: str, property_info: dict[str, Any]) -> None:
     updated = fetch_comparable_properties(address, property_info)
     property_info.update(updated)
+    property_info["address"] = address
+    from knowledge_base import persist_comps_to_canonical
+
+    persist_comps_to_canonical(property_info)
     if property_info.pop("_forecast_display_cache", None) is not None:
         queue = list(st.session_state.get("deferred_tasks") or [])
         if "forecast_chart" not in queue:

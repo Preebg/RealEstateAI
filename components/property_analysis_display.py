@@ -295,6 +295,7 @@ def render_analysis_results(
             guest_mode=guest_mode,
             share_property_id=share_property_id,
             from_kb=from_kb,
+            property_info=property_info,
         )
 
     quantum_ready = isinstance(quantum_risk, dict) and bool(quantum_risk)

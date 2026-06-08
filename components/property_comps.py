@@ -66,9 +66,13 @@ def render_property_comps_section(
         with st.spinner("Searching for comparable sales in the area..."):
             updated = fetch_comparable_properties(address, property_info)
             property_info.update(updated)
+            property_info["address"] = address
             property_info.pop("_forecast_display_cache", None)
             property_info.pop("quantum_risk", None)
             property_info.pop("quantum_risk_score", None)
+            from knowledge_base import persist_comps_to_canonical
+
+            persist_comps_to_canonical(property_info)
             st.session_state.property_data = property_info
             st.session_state.quantum_finance_sig = None
             queue = list(st.session_state.get("deferred_tasks") or [])

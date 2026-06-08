@@ -891,6 +891,48 @@ def save_canonical_property(
     return response
 
 
+def persist_comps_to_canonical(
+    property_data: dict[str, Any],
+    *,
+    show_errors: bool = False,
+) -> bool:
+    """
+    Upsert comps_analysis (and adjusted predicted_value) on the canonical property row.
+
+    No-op when comps are missing or the address is not yet in the shared catalog.
+    """
+    comps = property_data.get("comps_analysis")
+    if not isinstance(comps, dict) or not comps.get("comparable_properties"):
+        return False
+
+    address = str(property_data.get("address") or "").strip()
+    if not address:
+        return False
+
+    property_id = property_data.get("id") or get_property_id_by_address(address)
+    if not property_id:
+        return False
+
+    uid = get_admin_uid()
+    if not uid:
+        from authenticate import get_logged_in_user
+
+        user = get_logged_in_user()
+        uid = user["id"] if user else None
+    if not uid:
+        return False
+
+    payload = dict(property_data)
+    payload["address"] = address
+    payload.setdefault("from_kb", True)
+
+    result = save_canonical_property(payload, user_id=uid, show_errors=show_errors)
+    if result is not None:
+        invalidate_kb_cache()
+        return True
+    return False
+
+
 def save_user_property_override(
     user_id: str,
     property_id: str,
@@ -1544,6 +1586,7 @@ __all__ = [
     "get_kb_raw_data",
     "lookup_property",
     "save_canonical_property",
+    "persist_comps_to_canonical",
     "save_user_property_override",
     "save_knowledge_base",
     "MAX_SAVED_PROPERTIES",

@@ -2006,6 +2006,63 @@ class TestDeferredAnalysis(unittest.TestCase):
         self.assertIn("quantum", queue)
 
 
+class TestPersistCompsToCanonical(unittest.TestCase):
+    def test_persist_skips_without_comps(self):
+        from knowledge_base import persist_comps_to_canonical
+
+        self.assertFalse(persist_comps_to_canonical({"address": "1 Main St"}))
+
+    def test_persist_skips_without_catalog_property(self):
+        from unittest.mock import patch
+
+        from knowledge_base import persist_comps_to_canonical
+
+        with patch("knowledge_base.get_property_id_by_address", return_value=None):
+            saved = persist_comps_to_canonical(
+                {
+                    "address": "1 Main St",
+                    "comps_analysis": {"comparable_properties": [{"sale_price": 1}]},
+                }
+            )
+        self.assertFalse(saved)
+
+    def test_persist_upserts_comps_for_catalog_property(self):
+        from unittest.mock import MagicMock, patch
+
+        from knowledge_base import persist_comps_to_canonical
+
+        mock_client = MagicMock()
+        mock_table = MagicMock()
+        mock_client.table.return_value = mock_table
+        mock_table.upsert.return_value.execute.return_value = MagicMock(data=[{}])
+        property_id = "7f35bc1e-9de5-484d-8f73-27fd3da733eb"
+        comps = {
+            "comparable_properties": [{"address": "2 Oak", "sale_price": 200000}],
+            "comp_count": 1,
+        }
+
+        with (
+            patch("knowledge_base.get_client", return_value=mock_client),
+            patch("knowledge_base.get_property_id_by_address", return_value=property_id),
+            patch("knowledge_base.get_admin_uid", return_value=property_id),
+            patch("knowledge_base.invalidate_kb_cache"),
+        ):
+            saved = persist_comps_to_canonical(
+                {
+                    "address": "1 Main St, Rochester, NY 14607",
+                    "price": 180000,
+                    "predicted_value": 190000,
+                    "comps_analysis": comps,
+                }
+            )
+
+        self.assertTrue(saved)
+        payload = mock_table.upsert.call_args.args[0]
+        self.assertEqual(payload["comps_analysis"], comps)
+        self.assertEqual(payload["predicted_value"], 190000)
+        self.assertTrue(payload["from_kb"])
+
+
 class TestCompsAnalysis(unittest.TestCase):
     def test_evaluate_flags_undervaluation(self):
         from comps_analysis import evaluate_comps_against_subject, normalize_comps_payload
