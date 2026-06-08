@@ -389,6 +389,8 @@ async def _synthesize_harvest_property_with_fallback(
     model_state: _HarvesterModelState,
     rate_limiter: engine.ModelRateLimiter,
     session: engine.GenaiSession,
+    *,
+    geospatial: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     model = await model_state.get_synthesis_model()
     try:
@@ -400,32 +402,32 @@ async def _synthesize_harvest_property_with_fallback(
             user_id=admin_user_id,
             rate_limiter=rate_limiter,
             session=session,
+            geospatial=geospatial,
         )
     except _HARVESTER_API_ERRORS as exc:
-        if (
-            engine.is_daily_quota_exhausted(exc)
-            and model != engine.SYNTHESIS_FALLBACK_MODEL
-        ):
+        if engine.is_daily_quota_exhausted(exc) and model != engine.SYNTHESIS_FALLBACK_MODELS[-1]:
+            fallback_model = engine.SYNTHESIS_FALLBACK_MODELS[-1]
             log.warning(
                 "rpd_model_fallback",
                 stage="synthesis",
                 from_model=model,
-                to_model=engine.SYNTHESIS_FALLBACK_MODEL,
+                to_model=fallback_model,
                 error=str(exc),
             )
             print(
                 f"  [synthesis] daily quota exhausted for {model} "
-                f"— switching to {engine.SYNTHESIS_FALLBACK_MODEL}"
+                f"— switching to {fallback_model}"
             )
-            await model_state.set_synthesis_fallback(engine.SYNTHESIS_FALLBACK_MODEL)
+            await model_state.set_synthesis_fallback(fallback_model)
             return await engine.synthesize_harvest_property_async(
                 address,
                 research,
                 market_city,
-                model=engine.SYNTHESIS_FALLBACK_MODEL,
+                model=fallback_model,
                 user_id=admin_user_id,
                 rate_limiter=rate_limiter,
                 session=session,
+                geospatial=geospatial,
             )
         raise
 
@@ -438,20 +440,46 @@ async def _synthesize_listing(
     model_state: _HarvesterModelState,
     rate_limiter: engine.ModelRateLimiter,
     session: engine.GenaiSession,
+    *,
+    geospatial_budget: engine.GroundingRpdBudget | None = None,
 ) -> None:
     """Stage 3 + finance + quantum + KB save for one property."""
     address = job.address
     market_city = job.market_city
     print(f"  [synthesis] START {address} ({market_city})")
 
+    print(f"  [geocode] START {address} — Maps + Search grounding agents")
+    geospatial = await engine.run_geospatial_enrichment_async(
+        address,
+        market_city=market_city,
+        budget=geospatial_budget,
+        rate_limiter=rate_limiter,
+        session=session,
+    )
+    enriched_research = dict(job.research)
+    if geospatial.get("environmental_risk"):
+        enriched_research["environmental_risk"] = geospatial["environmental_risk"]
+    if geospatial.get("latitude") is not None:
+        enriched_research["latitude"] = geospatial["latitude"]
+        enriched_research["longitude"] = geospatial["longitude"]
+    if geospatial.get("latitude") is not None:
+        print(
+            f"  [geocode] DONE {address} — "
+            f"{geospatial['latitude']:.5f}, {geospatial['longitude']:.5f} "
+            f"({geospatial.get('geocode_confidence', 'low')})"
+        )
+    else:
+        print(f"  [geocode] SKIP {address} — coordinates unresolved")
+
     final_data = await _synthesize_harvest_property_with_fallback(
         address,
-        job.research,
+        enriched_research,
         market_city,
         admin_user_id,
         model_state,
         rate_limiter,
         session,
+        geospatial=geospatial,
     )
     async with report_lock:
         report["synthesized"] += 1
@@ -517,6 +545,8 @@ async def _run_synthesis_safe(
     model_state: _HarvesterModelState,
     rate_limiter: engine.ModelRateLimiter,
     session: engine.GenaiSession,
+    *,
+    geospatial_budget: engine.GroundingRpdBudget | None = None,
 ) -> None:
     """Stage 3 wrapper that records synthesis failures in the harvest report."""
     try:
@@ -528,6 +558,7 @@ async def _run_synthesis_safe(
             model_state,
             rate_limiter,
             session,
+            geospatial_budget=geospatial_budget,
         )
     except Exception as exc:
         if isinstance(exc, KeyboardInterrupt):
@@ -547,6 +578,8 @@ async def _research_and_schedule_synthesis(
     rate_limiter: engine.ModelRateLimiter,
     session: engine.GenaiSession,
     synthesis_tasks: list[asyncio.Task[None]],
+    *,
+    geospatial_budget: engine.GroundingRpdBudget | None = None,
 ) -> None:
     """Run research for one listing; start synthesis immediately when it passes filters."""
     address = str(listing.get("address", "")).strip() or "(missing address)"
@@ -582,6 +615,7 @@ async def _research_and_schedule_synthesis(
                 model_state,
                 rate_limiter,
                 session,
+                geospatial_budget=geospatial_budget,
             ),
             name=f"synthesis:{job.address}",
         )
@@ -639,6 +673,7 @@ async def run_harvester_pipeline_async(admin_user_id: str) -> dict[str, Any]:
 
     session = engine.create_genai_session()
     rate_limiter = engine.ModelRateLimiter(requests_per_minute=engine.HARVESTER_RPM_PER_MODEL)
+    geospatial_budget = engine.GroundingRpdBudget()
     report_lock = asyncio.Lock()
     model_state = _HarvesterModelState(synthesis_model=engine.SYNTHESIS_MODEL)
     synthesis_tasks: list[asyncio.Task[None]] = []
@@ -665,6 +700,7 @@ async def run_harvester_pipeline_async(admin_user_id: str) -> dict[str, Any]:
                     rate_limiter,
                     session,
                     synthesis_tasks,
+                    geospatial_budget=geospatial_budget,
                 ),
                 name=f"research:{address or 'unknown'}",
             )

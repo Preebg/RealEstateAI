@@ -293,6 +293,14 @@ CANONICAL_PROPERTY_COLUMNS = (
     "original_ai_rent",
     "original_ai_maint",
     "comps_analysis",
+    "latitude",
+    "longitude",
+    "geocode_confidence",
+    "geocode_source",
+    "geocode_model",
+    "maps_place_id",
+    "maps_uri",
+    "environmental_risk",
 )
 
 
@@ -752,6 +760,8 @@ def _prepare_canonical_payload(property_data: dict[str, Any], user_id: str) -> d
             "monthly_net_cash_flow",
             "insurance",
             "hoa",
+            "latitude",
+            "longitude",
         ],
     )
 

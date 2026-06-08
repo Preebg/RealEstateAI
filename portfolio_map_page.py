@@ -443,6 +443,11 @@ def build_portfolio_dataframe(properties: list[dict[str, Any]]) -> pd.DataFrame:
         year_built = int(_safe_float(year_raw)) if year_raw not in (None, "", 0) else pd.NA
         location_score = _safe_float(prop.get("location_score"))
 
+        stored_lat = prop.get("latitude")
+        stored_lon = prop.get("longitude")
+        lat_val = float(stored_lat) if stored_lat not in (None, "") else None
+        lon_val = float(stored_lon) if stored_lon not in (None, "") else None
+
         records.append(
             {
                 "address": address,
@@ -458,6 +463,10 @@ def build_portfolio_dataframe(properties: list[dict[str, Any]]) -> pd.DataFrame:
                 "state_code": str(state_code),
                 "year_built": year_built,
                 "location_score": location_score,
+                "lat": lat_val,
+                "lon": lon_val,
+                "environmental_risk": prop.get("environmental_risk"),
+                "geocode_confidence": prop.get("geocode_confidence"),
             }
         )
 
@@ -553,7 +562,7 @@ MAP_MARKER_CLUSTER_THRESHOLD = 75
 
 
 def attach_coordinates(df: pd.DataFrame) -> pd.DataFrame:
-    """Resolve lat/lon instantly from ZIP centroids and market fallbacks (no network)."""
+    """Prefer Maps-grounded lat/lon; fall back to ZIP centroids and market centers."""
     if df.empty:
         return df
 
@@ -561,6 +570,12 @@ def attach_coordinates(df: pd.DataFrame) -> pd.DataFrame:
     latitudes: list[float | None] = []
     longitudes: list[float | None] = []
     for row in enriched.itertuples(index=False):
+        stored_lat = getattr(row, "lat", None)
+        stored_lon = getattr(row, "lon", None)
+        if stored_lat is not None and stored_lon is not None:
+            latitudes.append(float(stored_lat))
+            longitudes.append(float(stored_lon))
+            continue
         lat, lon = resolve_coordinates_local(
             str(row.address),
             getattr(row, "zip_code", None),
@@ -908,6 +923,14 @@ def _build_folium_map(
             f"Alignment: {row.quantum_success:.1f}%<br/>"
             f"<i>Click to select</i>"
         )
+        env = getattr(row, "environmental_risk", None)
+        env_line = ""
+        if isinstance(env, dict) and env.get("level"):
+            env_score = env.get("score")
+            env_line = (
+                f"Environmental risk: {env.get('level')}"
+                f"{f' ({env_score:.1f}/10)' if env_score is not None else ''}<br/>"
+            )
         popup = (
             f"<div style='min-width:220px'>"
             f"<b>{row.address}</b><br/>"
@@ -916,7 +939,8 @@ def _build_folium_map(
             f"Rent: ${row.rent:,.0f}/mo<br/>"
             f"Cash Flow: ${row.monthly_cash_flow:,.0f}/mo<br/>"
             f"1-Yr ROI: {row.one_year_roi:.2f}%<br/>"
-            f"Quantum Alignment Score: {row.quantum_success:.1f}%"
+            f"Quantum Alignment Score: {row.quantum_success:.1f}%<br/>"
+            f"{env_line}"
             f"</div>"
         )
         folium.CircleMarker(

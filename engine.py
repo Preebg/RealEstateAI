@@ -58,15 +58,37 @@ _MODEL_API_SLUGS: dict[str, str] = {
 DISCOVERY_FALLBACK_MODEL = DISCOVERY_FALLBACK_MODELS[-1]
 RESEARCH_MODEL = "gemma-4-31b-it"
 RESEARCH_FALLBACK_MODEL = "gemma-4-21b-it"
-SYNTHESIS_MODEL = "gemini-3.1-flash-lite-preview"
-SYNTHESIS_FALLBACK_MODEL = "gemma-4-26b-a4b-it"
+SYNTHESIS_MODEL = "gemini-3-flash-preview"
+SYNTHESIS_FALLBACK_MODELS: tuple[str, ...] = (
+    "gemini-3.1-flash-lite-preview",
+    "gemma-4-26b-a4b-it",
+)
+SYNTHESIS_MODEL_CHAIN: tuple[str, ...] = (
+    SYNTHESIS_MODEL,
+    *SYNTHESIS_FALLBACK_MODELS,
+)
+# Backward-compatible alias for harvester RPD fallback.
+SYNTHESIS_FALLBACK_MODEL = SYNTHESIS_FALLBACK_MODELS[0]
+
+# Geospatial agent chain — map + search grounding on Gemini flash tiers.
+GEOCODING_MODEL_CHAIN: tuple[str, ...] = (
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+    "gemini-3.1-flash-lite-preview",
+)
+GEOCODING_FALLBACK_MODEL = GEOCODING_MODEL_CHAIN[-1]
+# Daily grounding budgets (RPD) — favor search scouts over map lookups.
+MAP_GROUNDING_DAILY_BUDGET = 500
+SEARCH_GROUNDING_DAILY_BUDGET = 1500
+GEOCODE_SEARCH_MAX_REMOTE_CALLS = 6
+GEOCODE_MAP_MAX_REMOTE_CALLS = 4
 
 # Underwriter search failover (UI path)
 PRIMARY_SEARCH_MODEL = "gemma-4-31b-it"
 SECONDARY_SEARCH_MODEL = "gemini-2.5-flash"
 
-# (market_key, search scope for prompt, per-market target when topping up)
-# Targets sum to MAX_DISCOVERY_LISTINGS; Upstate NY metros get the largest share.
+# (market_key, search scope for prompt, per-market base target before regional scale)
+# Scaled targets sum to MAX_DISCOVERY_LISTINGS (base × DISCOVERY_TARGET_SCALE).
 HOT_MARKETS: list[tuple[str, str, int]] = [
     (
         "Rochester",
@@ -141,8 +163,44 @@ HOT_MARKETS: list[tuple[str, str, int]] = [
         1,
     ),
 ]
+# Regional discovery agents: one grounded search per geography (fewer, richer calls).
+# Each agent covers multiple HOT_MARKETS metros in a single prompt.
+DISCOVERY_REGIONS: list[tuple[str, tuple[str, ...]]] = [
+    ("Upstate NY", ("Rochester", "Syracuse", "Buffalo", "Albany")),
+    ("Mid-Atlantic", ("Philadelphia", "Pittsburgh")),
+    ("Florida", ("Orlando", "Tampa", "Miami")),
+    ("Carolinas", ("Charlotte", "Raleigh", "Charleston")),
+]
+_MARKET_TO_DISCOVERY_REGION: dict[str, str] = {
+    market: region
+    for region, markets in DISCOVERY_REGIONS
+    for market in markets
+}
+# One combined call used to cover all markets; regional agents run in parallel instead.
+DISCOVERY_TARGET_SCALE = len(DISCOVERY_REGIONS)
 DISCOVERY_MARKET_KEYS = frozenset(name for name, _, _ in HOT_MARKETS)
-MAX_DISCOVERY_LISTINGS = 25
+MAX_DISCOVERY_LISTINGS = sum(
+    base_target * DISCOVERY_TARGET_SCALE
+    for _, _, base_target in HOT_MARKETS
+)
+
+
+def _scaled_market_target(market_name: str) -> int:
+    """Per-market listing goal for this harvest (base HOT_MARKETS target × region scale)."""
+    base = next(
+        target for name, _, target in HOT_MARKETS if name == market_name
+    )
+    return base * DISCOVERY_TARGET_SCALE
+
+
+def _region_scaled_target(region_key: str) -> int:
+    """Sum of scaled per-market targets for all metros in a discovery region."""
+    return sum(
+        _scaled_market_target(market)
+        for market in next(
+            markets for region, markets in DISCOVERY_REGIONS if region == region_key
+        )
+    )
 MIN_PREFERRED_YEAR_BUILT = 1985
 MAX_DISCOVERY_PRICE = 250_000
 _TRUSTED_LISTING_DOMAINS = ("zillow.com", "redfin.com", "realtor.com")
@@ -159,6 +217,7 @@ _STREET_NUMBER_RE = re.compile(r"(?:^|\s)(\d{1,6}[A-Za-z]?)\s+\S+")
 DISCOVERY_MAX_REMOTE_CALLS = 25
 DISCOVERY_FALLBACK_MAX_REMOTE_CALLS = 8
 DISCOVERY_SPLIT_MAX_REMOTE_CALLS = 12
+DISCOVERY_REGION_MAX_REMOTE_CALLS = 20
 DISCOVERY_TOPUP_MAX_ROUNDS = 3
 MAX_SYNTHESIS_PRICE = 400_000
 MAX_API_RETRIES = 5
@@ -379,6 +438,11 @@ def _model_supports_grounding(model: str) -> bool:
     return model.startswith("gemini") or model.startswith("gemma-4")
 
 
+def _model_supports_map_grounding(model: str) -> bool:
+    """Google Maps grounding is available on Gemini flash-tier models."""
+    return model.startswith("gemini")
+
+
 def _grounded_search_config(
     *,
     max_remote_calls: int = DISCOVERY_MAX_REMOTE_CALLS,
@@ -426,9 +490,20 @@ def _discovery_afc_budget(
     model: str,
     *,
     split_market: str | None = None,
+    split_region: str | None = None,
+    region_market_needs: list[tuple[str, int]] | None = None,
     needed_count: int | None = None,
 ) -> int:
     """Right-size AFC search calls: combined needs more; per-market/gemma need fewer."""
+    if split_region and region_market_needs:
+        target = needed_count or sum(need for _, need in region_market_needs)
+        market_count = len(region_market_needs)
+        cap = (
+            DISCOVERY_REGION_MAX_REMOTE_CALLS
+            if _is_gemma_discovery_model(model)
+            else DISCOVERY_MAX_REMOTE_CALLS
+        )
+        return min(max(target, 1) + 4 + max(0, market_count - 1) * 3, cap)
     if split_market:
         target = needed_count or next(
             (count for name, _, count in HOT_MARKETS if name == split_market),
@@ -995,6 +1070,486 @@ def _extract_grounding_web_urls(response: Any) -> list[str]:
     return urls
 
 
+def _extract_grounding_maps_places(response: Any) -> list[dict[str, str]]:
+    """Collect grounded Google Maps place references from a Gemini response."""
+    places: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for candidate in getattr(response, "candidates", None) or []:
+        metadata = getattr(candidate, "grounding_metadata", None)
+        if metadata is None:
+            continue
+        for chunk in getattr(metadata, "grounding_chunks", None) or []:
+            maps_chunk = getattr(chunk, "maps", None)
+            if maps_chunk is None:
+                continue
+            place_id = str(getattr(maps_chunk, "place_id", "") or "").strip()
+            uri = str(getattr(maps_chunk, "uri", "") or "").strip()
+            title = str(getattr(maps_chunk, "title", "") or "").strip()
+            key = place_id or uri or title
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            places.append(
+                {
+                    "place_id": place_id,
+                    "uri": uri,
+                    "title": title,
+                }
+            )
+    return places
+
+
+@dataclass
+class GroundingRpdBudget:
+    """Track remaining daily map/search grounding calls for a harvest or session."""
+
+    map_remaining: int = MAP_GROUNDING_DAILY_BUDGET
+    search_remaining: int = SEARCH_GROUNDING_DAILY_BUDGET
+
+    def consume_map(self, count: int = 1) -> bool:
+        if self.map_remaining < count:
+            return False
+        self.map_remaining -= count
+        return True
+
+    def consume_search(self, count: int = 1) -> bool:
+        if self.search_remaining < count:
+            return False
+        self.search_remaining -= count
+        return True
+
+
+_MARKET_GEO_HINTS: dict[str, tuple[float, float]] = {
+    "Rochester": (43.1566, -77.6088),
+    "Syracuse": (43.0481, -76.1474),
+    "Buffalo": (42.8864, -78.8784),
+    "Albany": (42.6526, -73.7562),
+    "Philadelphia": (39.9526, -75.1652),
+    "Pittsburgh": (40.4406, -79.9959),
+    "Orlando": (28.5383, -81.3792),
+    "Tampa": (27.9506, -82.4572),
+    "Miami": (25.7617, -80.1918),
+    "Charlotte": (35.2271, -80.8431),
+    "Raleigh": (35.7796, -78.6382),
+    "Charleston": (32.7765, -79.9311),
+}
+
+
+def _geocode_hint_lat_lng(
+    address: str,
+    *,
+    market_city: str | None = None,
+) -> tuple[float | None, float | None]:
+    """Approximate lat/lon to seed Maps grounding (ZIP centroid or market center)."""
+    from knowledge_base import parse_zipcode_from_address
+
+    zip_code = parse_zipcode_from_address(address)
+    if zip_code:
+        try:
+            from portfolio_map_page import ZIP_CENTROIDS
+
+            centroid = ZIP_CENTROIDS.get(zip_code)
+            if centroid:
+                return centroid
+        except ImportError:
+            pass
+
+    market_key = str(market_city or "").strip()
+    if market_key in _MARKET_GEO_HINTS:
+        return _MARKET_GEO_HINTS[market_key]
+
+    matched = _match_market_from_text(address)
+    if matched and matched in _MARKET_GEO_HINTS:
+        return _MARKET_GEO_HINTS[matched]
+    return None, None
+
+
+def _grounded_maps_config(
+    *,
+    hint_lat: float | None = None,
+    hint_lon: float | None = None,
+    max_remote_calls: int = GEOCODE_MAP_MAX_REMOTE_CALLS,
+) -> types.GenerateContentConfig:
+    """Config for Google Maps grounding with optional regional hint."""
+    tool_config = None
+    if hint_lat is not None and hint_lon is not None:
+        tool_config = types.ToolConfig(
+            retrieval_config=types.RetrievalConfig(
+                lat_lng=types.LatLng(latitude=hint_lat, longitude=hint_lon),
+                language_code="en_US",
+            )
+        )
+    return types.GenerateContentConfig(
+        tools=[types.Tool(google_maps=types.GoogleMaps())],
+        tool_config=tool_config,
+        automatic_function_calling=types.AutomaticFunctionCallingConfig(
+            maximum_remote_calls=max_remote_calls,
+        ),
+    )
+
+
+def _generate_with_map_grounding_retry(
+    model: str,
+    contents: str,
+    *,
+    hint_lat: float | None = None,
+    hint_lon: float | None = None,
+    max_retries: int = MAX_API_RETRIES,
+    session: GenaiSession | None = None,
+    max_remote_calls: int = GEOCODE_MAP_MAX_REMOTE_CALLS,
+    rate_limiter: SyncModelRateLimiter | None = None,
+) -> tuple[str, list[dict[str, str]]]:
+    """Gemini call with Google Maps grounding; returns text and Maps place refs."""
+    active = session or get_session()
+    config = _grounded_maps_config(
+        hint_lat=hint_lat,
+        hint_lon=hint_lon,
+        max_remote_calls=max_remote_calls,
+    )
+
+    last_error: BaseException | None = None
+    total_wait_sec = 0.0
+
+    for attempt in range(max_retries):
+        try:
+            if rate_limiter is not None:
+                rate_limiter.acquire(model)
+            response = active.client.models.generate_content(
+                model=model,
+                contents=contents,
+                config=config,
+            )
+            text = _extract_response_text(response)
+            if not text.strip() and attempt < max_retries - 1:
+                delay_sec = retry_delay_seconds(attempt)
+                total_wait_sec += delay_sec
+                time.sleep(delay_sec)
+                continue
+            return text, _extract_grounding_maps_places(response)
+        except (errors.ClientError, errors.ServerError, errors.APIError) as e:
+            last_error = e
+            if is_daily_quota_exhausted(e):
+                raise
+            will_retry = _is_retriable(e) and attempt < max_retries - 1
+            if will_retry:
+                delay_sec = retry_delay_seconds(attempt)
+                total_wait_sec += delay_sec
+                time.sleep(delay_sec)
+                continue
+            raise
+
+    raise RuntimeError(
+        f"Max retries ({max_retries}) exceeded for model={model}, "
+        f"total_wait_sec={total_wait_sec:.2f}"
+    ) from last_error
+
+
+def _geocoding_models_to_try(explicit_model: str | None = None) -> list[str]:
+    if explicit_model:
+        return [_resolve_model_slug(explicit_model)]
+    return [_resolve_model_slug(model) for model in GEOCODING_MODEL_CHAIN]
+
+
+def _search_geocode_scout_prompt(address: str) -> str:
+    return f"""You are a geocoding scout for US residential properties.
+
+Property address: {address}
+
+Use Google Search to locate this exact property on Zillow, Redfin, Realtor.com, or county records.
+Return ONLY JSON:
+{{
+  "latitude": number,
+  "longitude": number,
+  "confidence": "high" | "medium" | "low",
+  "matched_address": "normalized address string from listing",
+  "source_url": "best listing or map URL"
+}}
+
+Rules:
+- latitude/longitude must be decimal degrees for the property parcel or building centroid.
+- If you cannot resolve coordinates, return latitude 0 and longitude 0 with confidence "low".
+- Do not guess city-center coordinates."""
+
+
+def _map_geocode_environment_prompt(address: str) -> str:
+    return f"""You are a geospatial analyst for US investment properties.
+
+Property address: {address}
+
+Use Google Maps to resolve the EXACT latitude and longitude of this residential property.
+Then assess environmental and location risks within ~1 mile:
+- FEMA / flood exposure or nearby waterways
+- Industrial sites, landfills, superfund or brownfield proximity
+- Major highway / rail / airport noise corridors
+- Wildfire or hurricane exposure when relevant to the region
+- Crime or safety hotspots only when Maps reviews/data support it
+
+Return ONLY JSON:
+{{
+  "latitude": number,
+  "longitude": number,
+  "confidence": "high" | "medium" | "low",
+  "matched_address": "Maps-normalized address",
+  "maps_place_id": "places/... if available",
+  "environmental_risk": {{
+    "score": number,
+    "level": "Low" | "Moderate" | "High",
+    "factors": ["short bullet strings"],
+    "summary": "2-3 sentence investor-focused summary"
+  }}
+}}
+
+Rules:
+- score is 0 (lowest risk) to 10 (highest risk).
+- latitude/longitude must be the property location, not a city center.
+- If Maps cannot resolve the parcel, return latitude 0, longitude 0, confidence "low"."""
+
+
+def _normalize_geospatial_payload(
+    address: str,
+    data: Any,
+    *,
+    model: str,
+    source: str,
+    maps_places: list[dict[str, str]] | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "address": address,
+        "latitude": None,
+        "longitude": None,
+        "geocode_confidence": "low",
+        "geocode_source": source,
+        "geocode_model": model,
+        "maps_place_id": "",
+        "maps_uri": "",
+        "environmental_risk": None,
+    }
+    if not isinstance(data, dict):
+        return payload
+
+    lat = safe_float(data.get("latitude"))
+    lon = safe_float(data.get("longitude"))
+    if -90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0 and (lat != 0.0 or lon != 0.0):
+        payload["latitude"] = lat
+        payload["longitude"] = lon
+
+    confidence = str(data.get("confidence", "")).strip().lower()
+    if confidence in {"high", "medium", "low"}:
+        payload["geocode_confidence"] = confidence
+
+    env = data.get("environmental_risk")
+    if isinstance(env, dict):
+        score = safe_float(env.get("score"))
+        level = str(env.get("level", "")).strip()
+        factors = env.get("factors")
+        summary = str(env.get("summary", "")).strip()
+        payload["environmental_risk"] = {
+            "score": max(0.0, min(10.0, score)),
+            "level": level or "Unknown",
+            "factors": [str(item).strip() for item in factors or [] if str(item).strip()],
+            "summary": summary,
+        }
+
+    place_id = str(data.get("maps_place_id", "")).strip()
+    if place_id:
+        payload["maps_place_id"] = place_id
+    if maps_places:
+        top = maps_places[0]
+        if not payload["maps_place_id"]:
+            payload["maps_place_id"] = top.get("place_id", "")
+        payload["maps_uri"] = top.get("uri", "")
+    return payload
+
+
+def _merge_geospatial_results(
+    address: str,
+    scout: dict[str, Any] | None,
+    maps_result: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Prefer Maps-grounded coordinates; fall back to search scout."""
+    merged: dict[str, Any] = {
+        "address": address,
+        "latitude": None,
+        "longitude": None,
+        "geocode_confidence": "low",
+        "geocode_source": "unresolved",
+        "geocode_model": "",
+        "maps_place_id": "",
+        "maps_uri": "",
+        "environmental_risk": None,
+    }
+    for candidate in (maps_result, scout):
+        if not candidate:
+            continue
+        lat = candidate.get("latitude")
+        lon = candidate.get("longitude")
+        if lat is None or lon is None:
+            continue
+        if merged["latitude"] is None:
+            merged["latitude"] = lat
+            merged["longitude"] = lon
+            merged["geocode_confidence"] = candidate.get("geocode_confidence", "low")
+            merged["geocode_source"] = candidate.get("geocode_source", "unknown")
+            merged["geocode_model"] = candidate.get("geocode_model", "")
+        for key in ("maps_place_id", "maps_uri"):
+            if not merged.get(key) and candidate.get(key):
+                merged[key] = candidate[key]
+    if maps_result and maps_result.get("environmental_risk"):
+        merged["environmental_risk"] = maps_result["environmental_risk"]
+    return merged
+
+
+def attach_geospatial_to_property(
+    property_data: dict[str, Any],
+    geospatial: dict[str, Any],
+) -> dict[str, Any]:
+    """Merge geocode + environmental fields onto a property record."""
+    updated = dict(property_data)
+    lat = geospatial.get("latitude")
+    lon = geospatial.get("longitude")
+    if lat is not None and lon is not None:
+        updated["latitude"] = lat
+        updated["longitude"] = lon
+
+    for meta_key in (
+        "geocode_confidence",
+        "geocode_source",
+        "geocode_model",
+        "maps_place_id",
+        "maps_uri",
+    ):
+        if geospatial.get(meta_key):
+            updated[meta_key] = geospatial[meta_key]
+
+    env = geospatial.get("environmental_risk")
+    if isinstance(env, dict) and env:
+        updated["environmental_risk"] = env
+        env_score = safe_float(env.get("score"))
+        if env_score > 0 and safe_float(updated.get("location_score")) > 0:
+            penalty = min(2.5, env_score * 0.2)
+            updated["location_score"] = max(
+                0.0,
+                round(safe_float(updated.get("location_score")) - penalty, 2),
+            )
+
+    return updated
+
+
+def run_geospatial_enrichment(
+    address: str,
+    *,
+    market_city: str | None = None,
+    model: str | None = None,
+    budget: GroundingRpdBudget | None = None,
+    session: GenaiSession | None = None,
+    rate_limiter: SyncModelRateLimiter | None = None,
+) -> dict[str, Any]:
+    """
+    Agentic geocode pipeline:
+    1) Search-grounded scout (higher RPD budget)
+    2) Maps-grounded coordinate + environmental risk (lower RPD budget)
+    Model order: gemini-2.5-flash -> gemini-2.5-flash-lite -> gemini-3.1-flash-lite
+    """
+    active_budget = budget or GroundingRpdBudget()
+    hint_lat, hint_lon = _geocode_hint_lat_lng(address, market_city=market_city)
+    scout_result: dict[str, Any] | None = None
+    maps_result: dict[str, Any] | None = None
+    last_error: BaseException | None = None
+
+    for geo_model in _geocoding_models_to_try(model):
+        if not _model_supports_map_grounding(geo_model):
+            continue
+
+        if scout_result is None and active_budget.consume_search():
+            try:
+                scout_raw = _generate_with_grounding_retry(
+                    geo_model,
+                    _search_geocode_scout_prompt(address),
+                    use_search=True,
+                    session=session,
+                    max_remote_calls=GEOCODE_SEARCH_MAX_REMOTE_CALLS,
+                    rate_limiter=rate_limiter,
+                )[0]
+                scout_result = _normalize_geospatial_payload(
+                    address,
+                    _extract_json(scout_raw),
+                    model=geo_model,
+                    source="search_grounding",
+                )
+            except errors.ClientError as exc:
+                last_error = exc
+                if is_daily_quota_exhausted(exc):
+                    continue
+                raise
+            except (errors.ServerError, errors.APIError, RuntimeError) as exc:
+                last_error = exc
+                _log.warning("geocode_scout_failed", address=address, error=str(exc))
+
+        scout_lat = safe_float((scout_result or {}).get("latitude"))
+        scout_lon = safe_float((scout_result or {}).get("longitude"))
+        seed_lat = scout_lat if scout_lat else hint_lat
+        seed_lon = scout_lon if scout_lon else hint_lon
+
+        if maps_result is None and active_budget.consume_map():
+            try:
+                maps_raw, maps_places = _generate_with_map_grounding_retry(
+                    geo_model,
+                    _map_geocode_environment_prompt(address),
+                    hint_lat=seed_lat,
+                    hint_lon=seed_lon,
+                    session=session,
+                    rate_limiter=rate_limiter,
+                )
+                maps_result = _normalize_geospatial_payload(
+                    address,
+                    _extract_json(maps_raw),
+                    model=geo_model,
+                    source="maps_grounding",
+                    maps_places=maps_places,
+                )
+                break
+            except errors.ClientError as exc:
+                last_error = exc
+                if is_daily_quota_exhausted(exc):
+                    continue
+                raise
+            except (errors.ServerError, errors.APIError, RuntimeError) as exc:
+                last_error = exc
+                _log.warning("geocode_maps_failed", address=address, error=str(exc))
+                continue
+
+        if scout_result and maps_result:
+            break
+
+    merged = _merge_geospatial_results(address, scout_result, maps_result)
+    if merged["latitude"] is None and last_error is not None:
+        merged["geocode_error"] = str(last_error)
+    return merged
+
+
+async def run_geospatial_enrichment_async(
+    address: str,
+    *,
+    market_city: str | None = None,
+    model: str | None = None,
+    budget: GroundingRpdBudget | None = None,
+    session: GenaiSession | None = None,
+    rate_limiter: ModelRateLimiter | None = None,
+) -> dict[str, Any]:
+    """Async wrapper — geospatial agents run in a worker thread."""
+    if rate_limiter is not None:
+        active_model = _resolve_model_slug(model or GEOCODING_MODEL_CHAIN[0])
+        await rate_limiter.acquire(active_model)
+    return await asyncio.to_thread(
+        run_geospatial_enrichment,
+        address,
+        market_city=market_city,
+        model=model,
+        budget=budget,
+        session=session,
+    )
+
+
 def _is_listing_detail_url(url: str) -> bool:
     lowered = url.lower()
     return any(marker in lowered for marker in _LISTING_DETAIL_URL_MARKERS)
@@ -1265,10 +1820,11 @@ def _plan_market_discovery_pass(
 
     plan_counts: dict[str, int] = {}
 
-    for market_name, _, base_target in HOT_MARKETS:
+    for market_name, _, _ in HOT_MARKETS:
         if market_name in exhausted_markets:
             continue
-        base_deficit = max(0, base_target - by_market.get(market_name, 0))
+        scaled_target = _scaled_market_target(market_name)
+        base_deficit = max(0, scaled_target - by_market.get(market_name, 0))
         if base_deficit > 0:
             plan_counts[market_name] = plan_counts.get(market_name, 0) + base_deficit
 
@@ -1294,22 +1850,66 @@ def _plan_market_discovery_pass(
     ]
 
 
+def _plan_region_discovery_pass(
+    listings: list[dict[str, Any]],
+    exhausted_markets: set[str],
+) -> list[tuple[str, list[tuple[str, int]]]]:
+    """
+    Collapse per-market deficits into regional discovery tasks.
+
+    e.g. Charlotte (1) + Raleigh (1) + Charleston (1) -> one Carolinas agent
+    asking for 3 listings across NC/SC metros in a single grounded search.
+    """
+    market_plan = _plan_market_discovery_pass(listings, exhausted_markets)
+    if not market_plan:
+        return []
+
+    region_needs: dict[str, list[tuple[str, int]]] = {}
+    for market_name, needed_count in market_plan:
+        region_key = _MARKET_TO_DISCOVERY_REGION.get(market_name)
+        if not region_key:
+            continue
+        region_needs.setdefault(region_key, []).append((market_name, needed_count))
+
+    return [
+        (region_key, region_needs[region_key])
+        for region_key, _ in DISCOVERY_REGIONS
+        if region_key in region_needs
+    ]
+
+
 def _discovery_prompt(
     max_price: float,
     *,
     split_market: str | None = None,
+    split_region: str | None = None,
+    region_market_needs: list[tuple[str, int]] | None = None,
     exclude_addresses: list[str] | None = None,
     needed_count: int | None = None,
     total_needed: int | None = None,
 ) -> str:
     """Build a grounded-search discovery prompt."""
-    if split_market:
+    ask_total = needed_count if needed_count and needed_count > 0 else MAX_DISCOVERY_LISTINGS
+    if split_region and region_market_needs:
+        parts: list[str] = []
+        for market_name, need in region_market_needs:
+            location = next(
+                loc for name, loc, _ in HOT_MARKETS if name == market_name
+            )
+            parts.append(f"{need} in {location}")
+        ask_total = sum(need for _, need in region_market_needs)
+        scope = (
+            f"{ask_total} NEW residential properties CURRENTLY FOR SALE across "
+            f"{split_region} ({'; '.join(parts)}) — return different addresses only"
+        )
+    elif split_market:
         city, location, count = next(
             (name, loc, target)
             for name, loc, target in HOT_MARKETS
             if name == split_market
         )
         ask_count = needed_count if needed_count and needed_count > 0 else count
+        ask_total = ask_count
         scope = (
             f"{ask_count} NEW residential properties CURRENTLY FOR SALE in {location} "
             f"(we already have listings for this market — return different addresses only)"
@@ -1344,7 +1944,24 @@ def _discovery_prompt(
         "Charlotte, Raleigh, and Charleston. Strongly favor newer construction and "
         "conventional site-built homes over manufactured/mobile housing."
     )
-    if split_market:
+    if split_region and region_market_needs:
+        region_markets = {name for name, _ in region_market_needs}
+        priority_note = (
+            f"Cover all metros in {split_region} listed in the scope — include city proper "
+            "AND surrounding suburbs for each (do not limit to downtown/city limits). "
+            "Distribute results across the requested metros; do not cluster in one city."
+        )
+        if "Syracuse" in region_markets:
+            priority_note += (
+                " For Syracuse, weight searches toward Cicero, Clay, Liverpool, and "
+                "North Syracuse ZIPs (13039, 13041, 13088, 13212)."
+            )
+        if region_markets & {"Rochester", "Buffalo", "Albany"}:
+            priority_note += (
+                " Upstate NY metros should skew newest-available; exclude "
+                "manufactured/mobile homes entirely."
+            )
+    elif split_market:
         priority_note = (
             f"Focus this search on {location} only — include city proper AND surrounding "
             "suburbs listed in the scope (do not limit to downtown/city limits)."
@@ -1359,6 +1976,12 @@ def _discovery_prompt(
                 " Prioritize Upstate NY suburbs with newer single-family inventory; "
                 "exclude manufactured/mobile homes entirely."
             )
+
+    return_count_rule = (
+        f"You MUST return {ask_total} distinct listings when possible."
+        if split_region or split_market
+        else f"You MUST return {MAX_DISCOVERY_LISTINGS} distinct listings when possible."
+    )
 
     return f"""You are a real estate discovery agent for US hot rental markets.
 
@@ -1391,7 +2014,7 @@ Rules:
 - Include suburbs and townships — not just the core city (e.g. Henrietta/Penfield/Fairport
   count as Rochester; Cicero/Clay/Liverpool/North Syracuse count as Syracuse; Amherst/Cheektowaga
   count as Buffalo; Colonie/Guilderland count as Albany).
-- You MUST return {MAX_DISCOVERY_LISTINGS} distinct listings when possible. Do not stop at 7–13.
+- {return_count_rule} Do not stop early.
 - ONLY include: conventional site-built single-family detached homes, townhomes/townhouses,
   and small multifamily (duplex, triplex, or fourplex — at most 4 units total).
 - NEVER include manufactured homes, mobile homes, modular homes, trailers, park-model homes,
@@ -1413,6 +2036,8 @@ def _run_discovery_attempt(
     model: str,
     max_price: float,
     split_market: str | None = None,
+    split_region: str | None = None,
+    region_market_needs: list[tuple[str, int]] | None = None,
     exclude_addresses: list[str] | None = None,
     needed_count: int | None = None,
     total_needed: int | None = None,
@@ -1421,11 +2046,15 @@ def _run_discovery_attempt(
     afc_budget = _discovery_afc_budget(
         model,
         split_market=split_market,
+        split_region=split_region,
+        region_market_needs=region_market_needs,
         needed_count=needed_count,
     )
     prompt = _discovery_prompt(
         max_price,
         split_market=split_market,
+        split_region=split_region,
+        region_market_needs=region_market_needs,
         exclude_addresses=exclude_addresses,
         needed_count=needed_count,
         total_needed=total_needed,
@@ -1589,19 +2218,19 @@ _DISCOVERY_API_ERRORS = (
     RuntimeError,
 )
 
-_DiscoveryMarketResult = tuple[
+_DiscoveryRegionResult = tuple[
     str,
-    int,
+    list[tuple[str, int]],
     list[dict[str, Any]],
     str,
     float,
 ]
 
 
-def _run_single_market_discovery(
+def _run_single_region_discovery(
     *,
-    market_name: str,
-    needed_count: int,
+    region_key: str,
+    market_needs: list[tuple[str, int]],
     model: str,
     max_price: float,
     exclude_addresses: list[str] | None,
@@ -1609,52 +2238,47 @@ def _run_single_market_discovery(
     rate_limiter: SyncModelRateLimiter | None,
     round_idx: int | None = None,
     round_total: int | None = None,
-    market_idx: int | None = None,
-    market_total: int | None = None,
+    region_idx: int | None = None,
+    region_total: int | None = None,
     split_listings: list[dict[str, Any]] | None = None,
-    label: str = "market",
-) -> _DiscoveryMarketResult:
-    """Run one per-market discovery agent (used by parallel and sequential passes)."""
+    label: str = "region",
+) -> _DiscoveryRegionResult:
+    """Run one regional discovery agent covering multiple metros in one search."""
+    total_needed = sum(need for _, need in market_needs)
     by_market = _count_listings_by_market(split_listings or [])
-    have = by_market.get(market_name, 0)
-    base_target = next(
-        target for name, _, target in HOT_MARKETS if name == market_name
-    )
-    base_deficit = max(0, base_target - have)
-    redistributed = max(0, needed_count - base_deficit)
-    scope_note = (
-        f"need {needed_count} more ({redistributed} redistributed), "
-        if redistributed
-        else f"need {needed_count} more, "
+    breakdown = ", ".join(
+        f"{name} {by_market.get(name, 0)}/{_scaled_market_target(name)} (+{need})"
+        for name, need in market_needs
     )
     merged_exclude = list(exclude_addresses or []) + found_addrs
     round_note = (
         f"Round {round_idx}/{round_total} " if round_idx and round_total else ""
     )
-    market_note = (
-        f"market {market_idx}/{market_total}: " if market_idx and market_total else ""
+    region_note = (
+        f"{label} {region_idx}/{region_total}: " if region_idx and region_total else ""
     )
     total_count = len(split_listings or [])
     _discovery_log(
-        f"[discovery] {round_note}{market_note}{label} {market_name} "
-        f"({scope_note}have {have}/{base_target}, "
+        f"[discovery] {round_note}{region_note}{region_key} "
+        f"(need {total_needed} across {breakdown}, "
         f"total {total_count}/{MAX_DISCOVERY_LISTINGS})..."
     )
     started = time.monotonic()
-    market_listings, market_raw = _run_discovery_attempt(
+    region_listings, region_raw = _run_discovery_attempt(
         model=model,
         max_price=max_price,
-        split_market=market_name,
+        split_region=region_key,
+        region_market_needs=market_needs,
         exclude_addresses=merged_exclude,
-        needed_count=needed_count,
+        needed_count=total_needed,
         rate_limiter=rate_limiter,
     )
     elapsed = time.monotonic() - started
-    return market_name, needed_count, market_listings, market_raw, elapsed
+    return region_key, market_needs, region_listings, region_raw, elapsed
 
 
-def _execute_discovery_plan(
-    plan: list[tuple[str, int]],
+def _execute_region_discovery_plan(
+    plan: list[tuple[str, list[tuple[str, int]]]],
     *,
     model: str,
     max_price: float,
@@ -1663,23 +2287,23 @@ def _execute_discovery_plan(
     rate_limiter: SyncModelRateLimiter | None,
     round_idx: int | None = None,
     round_total: int | None = None,
-    label: str = "market",
-) -> list[_DiscoveryMarketResult]:
-    """Run discovery agents for each market in plan (parallel when len(plan) > 1)."""
+    label: str = "region",
+) -> list[_DiscoveryRegionResult]:
+    """Run regional discovery agents in parallel (one agent per geography)."""
     if not plan:
         return []
 
     found_addrs = [str(item.get("address", "")) for item in split_listings]
-    market_total = len(plan)
+    region_total = len(plan)
 
     def _invoke(
-        market_idx: int,
-        market_name: str,
-        needed_count: int,
-    ) -> _DiscoveryMarketResult:
-        return _run_single_market_discovery(
-            market_name=market_name,
-            needed_count=needed_count,
+        region_idx: int,
+        region_key: str,
+        market_needs: list[tuple[str, int]],
+    ) -> _DiscoveryRegionResult:
+        return _run_single_region_discovery(
+            region_key=region_key,
+            market_needs=market_needs,
             model=model,
             max_price=max_price,
             exclude_addresses=exclude_addresses,
@@ -1687,61 +2311,68 @@ def _execute_discovery_plan(
             rate_limiter=rate_limiter,
             round_idx=round_idx,
             round_total=round_total,
-            market_idx=market_idx,
-            market_total=market_total,
+            region_idx=region_idx,
+            region_total=region_total,
             split_listings=split_listings,
             label=label,
         )
 
     if len(plan) == 1:
-        market_name, needed_count = plan[0]
-        return [_invoke(1, market_name, needed_count)]
+        region_key, market_needs = plan[0]
+        return [_invoke(1, region_key, market_needs)]
 
-    results_by_market: dict[str, _DiscoveryMarketResult] = {}
+    results_by_region: dict[str, _DiscoveryRegionResult] = {}
     with ThreadPoolExecutor(max_workers=len(plan)) as executor:
         futures = {
-            executor.submit(_invoke, idx, market_name, needed_count): market_name
-            for idx, (market_name, needed_count) in enumerate(plan, start=1)
+            executor.submit(_invoke, idx, region_key, market_needs): region_key
+            for idx, (region_key, market_needs) in enumerate(plan, start=1)
         }
         for future in as_completed(futures):
-            market_name, needed_count, market_listings, market_raw, elapsed = (
+            region_key, market_needs, region_listings, region_raw, elapsed = (
                 future.result()
             )
-            results_by_market[market_name] = (
-                market_name,
-                needed_count,
-                market_listings,
-                market_raw,
+            results_by_region[region_key] = (
+                region_key,
+                market_needs,
+                region_listings,
+                region_raw,
                 elapsed,
             )
 
-    return [results_by_market[market_name] for market_name, _ in plan]
+    return [results_by_region[region_key] for region_key, _ in plan]
 
 
-def _merge_discovery_market_results(
+def _merge_discovery_region_results(
     split_listings: list[dict[str, Any]],
-    results: list[_DiscoveryMarketResult],
+    results: list[_DiscoveryRegionResult],
     *,
     max_price: float,
     on_listing_found: Callable[[dict[str, Any]], None] | None,
     exhausted_markets: set[str],
 ) -> tuple[list[dict[str, Any]], int]:
-    """Merge parallel/sequential market discovery results; return updated list + new count."""
+    """Merge regional discovery results; mark per-metro exhaustion when a metro adds nothing."""
     round_added = 0
-    for market_name, needed_count, market_listings, _market_raw, elapsed in results:
+    for region_key, market_needs, region_listings, _region_raw, elapsed in results:
+        before_by_market = _count_listings_by_market(split_listings)
         before = len(split_listings)
         split_listings = _extend_discovery_listings(
             split_listings,
-            market_listings,
+            region_listings,
             max_price=max_price,
             on_listing_found=on_listing_found,
         )
         added = len(split_listings) - before
         round_added += added
-        if needed_count > 0 and not market_listings:
-            exhausted_markets.add(market_name)
+        after_by_market = _count_listings_by_market(split_listings)
+        for market_name, needed_count in market_needs:
+            added_for_market = (
+                after_by_market.get(market_name, 0)
+                - before_by_market.get(market_name, 0)
+            )
+            if needed_count > 0 and added_for_market == 0:
+                exhausted_markets.add(market_name)
         _discovery_log(
-            f"[discovery] {market_name}: +{added} new verified in "
+            f"[discovery] {region_key}: +{added} new verified in "
             f"{elapsed:.0f}s (total {len(split_listings)}/{MAX_DISCOVERY_LISTINGS})"
         )
     return split_listings, round_added
@@ -1756,7 +2387,7 @@ def _discover_listings_per_market(
     on_listing_found: Callable[[dict[str, Any]], None] | None = None,
     rate_limiter: SyncModelRateLimiter | None = None,
 ) -> tuple[list[dict[str, Any]], str]:
-    """Focused per-market discovery (parallel agents per round; Gemma fallback path)."""
+    """Regional discovery: parallel agents per geography (Gemma fallback / top-up path)."""
     split_listings = list(seed_listings or [])
     last_raw = ""
     exhausted_markets: set[str] = set()
@@ -1765,7 +2396,7 @@ def _discover_listings_per_market(
         if len(split_listings) >= MAX_DISCOVERY_LISTINGS:
             break
 
-        plan = _plan_market_discovery_pass(split_listings, exhausted_markets)
+        plan = _plan_region_discovery_pass(split_listings, exhausted_markets)
         if not plan:
             break
 
@@ -1776,14 +2407,17 @@ def _discover_listings_per_market(
                 f"redistributing unfilled slots from "
                 f"{', '.join(sorted(exhausted_markets))} to other markets"
             )
-        if len(plan) > 1:
-            _discovery_log(
-                f"[discovery] Round {round_idx}/{DISCOVERY_TOPUP_MAX_ROUNDS}: "
-                f"spawning {len(plan)} parallel discovery agent(s) "
-                f"(≤{DISCOVERY_RPM_PER_MODEL} RPM shared)..."
-            )
+        region_summary = ", ".join(
+            f"{region} ({sum(need for _, need in needs)})"
+            for region, needs in plan
+        )
+        _discovery_log(
+            f"[discovery] Round {round_idx}/{DISCOVERY_TOPUP_MAX_ROUNDS}: "
+            f"spawning {len(plan)} regional discovery agent(s): {region_summary} "
+            f"(≤{DISCOVERY_RPM_PER_MODEL} RPM shared)..."
+        )
 
-        results = _execute_discovery_plan(
+        results = _execute_region_discovery_plan(
             plan,
             model=model,
             max_price=max_price,
@@ -1793,10 +2427,10 @@ def _discover_listings_per_market(
             round_idx=round_idx,
             round_total=DISCOVERY_TOPUP_MAX_ROUNDS,
         )
-        for _market_name, _needed_count, _market_listings, market_raw, _elapsed in results:
-            last_raw = market_raw or last_raw
+        for _region_key, _market_needs, _region_listings, region_raw, _elapsed in results:
+            last_raw = region_raw or last_raw
 
-        split_listings, round_added = _merge_discovery_market_results(
+        split_listings, round_added = _merge_discovery_region_results(
             split_listings,
             results,
             max_price=max_price,
@@ -1808,24 +2442,20 @@ def _discover_listings_per_market(
             can_redistribute = (
                 bool(exhausted_markets - exhausted_before)
                 and len(split_listings) < MAX_DISCOVERY_LISTINGS
-                and bool(_plan_market_discovery_pass(split_listings, exhausted_markets))
+                and bool(_plan_region_discovery_pass(split_listings, exhausted_markets))
             )
             if not can_redistribute:
                 break
 
     if len(split_listings) < MAX_DISCOVERY_LISTINGS:
-        plan = _plan_market_discovery_pass(split_listings, exhausted_markets)
+        plan = _plan_region_discovery_pass(split_listings, exhausted_markets)
         if plan:
             _discovery_log(
-                f"[discovery] Final per-market top-up toward "
+                f"[discovery] Final regional top-up toward "
                 f"{MAX_DISCOVERY_LISTINGS} listings "
                 f"(have {len(split_listings)}, plan={plan})..."
             )
-            if len(plan) > 1:
-                _discovery_log(
-                    f"[discovery] Spawning {len(plan)} parallel top-up discovery agent(s)..."
-                )
-            results = _execute_discovery_plan(
+            results = _execute_region_discovery_plan(
                 plan,
                 model=model,
                 max_price=max_price,
@@ -1834,9 +2464,9 @@ def _discover_listings_per_market(
                 rate_limiter=rate_limiter,
                 label="top-up",
             )
-            for _market_name, _needed_count, _market_listings, market_raw, _elapsed in results:
-                last_raw = market_raw or last_raw
-            split_listings, _round_added = _merge_discovery_market_results(
+            for _region_key, _market_needs, _region_listings, region_raw, _elapsed in results:
+                last_raw = region_raw or last_raw
+            split_listings, _round_added = _merge_discovery_region_results(
                 split_listings,
                 results,
                 max_price=max_price,
@@ -1887,10 +2517,10 @@ def _discover_listings_for_model(
     model = _resolve_discovery_model(model)
     if _is_gemma_discovery_model(model):
         _discovery_log(
-            f"[discovery] Using per-market searches on {model} "
+            f"[discovery] Using regional searches on {model} "
             f"(combined multi-market search is unreliable on Gemma; "
-            f"~{DISCOVERY_FALLBACK_MAX_REMOTE_CALLS} search calls per market; "
-            f"parallel agents ≤{DISCOVERY_RPM_PER_MODEL} RPM)."
+            f"{len(DISCOVERY_REGIONS)} parallel regional agents, "
+            f"≤{DISCOVERY_RPM_PER_MODEL} RPM)."
         )
         return _discover_listings_per_market(
             model=model,
@@ -2248,7 +2878,11 @@ CONTEXT FROM DATABASE:
 RESEARCH DATA (verified extraction):
 {json.dumps(research, indent=2)}
 
+GEOSPATIAL / ENVIRONMENTAL (when present — from Maps grounding):
+{json.dumps(research.get("environmental_risk") or {}, indent=2)}
+
 Produce a complete investment underwriting. Use research price/taxes/hoa/sqft/year_built as anchors.
+If environmental_risk is present, reflect flood/industrial/noise factors in summary and location_score.
 
 YEAR BUILT (critical):
 - "year" must be the 4-digit construction year (e.g. 1968), NOT property age in years.
@@ -2350,6 +2984,8 @@ def _finalize_synthesis_payload(
     research: dict[str, Any],
     market_city: str,
     data: Any,
+    *,
+    geospatial: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not isinstance(data, dict):
         data = _synthesis_fallback_payload(research)
@@ -2364,7 +3000,60 @@ def _finalize_synthesis_payload(
     _sanitize_synthesis_numerics(data)
     canonicalize_year_built_fields(data)
     enriched = enrich_with_forecast(data)
+    if geospatial:
+        enriched = attach_geospatial_to_property(enriched, geospatial)
+    elif research.get("environmental_risk"):
+        enriched = attach_geospatial_to_property(
+            enriched,
+            {
+                "latitude": research.get("latitude"),
+                "longitude": research.get("longitude"),
+                "environmental_risk": research.get("environmental_risk"),
+            },
+        )
     return attach_data_provenance(enriched, research, pipeline="harvester")
+
+
+def _synthesis_models_to_try(explicit_model: str | None = None) -> list[str]:
+    if explicit_model:
+        return [_resolve_model_slug(explicit_model)]
+    return [_resolve_model_slug(model) for model in SYNTHESIS_MODEL_CHAIN]
+
+
+def _generate_synthesis_with_model_chain(
+    research: dict[str, Any],
+    market_city: str,
+    *,
+    model: str | None = None,
+    user_id: str | None = None,
+    session: GenaiSession | None = None,
+    rate_limiter: ModelRateLimiter | None = None,
+) -> tuple[str, str]:
+    """Try synthesis models in order; return (raw_json_text, model_used)."""
+    prompt = _synthesis_prompt(research, market_city, user_id=user_id)
+    last_error: BaseException | None = None
+    for active_model in _synthesis_models_to_try(model):
+        try:
+            raw = generate_with_retry(
+                active_model,
+                prompt,
+                use_search=False,
+                session=session,
+            )
+            return raw, active_model
+        except errors.ClientError as exc:
+            last_error = exc
+            if is_daily_quota_exhausted(exc):
+                _log.warning(
+                    "synthesis_model_fallback",
+                    from_model=active_model,
+                    error=str(exc),
+                )
+                continue
+            raise
+    raise RuntimeError(
+        f"Synthesis failed for all models in {SYNTHESIS_MODEL_CHAIN}"
+    ) from last_error
 
 
 def synthesize_harvest_property(
@@ -2374,18 +3063,23 @@ def synthesize_harvest_property(
     *,
     model: str | None = None,
     user_id: str | None = None,
+    geospatial: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     Stage 3 (Synthesis): Investment summary from research data only.
     """
-    active_model = model or SYNTHESIS_MODEL
-    raw = generate_with_retry(
-        active_model,
-        _synthesis_prompt(research, market_city, user_id=user_id),
-        use_search=False,
+    raw, _active_model = _generate_synthesis_with_model_chain(
+        research,
+        market_city,
+        model=model,
+        user_id=user_id,
     )
     return _finalize_synthesis_payload(
-        address, research, market_city, _extract_json(raw)
+        address,
+        research,
+        market_city,
+        _extract_json(raw),
+        geospatial=geospatial,
     )
 
 
@@ -2398,18 +3092,43 @@ async def synthesize_harvest_property_async(
     user_id: str | None = None,
     rate_limiter: ModelRateLimiter | None = None,
     session: GenaiSession | None = None,
+    geospatial: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Async Stage 3 synthesis for parallel harvester workers."""
-    active_model = model or SYNTHESIS_MODEL
-    raw = await generate_with_retry_async(
-        active_model,
-        _synthesis_prompt(research, market_city, user_id=user_id),
-        use_search=False,
-        rate_limiter=rate_limiter,
-        session=session,
-    )
+    prompt = _synthesis_prompt(research, market_city, user_id=user_id)
+    last_error: BaseException | None = None
+    raw = ""
+    for active_model in _synthesis_models_to_try(model):
+        try:
+            raw = await generate_with_retry_async(
+                active_model,
+                prompt,
+                use_search=False,
+                rate_limiter=rate_limiter,
+                session=session,
+            )
+            break
+        except errors.ClientError as exc:
+            last_error = exc
+            if is_daily_quota_exhausted(exc):
+                _log.warning(
+                    "synthesis_model_fallback",
+                    from_model=active_model,
+                    error=str(exc),
+                )
+                continue
+            raise
+    else:
+        raise RuntimeError(
+            f"Synthesis failed for all models in {SYNTHESIS_MODEL_CHAIN}"
+        ) from last_error
+
     return _finalize_synthesis_payload(
-        address, research, market_city, _extract_json(raw)
+        address,
+        research,
+        market_city,
+        _extract_json(raw),
+        geospatial=geospatial,
     )
 
 
@@ -2673,6 +3392,16 @@ def get_final_analysis(
             property_data = fetch_comparable_properties(address, property_data)
         except Exception as exc:
             _log.warning("comps_fetch_failed", address=address, error=str(exc))
+
+    if property_data.get("latitude") is None or property_data.get("longitude") is None:
+        try:
+            geospatial = run_geospatial_enrichment(
+                address,
+                market_city=str(property_data.get("market_city") or ""),
+            )
+            property_data = attach_geospatial_to_property(property_data, geospatial)
+        except Exception as exc:
+            _log.warning("geospatial_enrichment_failed", address=address, error=str(exc))
 
     enriched = enrich_with_forecast(property_data)
     return attach_data_provenance(enriched, pipeline="underwriter_ui")

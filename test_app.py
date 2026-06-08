@@ -451,11 +451,15 @@ class TestDailyQuotaDetection(unittest.TestCase):
         found: list[str] = []
 
         def fake_attempt(**kwargs):
-            market = kwargs.get("split_market")
-            if market == "Rochester":
-                return [_VERIFIED_DISCOVERY_ROW], "rochester"
-            if market == "Syracuse":
-                return [syracuse_row], "syracuse"
+            region = kwargs.get("split_region")
+            if region == "Upstate NY":
+                rows = []
+                for market, _ in kwargs.get("region_market_needs") or []:
+                    if market == "Rochester":
+                        rows.append(_VERIFIED_DISCOVERY_ROW)
+                    elif market == "Syracuse":
+                        rows.append(syracuse_row)
+                return rows, "upstate"
             return [], ""
 
         with patch("engine._run_discovery_attempt", side_effect=fake_attempt):
@@ -511,6 +515,102 @@ class TestSearchGrounding(unittest.TestCase):
         with patch("engine.generate_with_retry", return_value=payload) as mock_gen:
             research_property("1 Main St, Rochester, NY", model=RESEARCH_FALLBACK_MODEL)
             self.assertEqual(mock_gen.call_args.args[0], "gemma-4-26b-a4b-it")
+
+
+class TestGeospatialEnrichment(unittest.TestCase):
+    def test_geocoding_and_synthesis_model_chains(self):
+        from engine import (
+            GEOCODING_MODEL_CHAIN,
+            SYNTHESIS_MODEL,
+            SYNTHESIS_MODEL_CHAIN,
+        )
+
+        self.assertEqual(
+            GEOCODING_MODEL_CHAIN,
+            (
+                "gemini-2.5-flash",
+                "gemini-2.5-flash-lite",
+                "gemini-3.1-flash-lite-preview",
+            ),
+        )
+        self.assertEqual(SYNTHESIS_MODEL, "gemini-3-flash-preview")
+        self.assertEqual(SYNTHESIS_MODEL_CHAIN[0], "gemini-3-flash-preview")
+        self.assertIn("gemini-3.1-flash-lite-preview", SYNTHESIS_MODEL_CHAIN)
+
+    def test_run_geospatial_enrichment_uses_search_then_maps(self):
+        from engine import run_geospatial_enrichment
+
+        scout_payload = json.dumps(
+            {
+                "latitude": 43.15,
+                "longitude": -77.60,
+                "confidence": "medium",
+            }
+        )
+        maps_payload = json.dumps(
+            {
+                "latitude": 43.15612,
+                "longitude": -77.60845,
+                "confidence": "high",
+                "environmental_risk": {
+                    "score": 3.5,
+                    "level": "Low",
+                    "factors": ["No major flood zone flagged"],
+                    "summary": "Low environmental risk for this parcel.",
+                },
+            }
+        )
+
+        with patch(
+            "engine._generate_with_grounding_retry",
+            return_value=(scout_payload, []),
+        ) as mock_search, patch(
+            "engine._generate_with_map_grounding_retry",
+            return_value=(maps_payload, [{"place_id": "places/abc", "uri": "https://maps"}]),
+        ) as mock_maps:
+            result = run_geospatial_enrichment(
+                "10 Park Ave, Rochester, NY 14607",
+                market_city="Rochester",
+            )
+
+        self.assertTrue(mock_search.called)
+        self.assertTrue(mock_maps.called)
+        self.assertAlmostEqual(result["latitude"], 43.15612, places=4)
+        self.assertAlmostEqual(result["longitude"], -77.60845, places=4)
+        self.assertEqual(result["geocode_confidence"], "high")
+        self.assertEqual(result["environmental_risk"]["level"], "Low")
+
+    def test_attach_geospatial_penalizes_location_score_for_high_risk(self):
+        from engine import attach_geospatial_to_property
+
+        updated = attach_geospatial_to_property(
+            {"location_score": 8.0},
+            {
+                "latitude": 43.15,
+                "longitude": -77.60,
+                "environmental_risk": {"score": 8.0, "level": "High", "factors": [], "summary": ""},
+            },
+        )
+        self.assertLess(updated["location_score"], 8.0)
+
+    def test_attach_coordinates_prefers_stored_coords(self):
+        from portfolio_map_page import attach_coordinates
+        import pandas as pd
+
+        df = pd.DataFrame(
+            [
+                {
+                    "address": "10 Park Ave, Rochester, NY 14607",
+                    "zip_code": "14607",
+                    "market_city": "Rochester",
+                    "lat": 43.15612,
+                    "lon": -77.60845,
+                }
+            ]
+        )
+        enriched = attach_coordinates(df)
+        self.assertAlmostEqual(float(enriched.iloc[0]["lat"]), 43.15612, places=4)
+        self.assertAlmostEqual(float(enriched.iloc[0]["lon"]), -77.60845, places=4)
 
 
 class TestHarvestSkipLogic(unittest.TestCase):
@@ -583,11 +683,17 @@ class TestDiscoveryParsing(unittest.TestCase):
         self.assertGreater(calls["count"], 1)
 
     def test_plan_redistributes_unfilled_rochester_slots(self):
-        from engine import HOT_MARKETS, MAX_DISCOVERY_LISTINGS, _plan_market_discovery_pass
+        from engine import (
+            HOT_MARKETS,
+            MAX_DISCOVERY_LISTINGS,
+            _plan_market_discovery_pass,
+            _scaled_market_target,
+        )
 
+        rochester_shortfall = _scaled_market_target("Rochester") - 3
         listings: list[dict] = []
-        for name, _, target in HOT_MARKETS:
-            count = 3 if name == "Rochester" else target
+        for name, _, _ in HOT_MARKETS:
+            count = 3 if name == "Rochester" else _scaled_market_target(name)
             for idx in range(count):
                 listings.append(
                     {
@@ -598,18 +704,19 @@ class TestDiscoveryParsing(unittest.TestCase):
                     }
                 )
 
-        self.assertEqual(len(listings), MAX_DISCOVERY_LISTINGS - 2)
+        self.assertEqual(len(listings), MAX_DISCOVERY_LISTINGS - rochester_shortfall)
         plan = _plan_market_discovery_pass(listings, {"Rochester"})
         planned_total = sum(count for _, count in plan)
-        self.assertEqual(planned_total, 2)
+        self.assertEqual(planned_total, rochester_shortfall)
         self.assertNotIn("Rochester", [market for market, _ in plan])
         self.assertEqual(plan[0][0], "Syracuse")
-        self.assertEqual(plan[0][1], 1)
-        self.assertEqual(plan[1][0], "Buffalo")
-        self.assertEqual(plan[1][1], 1)
 
     def test_plan_keeps_trying_rochester_until_exhausted(self):
-        from engine import _plan_market_discovery_pass
+        from engine import (
+            MAX_DISCOVERY_LISTINGS,
+            _plan_market_discovery_pass,
+            _scaled_market_target,
+        )
 
         listings = [
             {
@@ -622,19 +729,19 @@ class TestDiscoveryParsing(unittest.TestCase):
         ]
         plan = _plan_market_discovery_pass(listings, set())
         rochester_need = next((count for name, count in plan if name == "Rochester"), 0)
-        self.assertEqual(rochester_need, 2)
-        self.assertEqual(sum(count for _, count in plan), 25 - len(listings))
+        self.assertEqual(rochester_need, _scaled_market_target("Rochester") - 3)
+        self.assertEqual(sum(count for _, count in plan), MAX_DISCOVERY_LISTINGS - len(listings))
 
     def test_discover_redistributes_when_rochester_exhausted(self):
-        rochester_calls = 0
-        other_markets: list[str] = []
+        upstate_calls = 0
+        other_regions: list[str] = []
 
         def fake_discovery_attempt(**kwargs):
-            nonlocal rochester_calls
-            split_market = kwargs.get("split_market")
-            if split_market == "Rochester":
-                rochester_calls += 1
-                if rochester_calls == 1:
+            nonlocal upstate_calls
+            region = kwargs.get("split_region")
+            if region == "Upstate NY":
+                upstate_calls += 1
+                if upstate_calls == 1:
                     payload = [
                         {
                             "address": f"{idx} Park Ave, Rochester, NY 1460{idx}",
@@ -648,15 +755,18 @@ class TestDiscoveryParsing(unittest.TestCase):
                     ]
                     return payload, json.dumps(payload)
                 return [], "[]"
-            if split_market:
-                other_markets.append(split_market)
-                row = {
-                    "address": f"1 Oak St, {split_market}, ST 12345",
-                    "city": split_market,
-                    "list_price": 195000,
-                    "listing_url": f"https://www.zillow.com/homedetails/{split_market}-1/",
-                }
-                return [row], json.dumps([row])
+            if region:
+                other_regions.append(region)
+                rows = [
+                    {
+                        "address": f"1 Oak St, {market}, ST 12345",
+                        "city": market,
+                        "list_price": 195000,
+                        "listing_url": f"https://www.zillow.com/homedetails/{market}-1/",
+                    }
+                    for market, _ in kwargs.get("region_market_needs") or []
+                ]
+                return rows, json.dumps(rows)
             return [], "[]"
 
         with patch("engine._run_discovery_attempt", side_effect=fake_discovery_attempt):
@@ -664,8 +774,30 @@ class TestDiscoveryParsing(unittest.TestCase):
 
         rochester_count = sum(1 for item in listings if item["city"] == "Rochester")
         self.assertEqual(rochester_count, 3)
-        self.assertIn("Syracuse", other_markets)
+        self.assertIn("Florida", other_regions)
         self.assertGreater(len(listings), 3)
+
+    def test_plan_region_collapses_carolinas_markets(self):
+        from engine import _plan_region_discovery_pass
+
+        plan = _plan_region_discovery_pass([], set())
+        carolinas = next(
+            (needs for region, needs in plan if region == "Carolinas"),
+            None,
+        )
+        self.assertIsNotNone(carolinas)
+        self.assertEqual(
+            {market for market, _ in carolinas},
+            {"Charlotte", "Raleigh", "Charleston"},
+        )
+        from engine import _scaled_market_target
+
+        self.assertEqual(
+            sum(need for _, need in carolinas),
+            _scaled_market_target("Charlotte")
+            + _scaled_market_target("Raleigh")
+            + _scaled_market_target("Charleston"),
+        )
 
     def test_suburb_address_maps_to_parent_metro(self):
         from engine import _build_listings_from_raw
