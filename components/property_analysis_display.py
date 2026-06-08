@@ -10,6 +10,7 @@ import pandas as pd
 import streamlit as st
 import tldextract
 
+from components.property_comps import ensure_comps_analysis, render_property_comps_section
 from components.property_share import render_share_popover
 from engine import (
     backfill_year_built_if_needed,
@@ -17,9 +18,204 @@ from engine import (
     parse_year_built,
     safe_float,
 )
-from finance import calculate_10yr_appreciation
+from finance import calculate_10yr_appreciation, simulate_market_crash
 from pdf_generator import generate_property_pdf
 from ui_theme import style_matplotlib_chart
+
+
+def _render_market_crash_simulation(
+    *,
+    price: float,
+    predicted_value: float,
+    market_city: str | None,
+    location_score: float,
+    loan_params: dict[str, float],
+    assumptions: dict[str, float],
+    tax_rate: float,
+    monthly_insurance: float,
+    monthly_hoa: float,
+    finance: dict[str, Any],
+) -> None:
+    """Interactive stress test: sudden market drop and worsened rental assumptions."""
+    with st.expander("📉 Market Crash Simulation", expanded=False):
+        st.caption(
+            "Model a sudden downturn for **this property** — value drop, rent decline, "
+            "and higher vacancy — then compare baseline vs stressed outcomes."
+        )
+
+        preset_col1, preset_col2, preset_col3 = st.columns(3)
+        with preset_col1:
+            if st.button("Mild (−15%)", key="crash_preset_mild", use_container_width=True):
+                st.session_state["crash_price_drop"] = 15.0
+                st.session_state["crash_rent_decline"] = 10.0
+                st.session_state["crash_vacancy_spike"] = 3.0
+        with preset_col2:
+            if st.button("Moderate (−25%)", key="crash_preset_moderate", use_container_width=True):
+                st.session_state["crash_price_drop"] = 25.0
+                st.session_state["crash_rent_decline"] = 15.0
+                st.session_state["crash_vacancy_spike"] = 5.0
+        with preset_col3:
+            if st.button("Severe (−40%)", key="crash_preset_severe", use_container_width=True):
+                st.session_state["crash_price_drop"] = 40.0
+                st.session_state["crash_rent_decline"] = 25.0
+                st.session_state["crash_vacancy_spike"] = 8.0
+
+        ctrl1, ctrl2 = st.columns(2)
+        with ctrl1:
+            crash_year = st.slider(
+                "Crash timing (year after purchase)",
+                min_value=1,
+                max_value=5,
+                value=int(st.session_state.get("crash_year", 2)),
+                key="crash_year",
+                help="Year when the sudden price drop occurs.",
+            )
+            price_drop_pct = st.slider(
+                "Property value drop (%)",
+                min_value=5.0,
+                max_value=50.0,
+                value=float(st.session_state.get("crash_price_drop", 25.0)),
+                step=1.0,
+                key="crash_price_drop",
+            )
+        with ctrl2:
+            rent_decline_pct = st.slider(
+                "Rent decline (%)",
+                min_value=0.0,
+                max_value=40.0,
+                value=float(st.session_state.get("crash_rent_decline", 15.0)),
+                step=1.0,
+                key="crash_rent_decline",
+            )
+            vacancy_spike_pct = st.slider(
+                "Extra vacancy reserve (%)",
+                min_value=0.0,
+                max_value=15.0,
+                value=float(st.session_state.get("crash_vacancy_spike", 5.0)),
+                step=0.5,
+                key="crash_vacancy_spike",
+                help="Added on top of your current vacancy assumption during the downturn.",
+            )
+
+        scenario = simulate_market_crash(
+            purchase_price=price,
+            predicted_value=predicted_value,
+            market_city=market_city,
+            location_score=location_score,
+            down_payment_pct=loan_params["down_payment"],
+            interest_rate=loan_params["interest_rate"],
+            loan_term=int(loan_params["loan_term"]),
+            closing_costs_pct=assumptions["user_closing_costs_pct"],
+            tax_rate=tax_rate,
+            monthly_insurance=monthly_insurance,
+            monthly_hoa=monthly_hoa,
+            maint_percent=assumptions["final_maint_percent"],
+            monthly_rent=assumptions["final_monthly_rent"],
+            vacancy_reserve_pct=assumptions["user_vacancy_reserve"],
+            management_fee_pct=assumptions["user_management_fee"],
+            crash_year=crash_year,
+            price_drop_pct=price_drop_pct,
+            rent_decline_pct=rent_decline_pct,
+            vacancy_spike_pct=vacancy_spike_pct,
+        )
+
+        st.markdown("#### At crash point")
+        crash_col1, crash_col2, crash_col3, crash_col4 = st.columns(4)
+        crash_col1.metric(
+            "Value before crash",
+            f"${scenario['pre_crash_value']:,.0f}",
+        )
+        crash_col2.metric(
+            "Value after crash",
+            f"${scenario['crash_value']:,.0f}",
+            delta=f"−{price_drop_pct:.0f}%",
+            delta_color="inverse",
+        )
+        crash_col3.metric(
+            "Equity at crash",
+            f"${scenario['equity_at_crash']:,.0f}",
+            delta="Underwater" if scenario["is_underwater"] else "Positive",
+            delta_color="inverse" if scenario["is_underwater"] else "normal",
+        )
+        recovery = scenario["recovery_years"]
+        recovery_label = f"{recovery} yrs" if recovery is not None else "N/A"
+        crash_col4.metric(
+            "Recovery to pre-crash",
+            recovery_label,
+            help=(
+                f"Years to regain pre-crash value at "
+                f"{scenario['recovery_rate_pct']:.1f}%/yr recovery rate."
+            ),
+        )
+
+        if scenario["is_underwater"]:
+            st.error(
+                f"Loan balance (${scenario['loan_balance_at_crash']:,.0f}) exceeds "
+                f"post-crash value — you would owe more than the property is worth."
+            )
+
+        st.markdown("#### Baseline vs stressed operations")
+        base_cf = finance["monthly_net_cash_flow"]
+        stressed_cf = scenario["stressed_monthly_net_cash_flow"]
+        cf_delta = stressed_cf - base_cf
+        cmp1, cmp2, cmp3 = st.columns(3)
+        cmp1.metric(
+            "Monthly cash flow",
+            f"${stressed_cf:,.0f}",
+            delta=f"${cf_delta:+,.0f} vs baseline",
+            delta_color="inverse",
+        )
+        cmp2.metric(
+            "Cap rate",
+            f"{scenario['stressed_cap_rate']:.2f}%",
+            delta=f"{scenario['stressed_cap_rate'] - scenario['baseline_cap_rate']:+.2f}%",
+            delta_color="inverse",
+        )
+        cmp3.metric(
+            "Cash on cash",
+            f"{scenario['stressed_cash_on_cash']:.2f}%",
+            delta=f"{scenario['stressed_cash_on_cash'] - scenario['baseline_cash_on_cash']:+.2f}%",
+            delta_color="inverse",
+        )
+
+        st.markdown("#### 10-year value path")
+        start_year = datetime.datetime.now().year
+        years = list(range(start_year, start_year + len(scenario["baseline_value_schedule"])))
+
+        fig, ax = plt.subplots(figsize=(8, 4))
+        ax.plot(
+            years,
+            scenario["baseline_value_schedule"],
+            marker="o",
+            color="#2ecc71",
+            linewidth=2,
+            label="Baseline forecast",
+        )
+        ax.plot(
+            years,
+            scenario["crash_value_schedule"],
+            marker="s",
+            color="#e74c3c",
+            linewidth=2,
+            linestyle="--",
+            label="Crash scenario",
+        )
+        crash_x = years[min(crash_year, len(years) - 1)]
+        ax.axvline(crash_x, color="#95a5a6", linestyle=":", alpha=0.8, label="Crash year")
+        ax.set_title("Property Value: Baseline vs Market Crash", fontsize=14)
+        ax.set_xlabel("Year")
+        ax.set_ylabel("Estimated Value ($)")
+        ax.ticklabel_format(style="plain", axis="y")
+        ax.legend(loc="upper left", fontsize=8)
+        style_matplotlib_chart(fig, ax)
+        st.pyplot(fig)
+
+        st.info(
+            f"**Assumptions:** {price_drop_pct:.0f}% value drop in year {crash_year}, "
+            f"{rent_decline_pct:.0f}% rent decline, +{vacancy_spike_pct:.1f}% vacancy. "
+            f"Recovery grows at {scenario['recovery_rate_pct']:.1f}%/yr (metro baseline). "
+            "Mortgage payment unchanged — based on your purchase price and loan terms."
+        )
 
 
 def get_pretty_label(url: str) -> str:
@@ -48,6 +244,7 @@ def render_analysis_results(
 ) -> None:
     """Render the full analysis overview: metrics, tabs, charts, and expanders."""
     property_info = backfill_year_built_if_needed(property_info, address)
+    property_info = ensure_comps_analysis(property_info)
     final_monthly_rent = assumptions["final_monthly_rent"]
     price = safe_float(property_info.get("price"))
     monthly_HOA = safe_float(property_info.get("hoa"))
@@ -127,6 +324,12 @@ def render_analysis_results(
             f"**Reasoning:** {prediction_reasoning}"
         )
 
+        render_property_comps_section(
+            guest_mode=guest_mode,
+            address=address,
+            property_info=property_info,
+        )
+
         with st.expander("📈 10-Year Appreciation Forecast"):
             live_forecast = calculate_10yr_appreciation(
                 predicted_value, location_score, market_city
@@ -183,6 +386,19 @@ def render_analysis_results(
             style_matplotlib_chart(fig, ax)
 
             st.pyplot(fig)
+
+        _render_market_crash_simulation(
+            price=price,
+            predicted_value=predicted_value,
+            market_city=market_city,
+            location_score=location_score,
+            loan_params=loan_params,
+            assumptions=assumptions,
+            tax_rate=safe_float(property_info.get("tax_rate")),
+            monthly_insurance=monthly_insurance,
+            monthly_hoa=monthly_HOA,
+            finance=finance,
+        )
 
     st.markdown("### 📝 AI Property Summary")
     st.write(property_info.get("summary", "No summary available."))

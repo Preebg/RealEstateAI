@@ -159,6 +159,11 @@ def compute_field_confidence(
             pred_conf = min(pred_conf + 0.15, 0.85)
         if price > 0 and abs(predicted_value - price) / price <= 0.15:
             pred_conf = min(pred_conf + 0.05, 0.85)
+        comps = property_data.get("comps_analysis")
+        if isinstance(comps, dict) and comps.get("comp_count", 0) >= 2:
+            pred_conf = min(pred_conf + 0.10, 0.88)
+            if not comps.get("is_undervalued"):
+                pred_conf = min(pred_conf + 0.05, 0.90)
     scores["predicted_value"] = _clamp_confidence(pred_conf)
 
     loc_conf = FIELD_BASE_CONFIDENCE["location_score"]

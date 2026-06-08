@@ -1,3 +1,4 @@
+import math
 import random
 from typing import TypedDict
 
@@ -391,6 +392,15 @@ def project_value_schedule(
     return [base_value * ((1.0 + rate) ** year) for year in range(num_years)]
 
 
+# Listings above this 1-year ROI are treated as unreliable (often foreclosures).
+MAX_RELIABLE_ONE_YEAR_ROI_PCT = 100.0
+
+
+def is_unreliable_one_year_roi(roi_pct: float) -> bool:
+    """True when annual ROI exceeds the reliability ceiling (likely foreclosure pricing)."""
+    return roi_pct > MAX_RELIABLE_ONE_YEAR_ROI_PCT
+
+
 def calculate_one_year_roi(
     *,
     current_price: float,
@@ -420,6 +430,231 @@ def calculate_one_year_roi(
     if total_investment <= 0:
         return 0.0
     return ((appreciation_gain + annual_cash_flow) / total_investment) * 100.0
+
+
+class MarketCrashScenario(TypedDict):
+    baseline_value_schedule: list[float]
+    crash_value_schedule: list[float]
+    crash_year: int
+    price_drop_pct: float
+    rent_decline_pct: float
+    vacancy_spike_pct: float
+    pre_crash_value: float
+    crash_value: float
+    loan_balance_at_crash: float
+    equity_at_crash: float
+    is_underwater: bool
+    recovery_years: int | None
+    annual_rate_pct: float
+    recovery_rate_pct: float
+    baseline_monthly_net_cash_flow: float
+    stressed_monthly_net_cash_flow: float
+    baseline_cap_rate: float
+    stressed_cap_rate: float
+    baseline_cash_on_cash: float
+    stressed_cash_on_cash: float
+    stressed_one_year_roi: float
+
+
+def calculate_loan_balance(
+    price: float,
+    down_payment_pct: float,
+    interest_rate: float,
+    loan_term: int,
+    years_elapsed: int,
+) -> float:
+    """Remaining mortgage balance after *years_elapsed* full years of payments."""
+    if price <= 0 or years_elapsed <= 0:
+        loan_amount = price * (1.0 - (down_payment_pct / 100.0))
+        return max(loan_amount, 0.0)
+
+    loan_amount = price * (1.0 - (down_payment_pct / 100.0))
+    monthly_ir = (interest_rate / 100.0) / 12.0
+    total_payments = loan_term * 12
+    payments_made = min(years_elapsed * 12, total_payments)
+
+    if monthly_ir > 0:
+        factor = (1.0 + monthly_ir) ** total_payments
+        balance = loan_amount * (factor - (1.0 + monthly_ir) ** payments_made) / (factor - 1.0)
+    else:
+        balance = loan_amount * (1.0 - payments_made / total_payments)
+
+    return max(balance, 0.0)
+
+
+def _years_to_recover_value(
+    current_value: float, target_value: float, annual_rate_pct: float
+) -> int | None:
+    if current_value >= target_value:
+        return 0
+    if annual_rate_pct <= 0 or current_value <= 0:
+        return None
+    rate = annual_rate_pct / 100.0
+    years = math.log(target_value / current_value) / math.log(1.0 + rate)
+    return int(math.ceil(years))
+
+
+def project_crash_value_schedule(
+    base_value: float,
+    annual_rate_pct: float,
+    *,
+    crash_year: int,
+    price_drop_pct: float,
+    recovery_rate_pct: float,
+    num_years: int = 11,
+) -> tuple[list[float], float, float]:
+    """
+    Build a value path: normal growth until *crash_year*, sudden drop, then recovery.
+
+    Returns (schedule, pre_crash_value, crash_value).
+    """
+    if base_value <= 0:
+        return ([0.0] * num_years, 0.0, 0.0)
+
+    crash_year = max(1, min(crash_year, num_years - 1))
+    growth = annual_rate_pct / 100.0
+    recovery = recovery_rate_pct / 100.0
+    drop = price_drop_pct / 100.0
+
+    schedule = [base_value]
+    for year in range(1, crash_year):
+        schedule.append(schedule[-1] * (1.0 + growth))
+
+    pre_crash_value = schedule[-1]
+    crash_value = pre_crash_value * (1.0 - drop)
+    schedule.append(crash_value)
+
+    for _ in range(crash_year + 1, num_years):
+        schedule.append(schedule[-1] * (1.0 + recovery))
+
+    return schedule, pre_crash_value, crash_value
+
+
+def simulate_market_crash(
+    *,
+    purchase_price: float,
+    predicted_value: float,
+    market_city: str | None,
+    location_score: float,
+    down_payment_pct: float,
+    interest_rate: float,
+    loan_term: int,
+    closing_costs_pct: float,
+    tax_rate: float,
+    monthly_insurance: float,
+    monthly_hoa: float,
+    maint_percent: float,
+    monthly_rent: float,
+    vacancy_reserve_pct: float,
+    management_fee_pct: float,
+    crash_year: int = 2,
+    price_drop_pct: float = 25.0,
+    rent_decline_pct: float = 15.0,
+    vacancy_spike_pct: float = 5.0,
+    recovery_rate_pct: float | None = None,
+    num_years: int = 11,
+) -> MarketCrashScenario:
+    """
+    Stress-test a property: sudden value drop, rent decline, and vacancy spike.
+
+    Mortgage and taxes stay tied to purchase price; operating assumptions worsen
+    under crash. Returns baseline vs stressed metrics and 10-year value paths.
+    """
+    base_value = predicted_value if predicted_value > 0 else purchase_price
+    annual_rate_pct = expected_annual_appreciation_rate(market_city, location_score) * 100.0
+    if recovery_rate_pct is None:
+        recovery_rate_pct = annual_rate_pct
+
+    baseline_schedule = project_value_schedule(base_value, annual_rate_pct, num_years)
+    crash_schedule, pre_crash_value, crash_value = project_crash_value_schedule(
+        base_value,
+        annual_rate_pct,
+        crash_year=crash_year,
+        price_drop_pct=price_drop_pct,
+        recovery_rate_pct=recovery_rate_pct,
+        num_years=num_years,
+    )
+
+    baseline = analyze_investment(
+        price=purchase_price,
+        down_payment_pct=down_payment_pct,
+        interest_rate=interest_rate,
+        loan_term=loan_term,
+        closing_costs_pct=closing_costs_pct,
+        tax_rate=tax_rate,
+        monthly_insurance=monthly_insurance,
+        monthly_hoa=monthly_hoa,
+        maint_percent=maint_percent,
+        monthly_rent=monthly_rent,
+        vacancy_reserve_pct=vacancy_reserve_pct,
+        management_fee_pct=management_fee_pct,
+    )
+
+    stressed_rent = monthly_rent * (1.0 - rent_decline_pct / 100.0)
+    stressed_vacancy = min(
+        vacancy_reserve_pct + vacancy_spike_pct, PERCENT_FEE_MAX
+    )
+    stressed = analyze_investment(
+        price=purchase_price,
+        down_payment_pct=down_payment_pct,
+        interest_rate=interest_rate,
+        loan_term=loan_term,
+        closing_costs_pct=closing_costs_pct,
+        tax_rate=tax_rate,
+        monthly_insurance=monthly_insurance,
+        monthly_hoa=monthly_hoa,
+        maint_percent=maint_percent,
+        monthly_rent=stressed_rent,
+        vacancy_reserve_pct=stressed_vacancy,
+        management_fee_pct=management_fee_pct,
+    )
+
+    loan_balance = calculate_loan_balance(
+        purchase_price, down_payment_pct, interest_rate, loan_term, crash_year
+    )
+    equity_at_crash = crash_value - loan_balance
+
+    crash_year_idx = min(crash_year, len(crash_schedule) - 1)
+    value_after_crash_year = crash_schedule[crash_year_idx]
+    prior_value = crash_schedule[max(crash_year_idx - 1, 0)]
+    implied_crash_rate = (
+        ((value_after_crash_year - prior_value) / prior_value) * 100.0
+        if prior_value > 0
+        else 0.0
+    )
+
+    return {
+        "baseline_value_schedule": baseline_schedule,
+        "crash_value_schedule": crash_schedule,
+        "crash_year": crash_year,
+        "price_drop_pct": price_drop_pct,
+        "rent_decline_pct": rent_decline_pct,
+        "vacancy_spike_pct": vacancy_spike_pct,
+        "pre_crash_value": pre_crash_value,
+        "crash_value": crash_value,
+        "loan_balance_at_crash": loan_balance,
+        "equity_at_crash": equity_at_crash,
+        "is_underwater": equity_at_crash < 0,
+        "recovery_years": _years_to_recover_value(
+            crash_value, pre_crash_value, recovery_rate_pct
+        ),
+        "annual_rate_pct": annual_rate_pct,
+        "recovery_rate_pct": recovery_rate_pct,
+        "baseline_monthly_net_cash_flow": baseline["monthly_net_cash_flow"],
+        "stressed_monthly_net_cash_flow": stressed["monthly_net_cash_flow"],
+        "baseline_cap_rate": baseline["cap_rate"],
+        "stressed_cap_rate": stressed["cap_rate"],
+        "baseline_cash_on_cash": baseline["cash_on_cash"],
+        "stressed_cash_on_cash": stressed["cash_on_cash"],
+        "stressed_one_year_roi": calculate_one_year_roi(
+            current_price=purchase_price,
+            predicted_value=prior_value,
+            forecast_rate_pct=implied_crash_rate,
+            monthly_net_cash_flow=stressed["monthly_net_cash_flow"],
+            down_payment_pct=down_payment_pct,
+            closing_costs_pct=closing_costs_pct,
+        ),
+    }
 
 
 def analyze_investment(

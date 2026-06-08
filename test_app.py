@@ -727,6 +727,13 @@ class TestDiscoveryParsing(unittest.TestCase):
 
 
 class TestOneYearROI(unittest.TestCase):
+    def test_unreliable_roi_threshold(self):
+        from finance import MAX_RELIABLE_ONE_YEAR_ROI_PCT, is_unreliable_one_year_roi
+
+        self.assertFalse(is_unreliable_one_year_roi(100.0))
+        self.assertTrue(is_unreliable_one_year_roi(100.01))
+        self.assertFalse(is_unreliable_one_year_roi(MAX_RELIABLE_ONE_YEAR_ROI_PCT))
+
     def test_positive_appreciation_and_negative_cashflow(self):
         from finance import calculate_one_year_roi
 
@@ -759,6 +766,93 @@ class TestOneYearROI(unittest.TestCase):
             ),
             0.0,
         )
+
+
+class TestMarketCrashScenario(unittest.TestCase):
+    _BASE_KWARGS = {
+        "purchase_price": 200_000,
+        "predicted_value": 210_000,
+        "market_city": "Rochester",
+        "location_score": 6.0,
+        "down_payment_pct": 25.0,
+        "interest_rate": 6.0,
+        "loan_term": 30,
+        "closing_costs_pct": 3.0,
+        "tax_rate": 3.0,
+        "monthly_insurance": 100.0,
+        "monthly_hoa": 0.0,
+        "maint_percent": 5.0,
+        "monthly_rent": 1_800.0,
+        "vacancy_reserve_pct": 6.0,
+        "management_fee_pct": 10.0,
+    }
+
+    def test_severe_crash_lowers_value_and_equity(self):
+        from finance import simulate_market_crash
+
+        mild = simulate_market_crash(**self._BASE_KWARGS, price_drop_pct=10.0)
+        severe = simulate_market_crash(**self._BASE_KWARGS, price_drop_pct=40.0)
+        self.assertGreater(severe["crash_value"], 0.0)
+        self.assertLess(severe["crash_value"], mild["crash_value"])
+        self.assertLess(severe["equity_at_crash"], mild["equity_at_crash"])
+
+    def test_stressed_cash_flow_worse_than_baseline(self):
+        from finance import simulate_market_crash
+
+        result = simulate_market_crash(
+            **self._BASE_KWARGS,
+            rent_decline_pct=20.0,
+            vacancy_spike_pct=5.0,
+        )
+        self.assertLess(
+            result["stressed_monthly_net_cash_flow"],
+            result["baseline_monthly_net_cash_flow"],
+        )
+        self.assertLess(result["stressed_cash_on_cash"], result["baseline_cash_on_cash"])
+
+    def test_crash_schedules_same_length_and_drop_at_year(self):
+        from finance import simulate_market_crash
+
+        crash_year = 3
+        drop = 25.0
+        result = simulate_market_crash(
+            **self._BASE_KWARGS,
+            crash_year=crash_year,
+            price_drop_pct=drop,
+        )
+        baseline = result["baseline_value_schedule"]
+        crash = result["crash_value_schedule"]
+        self.assertEqual(len(baseline), len(crash))
+        self.assertAlmostEqual(
+            result["crash_value"],
+            result["pre_crash_value"] * (1.0 - drop / 100.0),
+            places=0,
+        )
+        self.assertLess(crash[crash_year], crash[crash_year - 1])
+
+    def test_underwater_when_drop_exceeds_equity(self):
+        from finance import simulate_market_crash
+
+        kwargs = {
+            **self._BASE_KWARGS,
+            "purchase_price": 300_000,
+            "predicted_value": 300_000,
+            "down_payment_pct": 5.0,
+            "price_drop_pct": 50.0,
+            "crash_year": 1,
+        }
+        result = simulate_market_crash(**kwargs)
+        self.assertTrue(result["is_underwater"])
+        self.assertLess(result["equity_at_crash"], 0.0)
+
+    def test_loan_balance_decreases_over_time(self):
+        from finance import calculate_loan_balance
+
+        bal_y1 = calculate_loan_balance(200_000, 25.0, 6.0, 30, 1)
+        bal_y5 = calculate_loan_balance(200_000, 25.0, 6.0, 30, 5)
+        bal_y0 = calculate_loan_balance(200_000, 25.0, 6.0, 30, 0)
+        self.assertAlmostEqual(bal_y0, 150_000.0, places=0)
+        self.assertLess(bal_y5, bal_y1)
 
 
 class TestInsuranceNormalization(unittest.TestCase):
@@ -833,6 +927,107 @@ class TestFeePercentNormalization(unittest.TestCase):
         )
         self.assertAlmostEqual(result["ai_vacancy_rate"], 5.0)
         self.assertAlmostEqual(result["ai_management_fee"], 8.0)
+
+
+class TestUnreliableForeclosureROI(unittest.TestCase):
+    def _foreclosure_like_listing(self) -> dict:
+        return {
+            "address": "99 Foreclosure Ln, Rochester, NY 14609",
+            "price": 45_000,
+            "predicted_value": 185_000,
+            "forecast_rate": 4.0,
+            "rent": 1_800,
+            "tax_rate": 3.0,
+            "insurance": 120,
+            "hoa": 0,
+            "maint_percent": 4.0,
+            "ai_vacancy_rate": 5.0,
+            "ai_management_fee": 10.0,
+            "location_score": 6.0,
+            "monthly_net_cash_flow": 900.0,
+        }
+
+    def test_foreclosure_like_listing_exceeds_roi_ceiling(self):
+        from knowledge_base import (
+            compute_one_year_roi_from_property,
+            one_year_roi_unreliable_reason,
+        )
+
+        listing = self._foreclosure_like_listing()
+        roi = compute_one_year_roi_from_property(listing)
+        self.assertGreater(roi, 100.0)
+        reason = one_year_roi_unreliable_reason(listing)
+        self.assertIsNotNone(reason)
+        self.assertIn("foreclosure", reason.lower())
+
+    def test_save_harvest_skips_unreliable_listing(self):
+        from unittest.mock import MagicMock, patch
+
+        from knowledge_base import save_harvest_property
+
+        mock_client = MagicMock()
+        mock_table = MagicMock()
+        mock_client.table.return_value = mock_table
+
+        with patch("knowledge_base.get_client", return_value=mock_client):
+            result = save_harvest_property(
+                self._foreclosure_like_listing(),
+                user_id="7f35bc1e-9de5-484d-8f73-27fd3da733eb",
+            )
+
+        self.assertIsNone(result)
+        mock_table.upsert.assert_not_called()
+
+    def test_purge_deletes_unreliable_rows(self):
+        from unittest.mock import MagicMock, patch
+
+        from knowledge_base import purge_unreliable_one_year_roi_properties
+
+        bad_row = {
+            "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+            **self._foreclosure_like_listing(),
+        }
+        good_row = {
+            "id": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
+            "address": "10 Main St, Rochester, NY 14609",
+            "price": 200_000,
+            "predicted_value": 205_000,
+            "forecast_rate": 4.0,
+            "original_ai_rent": 1_600,
+            "tax_rate": 3.0,
+            "insurance": 120,
+            "hoa": 0,
+            "original_ai_maint": 4.0,
+            "ai_vacancy_rate": 5.0,
+            "ai_management_fee": 10.0,
+            "location_score": 6.0,
+            "monthly_net_cash_flow": 250.0,
+        }
+
+        mock_client = MagicMock()
+        mock_table = MagicMock()
+        mock_client.table.return_value = mock_table
+        mock_table.delete.return_value.eq.return_value.execute.return_value = (
+            MagicMock(data=[])
+        )
+
+        with (
+            patch(
+                "knowledge_base._fetch_canonical_properties",
+                return_value=[bad_row, good_row],
+            ),
+            patch("knowledge_base.get_client", return_value=mock_client),
+        ):
+            removed = purge_unreliable_one_year_roi_properties()
+
+        self.assertEqual(len(removed), 1)
+        self.assertEqual(removed[0]["address"], bad_row["address"])
+        delete_calls = [
+            call.args[0] for call in mock_client.table.call_args_list
+        ]
+        self.assertIn("user_saved_properties", delete_calls)
+        self.assertIn("user_property_overrides", delete_calls)
+        self.assertIn("properties", delete_calls)
 
 
 class TestHarvestAiBaselines(unittest.TestCase):
@@ -1493,6 +1688,98 @@ class TestPortfolioMapGeocoding(unittest.TestCase):
 
         rows = _dataframe_selected_rows({"selection": {"rows": [2], "columns": []}})
         self.assertEqual(rows, [2])
+
+
+class TestCompsAnalysis(unittest.TestCase):
+    def test_evaluate_flags_undervaluation(self):
+        from comps_analysis import evaluate_comps_against_subject, normalize_comps_payload
+
+        payload = normalize_comps_payload(
+            {
+                "comparable_properties": [
+                    {
+                        "address": "1 Maple St",
+                        "sale_price": 220000,
+                        "square_footage": 1500,
+                        "sale_date": "2024-06",
+                    },
+                    {
+                        "address": "2 Maple St",
+                        "sale_price": 210000,
+                        "square_footage": 1480,
+                        "sale_date": "2024-03",
+                    },
+                    {
+                        "address": "3 Maple St",
+                        "sale_price": 215000,
+                        "square_footage": 1520,
+                        "sale_date": "2023-11",
+                    },
+                ],
+                "market_summary": "Ranch comps cluster near $140/sqft.",
+            }
+        )
+        subject = {
+            "price": 175000,
+            "predicted_value": 180000,
+            "square_footage": 1500,
+        }
+        summary = evaluate_comps_against_subject(payload, subject)
+        self.assertTrue(summary["is_undervalued"])
+        self.assertGreater(summary["comp_suggested_value"], 200000)
+        self.assertLess(summary["predicted_vs_comps_pct"], -8.0)
+
+    def test_apply_comps_valuation_adjustment_raises_predicted_value(self):
+        from comps_analysis import apply_comps_valuation_adjustment
+
+        property_data = {
+            "price": 175000,
+            "predicted_value": 180000,
+            "prediction_reasoning": "Initial AI estimate.",
+        }
+        comps_analysis = {
+            "is_undervalued": True,
+            "comp_suggested_value": 215000,
+            "median_sale_price": 215000,
+            "comp_count": 3,
+        }
+        changed = apply_comps_valuation_adjustment(property_data, comps_analysis)
+        self.assertTrue(changed)
+        self.assertEqual(property_data["predicted_value"], 215000)
+        self.assertIn("Adjusted upward", property_data["prediction_reasoning"])
+
+    def test_fetch_comparable_properties_attaches_summary(self):
+        from engine import fetch_comparable_properties
+
+        mock_json = json.dumps(
+            {
+                "comparable_properties": [
+                    {
+                        "address": "9 Oak Ave",
+                        "sale_price": 205000,
+                        "square_footage": 1400,
+                        "sale_date": "2024-01",
+                    },
+                    {
+                        "address": "11 Oak Ave",
+                        "sale_price": 198000,
+                        "square_footage": 1380,
+                        "sale_date": "2023-09",
+                    },
+                ],
+                "market_summary": "Stable pricing in the submarket.",
+            }
+        )
+        subject = {
+            "price": 170000,
+            "predicted_value": 175000,
+            "square_footage": 1400,
+        }
+        with patch("engine.comps_agent", return_value=mock_json):
+            result = fetch_comparable_properties("123 Main St, Rochester, NY", subject)
+        self.assertIn("comps_analysis", result)
+        self.assertEqual(result["comps_analysis"]["comp_count"], 2)
+        self.assertTrue(result.get("comps_adjusted_predicted_value"))
 
 
 if __name__ == "__main__":

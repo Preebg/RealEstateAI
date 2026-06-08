@@ -11,6 +11,11 @@ from postgrest.exceptions import APIError
 from app_logging import configure_logging, report_error
 from authenticate import get_db_client, get_logged_in_user, in_streamlit_app
 from finance import (
+    MAX_RELIABLE_ONE_YEAR_ROI_PCT,
+    analyze_investment,
+    calculate_10yr_appreciation,
+    calculate_one_year_roi,
+    is_unreliable_one_year_roi,
     normalize_monthly_insurance,
     normalize_percent_rate,
     normalize_tax_rate_percent,
@@ -244,6 +249,7 @@ CANONICAL_PROPERTY_COLUMNS = (
     "monthly_net_cash_flow",
     "original_ai_rent",
     "original_ai_maint",
+    "comps_analysis",
 )
 
 
@@ -364,6 +370,175 @@ def get_ai_baseline_maint(record: dict[str, Any]) -> float:
         return float(record.get("maint_percent") or 0)
     except (TypeError, ValueError):
         return 0.0
+
+
+# Default loan assumptions when recomputing cash flow for ROI screening.
+_DEFAULT_ROI_DOWN_PAYMENT_PCT = 25.0
+_DEFAULT_ROI_INTEREST_RATE = 6.0
+_DEFAULT_ROI_LOAN_TERM = 30
+_DEFAULT_ROI_CLOSING_COSTS_PCT = 3.0
+
+
+def _safe_property_float(value: Any, default: float = 0.0) -> float:
+    if value is None or value == "":
+        return default
+    try:
+        if isinstance(value, str):
+            cleaned = value.replace("$", "").replace(",", "").replace("%", "").strip()
+            return float(cleaned) if cleaned else default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def compute_one_year_roi_from_property(
+    property_data: dict[str, Any],
+    *,
+    down_payment_pct: float = _DEFAULT_ROI_DOWN_PAYMENT_PCT,
+    closing_costs_pct: float = _DEFAULT_ROI_CLOSING_COSTS_PCT,
+    interest_rate: float = _DEFAULT_ROI_INTEREST_RATE,
+    loan_term: int = _DEFAULT_ROI_LOAN_TERM,
+) -> float:
+    """Annual 1-year ROI using stored or recomputed cash flow and appreciation."""
+    price = _safe_property_float(property_data.get("price"))
+    if price <= 0:
+        return 0.0
+
+    rent = get_ai_baseline_rent(property_data)
+    if rent <= 0:
+        rent = _safe_property_float(property_data.get("rent"))
+
+    predicted_value = _safe_property_float(property_data.get("predicted_value"))
+    forecast_rate = _safe_property_float(property_data.get("forecast_rate"))
+    if forecast_rate <= 0:
+        forecast_rate = calculate_10yr_appreciation(
+            price,
+            _safe_property_float(property_data.get("location_score"), 5.0),
+            property_data.get("market_city"),
+        )["annual_rate"]
+
+    if property_data.get("monthly_net_cash_flow") is not None:
+        monthly_cash_flow = _safe_property_float(property_data["monthly_net_cash_flow"])
+    elif rent > 0:
+        analysis = analyze_investment(
+            price=price,
+            down_payment_pct=down_payment_pct,
+            interest_rate=interest_rate,
+            loan_term=loan_term,
+            closing_costs_pct=closing_costs_pct,
+            tax_rate=_safe_property_float(property_data.get("tax_rate")),
+            monthly_insurance=_safe_property_float(property_data.get("insurance")),
+            monthly_hoa=_safe_property_float(property_data.get("hoa")),
+            maint_percent=get_ai_baseline_maint(property_data),
+            monthly_rent=rent,
+            vacancy_reserve_pct=_safe_property_float(
+                property_data.get("ai_vacancy_rate"), 5.0
+            ),
+            management_fee_pct=_safe_property_float(
+                property_data.get("ai_management_fee"), 10.0
+            ),
+        )
+        monthly_cash_flow = analysis["monthly_net_cash_flow"]
+    else:
+        monthly_cash_flow = 0.0
+
+    return calculate_one_year_roi(
+        current_price=price,
+        predicted_value=predicted_value,
+        forecast_rate_pct=forecast_rate,
+        monthly_net_cash_flow=monthly_cash_flow,
+        down_payment_pct=down_payment_pct,
+        closing_costs_pct=closing_costs_pct,
+    )
+
+
+def one_year_roi_unreliable_reason(
+    property_data: dict[str, Any],
+    *,
+    down_payment_pct: float = _DEFAULT_ROI_DOWN_PAYMENT_PCT,
+    closing_costs_pct: float = _DEFAULT_ROI_CLOSING_COSTS_PCT,
+    interest_rate: float = _DEFAULT_ROI_INTEREST_RATE,
+    loan_term: int = _DEFAULT_ROI_LOAN_TERM,
+) -> str | None:
+    """Human-readable foreclosure-screen reason, or None when ROI is within limits."""
+    roi = compute_one_year_roi_from_property(
+        property_data,
+        down_payment_pct=down_payment_pct,
+        closing_costs_pct=closing_costs_pct,
+        interest_rate=interest_rate,
+        loan_term=loan_term,
+    )
+    if is_unreliable_one_year_roi(roi):
+        return (
+            f"Unreliable: 1-year ROI {roi:.1f}% exceeds "
+            f"{MAX_RELIABLE_ONE_YEAR_ROI_PCT:.0f}% (likely foreclosure listing)"
+        )
+    return None
+
+
+def delete_canonical_property_by_id(property_id: str) -> bool:
+    """Delete a canonical property and dependent user bookmarks/overrides."""
+    if not property_id or not is_valid_uuid(property_id):
+        return False
+
+    supabase = get_client()
+    try:
+        supabase.table("user_saved_properties").delete().eq(
+            "property_id", property_id
+        ).execute()
+        supabase.table("user_property_overrides").delete().eq(
+            "property_id", property_id
+        ).execute()
+        supabase.table("properties").delete().eq("id", property_id).execute()
+    except APIError as exc:
+        report_error(
+            log,
+            "kb_canonical_delete_failed",
+            exc,
+            property_id=property_id,
+        )
+        return False
+
+    log.info("kb_canonical_delete_success", property_id=property_id)
+    return True
+
+
+def delete_unreliable_property(property_data: dict[str, Any]) -> bool:
+    """Remove an unreliable listing from the shared properties table when present."""
+    property_id = property_data.get("id")
+    if property_id and is_valid_uuid(str(property_id)):
+        return delete_canonical_property_by_id(str(property_id))
+
+    address = str(property_data.get("address") or "").strip()
+    if not address:
+        return False
+
+    resolved_id = get_property_id_by_address(address)
+    if resolved_id:
+        return delete_canonical_property_by_id(resolved_id)
+    return False
+
+
+def purge_unreliable_one_year_roi_properties() -> list[dict[str, str]]:
+    """Delete canonical rows whose 1-year ROI exceeds the reliability ceiling."""
+    removed: list[dict[str, str]] = []
+    for row in _fetch_canonical_properties():
+        reason = one_year_roi_unreliable_reason(row)
+        if not reason:
+            continue
+
+        property_id = row.get("id")
+        address = str(row.get("address") or "")
+        if not property_id or not delete_canonical_property_by_id(str(property_id)):
+            continue
+
+        removed.append({"address": address, "reason": reason})
+        log.warning(
+            "kb_unreliable_purged",
+            address=address,
+            reason=reason,
+        )
+    return removed
 
 
 def get_official_rent(record: dict[str, Any]) -> float | None:
@@ -576,6 +751,21 @@ def save_canonical_property(
 
     if not user_id or not is_valid_uuid(user_id):
         raise ValueError(f"user_id must be a valid UUID, got: {user_id!r}")
+
+    unreliable_reason = one_year_roi_unreliable_reason(property_data)
+    if unreliable_reason:
+        delete_unreliable_property(property_data)
+        log.warning(
+            "kb_canonical_save_unreliable",
+            address=property_data.get("address"),
+            reason=unreliable_reason,
+        )
+        if show_errors and st is not None:
+            st.warning(
+                f"Property not saved — {unreliable_reason}. "
+                "It was removed from the database if it was already stored."
+            )
+        return None
 
     supabase = get_client()
     filtered_payload = _prepare_canonical_payload(property_data, user_id)
@@ -1251,6 +1441,11 @@ __all__ = [
     "get_user_saved_properties",
     "render_user_saved_properties_sidebar",
     "save_harvest_property",
+    "compute_one_year_roi_from_property",
+    "one_year_roi_unreliable_reason",
+    "delete_canonical_property_by_id",
+    "delete_unreliable_property",
+    "purge_unreliable_one_year_roi_properties",
     "get_kb_context",
     "get_market_pulse",
     "get_telemetry_stats",

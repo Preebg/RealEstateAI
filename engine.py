@@ -23,6 +23,11 @@ from finance import (
     normalize_percent_rate,
     normalize_tax_rate_percent,
 )
+from comps_analysis import (
+    apply_comps_valuation_adjustment,
+    evaluate_comps_against_subject,
+    normalize_comps_payload,
+)
 from data_provenance import attach_data_provenance
 from knowledge_base import get_kb_context, lookup_property
 from quantum_portfolio import (
@@ -2286,6 +2291,97 @@ def run_harvest_quantum(
 # ---------------------------------------------------------------------------
 
 
+def _comps_context_block(property_data: dict[str, Any]) -> str:
+    lines = [
+        f"- List price: ${safe_float(property_data.get('price')):,.0f}",
+        f"- AI predicted value: ${safe_float(property_data.get('predicted_value')):,.0f}",
+    ]
+    sqft = int(safe_float(property_data.get("square_footage")))
+    if sqft > 0:
+        lines.append(f"- Square footage: {sqft:,}")
+    year_built = parse_year_built(property_data)
+    if year_built:
+        lines.append(f"- Year built: {year_built}")
+    summary = str(property_data.get("summary") or "").strip()
+    if summary:
+        lines.append(f"- Listing summary: {summary[:400]}")
+    return "\n".join(lines)
+
+
+def comps_agent(address: str, property_data: dict[str, Any], model: str) -> str:
+    """Grounded search for structured comparable sales near the subject property."""
+    context = _comps_context_block(property_data)
+    prompt = f"""Find recent comparable SALES (closed transactions, not active listings) near:
+{address}
+
+SUBJECT PROPERTY CONTEXT:
+{context}
+
+Requirements:
+- Return 3 to 5 comps sold within the last 18 months when possible.
+- Match property type, beds/baths, square footage (+/- 20%), and neighborhood.
+- Prefer sales within 1 mile of the subject.
+- Use Zillow sold history, Redfin sold data, Realtor.com, county recorder, or MLS.
+- Each comp must have a verified sale price.
+
+Return ONLY JSON:
+{{
+  "comparable_properties": [
+    {{
+      "address": "full street address",
+      "sale_price": number,
+      "sale_date": "YYYY-MM or YYYY-MM-DD",
+      "square_footage": number,
+      "bedrooms": number,
+      "bathrooms": number,
+      "property_type": "Single Family | Duplex | Townhome | etc",
+      "distance_miles": number,
+      "comparison_notes": "how this comp compares to the subject",
+      "source_url": "url"
+    }}
+  ],
+  "market_summary": "1-2 sentences on what comps imply for subject value"
+}}
+
+No currency symbols or commas outside JSON numbers."""
+    return generate_with_retry(model, prompt, use_search=True)
+
+
+def fetch_comparable_properties(
+    address: str,
+    property_data: dict[str, Any],
+    *,
+    model: str | None = None,
+) -> dict[str, Any]:
+    """
+    Research area comps and attach comps_analysis to a copy of property_data.
+
+    May adjust predicted_value upward when comps show material undervaluation.
+    """
+    active_model = model or PRIMARY_SEARCH_MODEL
+    raw = comps_agent(address, property_data, active_model)
+    extracted = _extract_json(raw)
+    comps_payload = normalize_comps_payload(extracted if isinstance(extracted, dict) else {})
+    comps_analysis = evaluate_comps_against_subject(comps_payload, property_data)
+
+    updated = dict(property_data)
+    updated["comps_analysis"] = comps_analysis
+    if apply_comps_valuation_adjustment(updated, comps_analysis):
+        enriched = enrich_with_forecast(updated)
+        updated.update(
+            {
+                "predicted_value": enriched.get("predicted_value", updated.get("predicted_value")),
+                "prediction_reasoning": enriched.get(
+                    "prediction_reasoning", updated.get("prediction_reasoning")
+                ),
+                "appreciation_forecast": enriched.get("appreciation_forecast"),
+                "forecast_rate": enriched.get("forecast_rate"),
+                "forecast_growth": enriched.get("forecast_growth"),
+            }
+        )
+    return updated
+
+
 def researcher_agent(address: str, model: str) -> str:
     prompt = f"""Research the property at {address}.
           CRITICAL: You must cross-reference at least 3 different real estate sources (e.g., Zillow, Redfin, Realtor.com, local MLS) to find the currrent
@@ -2385,14 +2481,23 @@ def get_final_analysis(
     initial_data: dict[str, Any],
     address: str,
     research_results: str | None = None,
+    *,
+    skip_comps: bool = False,
 ) -> dict[str, Any]:
-    """Stage 2: Verification, detailed mapping, and forecasting."""
+    """Stage 2: Verification, comps cross-check, detailed mapping, and forecasting."""
     property_data = backfill_year_built_if_needed(dict(initial_data), address)
     canonicalize_year_built_fields(property_data)
     if not property_data.get("sources"):
         property_data["sources"] = [
             f"https://www.google.com/search?q={address.replace(' ', '+')}"
         ]
+
+    if not skip_comps and not property_data.get("comps_analysis"):
+        try:
+            property_data = fetch_comparable_properties(address, property_data)
+        except Exception as exc:
+            _log.warning("comps_fetch_failed", address=address, error=str(exc))
+
     enriched = enrich_with_forecast(property_data)
     return attach_data_provenance(enriched, pipeline="underwriter_ui")
 

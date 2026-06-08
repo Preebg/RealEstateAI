@@ -63,7 +63,10 @@ def run_initial_property_analysis(address: str) -> bool:
             f"(10th–90th: {forecast['annual_rate_p10']:.2f}%–{forecast['annual_rate_p90']:.2f}%)"
         )
 
-        status.update(label="✅ Verifying data and calculating ROI...", state="running")
+        status.update(
+            label="🏘️ Checking comparable sales and verifying valuation...",
+            state="running",
+        )
         final_result = get_final_analysis(initial_data, address, research_results)
         st.session_state.property_data = final_result
         done_label = (

@@ -16,11 +16,14 @@ import engine
 from app_logging import configure_logging, report_error
 from finance import analyze_investment
 from knowledge_base import (
+    delete_unreliable_property,
     get_admin_uid,
     get_market_pulse,
     get_scanned_addresses,
     is_property_already_scanned,
     normalize_address_key,
+    one_year_roi_unreliable_reason,
+    purge_unreliable_one_year_roi_properties,
     save_harvest_property,
 )
 
@@ -459,6 +462,27 @@ async def _synthesize_listing(
     )
     final_data["monthly_net_cash_flow"] = cash_flow
 
+    unreliable_reason = one_year_roi_unreliable_reason(
+        final_data,
+        down_payment_pct=INVESTMENT_PARAMS["down_payment"],
+        closing_costs_pct=INVESTMENT_PARAMS["closing_costs_pct"],
+        interest_rate=INVESTMENT_PARAMS["interest_rate"],
+        loan_term=int(INVESTMENT_PARAMS["loan_term"]),
+    )
+    if unreliable_reason:
+        await asyncio.to_thread(delete_unreliable_property, final_data)
+        async with report_lock:
+            report.setdefault("unreliable_deleted", []).append(
+                {"address": address, "reason": unreliable_reason}
+            )
+        log.warning(
+            "listing_unreliable_foreclosure",
+            address=address,
+            reason=unreliable_reason,
+        )
+        print(f"  [synthesis] UNRELIABLE {address} — {unreliable_reason} (deleted)")
+        return
+
     save_result = await asyncio.to_thread(
         save_harvest_property, final_data, user_id=admin_user_id
     )
@@ -588,8 +612,24 @@ async def run_harvester_pipeline_async(admin_user_id: str) -> dict[str, Any]:
         "already_scanned": [],
         "failed": [],
         "saved": [],
+        "unreliable_deleted": [],
         **{name.lower(): [] for name, _, _ in engine.HOT_MARKETS},
     }
+
+    purged = await asyncio.to_thread(purge_unreliable_one_year_roi_properties)
+    if purged:
+        from portfolio_map_page import invalidate_portfolio_cache
+
+        invalidate_portfolio_cache()
+        print(
+            f"Purged {len(purged)} unreliable properties "
+            f"(1-year ROI > 100%, likely foreclosures)."
+        )
+        for entry in purged[:5]:
+            print(f"  - {entry['address']}")
+        if len(purged) > 5:
+            print(f"  - ... and {len(purged) - 5} more")
+        log.info("harvest_unreliable_purge_complete", purged=len(purged))
 
     scanned_addresses = sorted(get_scanned_addresses(admin_user_id))
     scanned_keys = {normalize_address_key(addr) for addr in scanned_addresses}
@@ -686,6 +726,7 @@ async def run_harvester_pipeline_async(admin_user_id: str) -> dict[str, Any]:
         f"Synthesized: {report['synthesized']} | "
         f"Skipped: {len(report['skipped'])} | "
         f"Already scanned: {len(report['already_scanned'])} | "
+        f"Unreliable deleted: {len(report['unreliable_deleted'])} | "
         f"Failed: {len(report['failed'])}"
     )
     log.info(
@@ -695,6 +736,7 @@ async def run_harvester_pipeline_async(admin_user_id: str) -> dict[str, Any]:
         synthesized=report["synthesized"],
         skipped=len(report["skipped"]),
         already_scanned=len(report["already_scanned"]),
+        unreliable_deleted=len(report["unreliable_deleted"]),
         failed=len(report["failed"]),
         saved=len(report["saved"]),
     )
