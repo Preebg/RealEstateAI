@@ -440,6 +440,35 @@ class TestDailyQuotaDetection(unittest.TestCase):
         self.assertEqual(DISCOVERY_MODEL_CHAIN, ("gemini-2.5-flash", "gemini-2.5-flash-lite", "gemma-4-21b-it"))
         self.assertTrue(any(model == "gemma-4-26b-a4b-it" for model in calls))
 
+    def test_discovery_on_listing_found_fires_per_new_listing(self):
+        rochester_row = dict(_VERIFIED_DISCOVERY_ROW)
+        syracuse_row = {
+            "address": "20 E Genesee St, Syracuse, NY 13202",
+            "city": "Syracuse",
+            "list_price": 180000,
+            "listing_url": "https://www.zillow.com/homedetails/20-E-Genesee-St-Syracuse-NY-13202/456_zpid/",
+        }
+        found: list[str] = []
+
+        def fake_attempt(**kwargs):
+            market = kwargs.get("split_market")
+            if market == "Rochester":
+                return [_VERIFIED_DISCOVERY_ROW], "rochester"
+            if market == "Syracuse":
+                return [syracuse_row], "syracuse"
+            return [], ""
+
+        with patch("engine._run_discovery_attempt", side_effect=fake_attempt):
+            listings = discover_hot_market_listings(
+                model=DISCOVERY_FALLBACK_MODEL,
+                on_listing_found=lambda item: found.append(item["address"]),
+            )
+
+        self.assertGreaterEqual(len(found), 2)
+        self.assertEqual(found[0], rochester_row["address"])
+        self.assertIn(syracuse_row["address"], found)
+        self.assertGreaterEqual(len(listings), 2)
+
 
 class TestSearchGrounding(unittest.TestCase):
     def test_discovery_uses_search_for_gemini_and_gemma_fallback(self):
@@ -1271,12 +1300,11 @@ class TestHeadlessDetection(unittest.TestCase):
 
 
 class TestPropertyAge(unittest.TestCase):
-    def test_parse_year_built_rejects_suspicious_current_year_default(self):
+    def test_parse_year_built_ignores_small_values(self):
         from engine import parse_year_built
 
-        current = date.today().year
-        self.assertIsNone(parse_year_built({"year_built": current}))
-        self.assertIsNone(parse_year_built({"year": current - 1}))
+        self.assertIsNone(parse_year_built({"year": 2}))
+        self.assertIsNone(parse_year_built({"year_built": 50}))
 
     def test_parse_year_built_accepts_valid_construction_year(self):
         from engine import parse_year_built
@@ -1284,16 +1312,21 @@ class TestPropertyAge(unittest.TestCase):
         self.assertEqual(parse_year_built({"year_built": 1920}), 1920)
         self.assertEqual(parse_year_built({"year": 1968}), 1968)
 
-    def test_parse_year_built_interprets_small_values_as_age(self):
-        from engine import parse_year_built
-
-        self.assertEqual(parse_year_built({"year": 50}), date.today().year - 50)
-
-    def test_calculate_property_age_uses_valid_year_built(self):
+    def test_calculate_property_age_is_current_year_minus_year_built(self):
         from engine import calculate_property_age_years
 
-        age = calculate_property_age_years({"year_built": 1920})
-        self.assertGreater(age, 90)
+        year_built = 1920
+        expected = date.today().year - year_built
+        self.assertEqual(
+            calculate_property_age_years({"year_built": year_built}),
+            expected,
+        )
+
+    def test_calculate_property_age_rejects_placeholder_year_built(self):
+        from engine import calculate_property_age_years
+
+        current = date.today().year
+        self.assertIsNone(calculate_property_age_years({"year_built": current}))
 
     def test_normalize_record_strips_placeholder_year_built(self):
         from knowledge_base import _normalize_record_numerics
@@ -1362,6 +1395,58 @@ class TestDataProvenance(unittest.TestCase):
         self.assertEqual(confidence_label(0.92), "High")
         self.assertEqual(confidence_label(0.65), "Medium")
         self.assertEqual(confidence_label(0.45), "Low")
+
+    def test_total_confidence_varies_by_property_signals(self):
+        from data_provenance import compute_total_confidence
+
+        sparse = compute_total_confidence(
+            {"price": 250000, "rent": 1800, "tax_rate": 2.8, "insurance": 0}
+        )
+        rich = compute_total_confidence(
+            {
+                "price": 250000,
+                "rent": 1800,
+                "tax_rate": 2.8,
+                "insurance": 95,
+                "hoa": 0,
+                "predicted_value": 248000,
+                "prediction_reasoning": "Comparable sales in the neighborhood support this valuation range.",
+                "location_score": 7.5,
+                "market_city": "Rochester",
+                "year_built": 1998,
+                "summary": "Well-maintained duplex with long-term tenant.",
+                "sources": [
+                    "https://www.zillow.com/homedetails/a",
+                    "https://www.realtor.com/realestate/b",
+                    "https://www.redfin.com/c",
+                ],
+            },
+            {
+                "stated_gross_monthly_rent": 1800,
+                "taxes": 7000,
+                "year_built": 1998,
+                "square_footage": 1800,
+                "property_type": "duplex",
+            },
+        )
+        self.assertGreater(rich, sparse)
+        self.assertGreaterEqual(sparse, 30)
+        self.assertLessEqual(rich, 100)
+
+    def test_attach_provenance_sets_total_confidence_pct(self):
+        from data_provenance import attach_data_provenance
+
+        record = {
+            "price": 180000,
+            "rent": 1500,
+            "tax_rate": 3.4,
+            "insurance": 95,
+            "sources": ["https://www.zillow.com/homedetails/example"],
+        }
+        attach_data_provenance(record, pipeline="underwriter_ui")
+        self.assertIn("total_confidence_pct", record)
+        self.assertGreaterEqual(record["total_confidence_pct"], 40)
+        self.assertLessEqual(record["total_confidence_pct"], 100)
 
 
 class TestPortfolioMapGeocoding(unittest.TestCase):

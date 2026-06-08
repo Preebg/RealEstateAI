@@ -11,10 +11,15 @@ import streamlit as st
 import tldextract
 
 from components.property_share import render_share_popover
-from engine import calculate_property_age_years, safe_float
+from engine import (
+    backfill_year_built_if_needed,
+    calculate_property_age_years,
+    parse_year_built,
+    safe_float,
+)
 from finance import calculate_10yr_appreciation
 from pdf_generator import generate_property_pdf
-from ui_theme import render_metric_with_confidence, style_matplotlib_chart
+from ui_theme import style_matplotlib_chart
 
 
 def get_pretty_label(url: str) -> str:
@@ -39,9 +44,10 @@ def render_analysis_results(
     assumptions: dict[str, float],
     finance: dict[str, Any],
     loan_params: dict[str, float],
-    field_confidence: dict[str, float],
+    total_confidence_pct: int | None,
 ) -> None:
     """Render the full analysis overview: metrics, tabs, charts, and expanders."""
+    property_info = backfill_year_built_if_needed(property_info, address)
     final_monthly_rent = assumptions["final_monthly_rent"]
     price = safe_float(property_info.get("price"))
     monthly_HOA = safe_float(property_info.get("hoa"))
@@ -182,28 +188,19 @@ def render_analysis_results(
     st.write(property_info.get("summary", "No summary available."))
 
     with st.expander("View Detailed Monthly Breakdown"):
-        conf_col1, conf_col2, conf_col3 = st.columns(3)
-        with conf_col1:
-            render_metric_with_confidence(
-                "List Price",
-                f"${price:,.2f}",
-                field_confidence.get("price"),
-                help_text="Confidence in listing price extraction (SNR-style sensor quality).",
+        if total_confidence_pct is not None:
+            st.metric(
+                label="Data Confidence",
+                value=f"{total_confidence_pct}%",
+                help=(
+                    "Overall confidence in the scraped and inferred data for this property (0–100%). "
+                    "Varies by listing quality: source count, stated rent, tax records, and field completeness."
+                ),
             )
-        with conf_col2:
-            render_metric_with_confidence(
-                "Monthly Rent",
-                f"${final_monthly_rent:,.2f}",
-                field_confidence.get("rent"),
-                help_text="Rent is often inferred; lower confidence when not stated in listing.",
-            )
-        with conf_col3:
-            render_metric_with_confidence(
-                "Property Taxes (monthly)",
-                f"${monthly_taxes:,.2f}",
-                field_confidence.get("tax_rate"),
-                help_text="Derived from annual tax ÷ price; county records can lag listings.",
-            )
+        metric_col1, metric_col2, metric_col3 = st.columns(3)
+        metric_col1.metric("List Price", f"${price:,.2f}")
+        metric_col2.metric("Monthly Rent", f"${final_monthly_rent:,.2f}")
+        metric_col3.metric("Property Taxes (monthly)", f"${monthly_taxes:,.2f}")
         st.write("Monthly Cash Flow")
 
         table_data = {
@@ -235,9 +232,10 @@ def render_analysis_results(
         df = pd.DataFrame(table_data)
         st.table(df)
 
+        year_built = parse_year_built(property_info)
         property_age = calculate_property_age_years(property_info)
-        if property_age is not None:
-            st.info(f"Property Age: {property_age} years.")
+        if property_age is not None and year_built is not None:
+            st.info(f"Property Age: {property_age} years (built {year_built}).")
         else:
             st.info("Property Age: Unknown")
         st.info(f"Total Investment: ${total_investment:,.2f}")
@@ -277,77 +275,3 @@ def render_analysis_results(
             file_name=f"Analysis_{address.replace(' ', '_')}.pdf",
             mime="application/pdf",
         )
-
-    _render_data_provenance(property_info, field_confidence)
-
-
-def _render_data_provenance(
-    property_info: dict[str, Any],
-    field_confidence: dict[str, float],
-) -> None:
-    provenance = property_info.get("data_provenance")
-    if not provenance:
-        return
-
-    with st.expander("📡 Data Provenance (optional)", expanded=False):
-        st.caption(
-            "Signal chain from noisy listing scrapes → extracted fields → "
-            "`finance.py` normalization → underwriting scores. "
-            "See `docs/DATA_PIPELINE.md` for the EE framing."
-        )
-        chain = " → ".join(provenance.get("signal_chain", []))
-        st.markdown(f"**Pipeline:** `{provenance.get('pipeline', 'unknown')}` · **Chain:** {chain}")
-
-        source_urls = provenance.get("source_urls") or []
-        if source_urls:
-            st.markdown("**1. Source URLs**")
-            for link in source_urls:
-                pretty_name = get_pretty_label(link)
-                st.markdown(f"- [{pretty_name}]({link})")
-        else:
-            st.markdown("**1. Source URLs** — none captured")
-
-        extraction = provenance.get("extraction") or {}
-        st.markdown(f"**2. Extraction** — `{extraction.get('stage', 'n/a')}`")
-        fields = extraction.get("fields") or {}
-        if fields:
-            st.json(fields)
-
-        normalization = provenance.get("normalization") or []
-        st.markdown("**3. Normalization** (`finance.py` helpers)")
-        if normalization:
-            norm_rows = [
-                {
-                    "Field": step.get("field"),
-                    "Helper": step.get("helper"),
-                    "Value": step.get("normalized_value"),
-                    "Note": step.get("note"),
-                }
-                for step in normalization
-            ]
-            st.dataframe(pd.DataFrame(norm_rows), use_container_width=True, hide_index=True)
-        else:
-            st.caption("No normalization steps recorded.")
-
-        scoring = provenance.get("scoring") or []
-        st.markdown("**4. Scoring**")
-        if scoring:
-            score_rows = [
-                {
-                    "Stage": step.get("stage"),
-                    "Module": step.get("module"),
-                    "Inputs": ", ".join(step.get("inputs", [])),
-                    "Outputs": ", ".join(
-                        step.get("outputs") or ([step.get("output")] if step.get("output") else [])
-                    ),
-                }
-                for step in scoring
-            ]
-            st.dataframe(pd.DataFrame(score_rows), use_container_width=True, hide_index=True)
-
-        if field_confidence:
-            st.markdown("**Per-field confidence (0–1)**")
-            conf_df = pd.DataFrame(
-                [{"Field": k, "Confidence": v, "Band": f"{v * 100:.0f}%"} for k, v in field_confidence.items()]
-            )
-            st.dataframe(conf_df, use_container_width=True, hide_index=True)

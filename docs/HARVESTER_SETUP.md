@@ -146,12 +146,13 @@ For every 90 minutes, use a loop script or systemd timer with `OnUnitActiveSec=9
 
 | Stage | Model | Calls per run | Concurrency |
 |-------|--------|----------------|-------------|
-| Discovery | gemini-2.5-flash → flash-lite → gemma-4-21b-it (API: 26b-a4b) | **1** | Sequential |
+| Discovery | gemini-2.5-flash → flash-lite → gemma-4-21b-it (API: 26b-a4b) | 1 (Flash) or per-market (Gemma) | Sequential |
 | Research | gemma-4-31b-it → gemma-4-21b-it (API: 26b-a4b) | up to ~25 | **Parallel** (≤10 calls/min) |
 | Synthesis | gemini-3.1-flash-lite-preview | up to ~25 | **Parallel** (≤10 calls/min) |
 
-Stages 2 and 3 are pipelined via `asyncio`: research runs in parallel, and each property
-is sent to synthesis as soon as its research finishes (no wait for the full research batch).
+Discovery **overlaps** with research: each verified address is sent to the research agent
+as soon as it is found (via `on_listing_found`), so slow Gemma per-market discovery does not
+block the pipeline. Research → synthesis stays pipelined per property.
 A per-model sliding-window rate limiter (10 requests per 60 seconds) stays under the ~15 RPM cap.
 
 Every **1.5 hours** ≈ **16 runs/day** → plan Gemini/Supabase limits accordingly.

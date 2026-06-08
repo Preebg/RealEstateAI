@@ -123,16 +123,15 @@ def render_app_footer_glossary() -> None:
 
 
 def render_confidence_badge(score: float, *, show_pct: bool = True) -> str:
-    """Return HTML for a small SNR-style confidence badge (0–1)."""
-    from data_provenance import confidence_badge_color, confidence_label
+    """Return HTML for a small data-quality confidence badge (0–1)."""
+    from data_provenance import confidence_badge_color
 
-    label = confidence_label(score)
-    pct = f" {score * 100:.0f}%" if show_pct else ""
+    pct = f"{score * 100:.0f}%" if show_pct else ""
     color = confidence_badge_color(score)
     return (
         f'<span class="confidence-badge" style="background:{color};" '
-        f'title="Field confidence {score:.2f} (measurement uncertainty)">'
-        f'{label}{pct}</span>'
+        f'title="How confident we are in this scraped/inferred value—not whether the amount is high or low.">'
+        f'Data {pct}</span>'
     )
 
 

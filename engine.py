@@ -10,6 +10,7 @@ import time
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from datetime import date
+from collections.abc import Callable
 from typing import Any, cast
 from urllib.parse import urlparse
 
@@ -1145,6 +1146,26 @@ def _dedupe_discovery_listings(
     return unique[:limit]
 
 
+def _extend_discovery_listings(
+    existing: list[dict[str, Any]],
+    new_items: list[dict[str, Any]],
+    *,
+    max_price: float,
+    on_listing_found: Callable[[dict[str, Any]], None] | None = None,
+) -> list[dict[str, Any]]:
+    """Merge new discovery rows, dedupe, and optionally notify per new listing."""
+    before_keys = {item["address"].lower() for item in existing}
+    merged = list(existing) + list(new_items)
+    deduped = _dedupe_discovery_listings(merged, max_price=max_price)
+    if on_listing_found:
+        for item in deduped:
+            key = item["address"].lower()
+            if key not in before_keys:
+                on_listing_found(item)
+                before_keys.add(key)
+    return deduped
+
+
 def _build_listings_from_raw(
     raw: str,
     max_price: float,
@@ -1408,25 +1429,21 @@ def _is_suspicious_default_year_built(year: int | float | None) -> bool:
 
 
 def parse_year_built(property_info: dict[str, Any]) -> int | None:
-    """Extract construction year from year_built or year fields."""
+    """Extract 4-digit construction year from year_built or year fields."""
     for key in ("year_built", "year"):
         raw = property_info.get(key)
         if raw is None:
             continue
         year = safe_float(raw, default=0.0)
         if year >= 1800:
-            if _is_suspicious_default_year_built(year):
-                continue
             return int(year)
-        if 0 < year < 300:
-            return date.today().year - int(year)
     return None
 
 
 def canonicalize_year_built_fields(data: dict[str, Any]) -> None:
     """Normalize year/year_built to a single trustworthy year_built value."""
     year = parse_year_built(data)
-    if year is not None:
+    if year is not None and not _is_suspicious_default_year_built(year):
         data["year_built"] = year
         data["year"] = year
         return
@@ -1445,7 +1462,7 @@ def backfill_year_built_if_needed(
     from knowledge_base import normalize_address_key
 
     existing = parse_year_built(property_data)
-    if existing is not None:
+    if existing is not None and not _is_suspicious_default_year_built(existing):
         return property_data
 
     key = normalize_address_key(address)
@@ -1480,16 +1497,11 @@ def backfill_year_built_if_needed(
 
 
 def calculate_property_age_years(property_info: dict[str, Any]) -> int | None:
-    """Years since the property was built (today minus built date)."""
-    year = parse_year_built(property_info)
-    if year is None:
+    """Property age in whole years: current calendar year minus year built."""
+    year_built = parse_year_built(property_info)
+    if year_built is None or _is_suspicious_default_year_built(year_built):
         return None
-    built_date = date(year, 1, 1)
-    today = date.today()
-    age = today.year - built_date.year - (
-        (today.month, today.day) < (built_date.month, built_date.day)
-    )
-    return max(age, 0)
+    return max(date.today().year - year_built, 0)
 
 
 _SYNTHESIS_NUMERIC_KEYS = (
@@ -1543,6 +1555,7 @@ def _discover_listings_per_market(
     max_price: float,
     exclude_addresses: list[str] | None,
     seed_listings: list[dict[str, Any]] | None = None,
+    on_listing_found: Callable[[dict[str, Any]], None] | None = None,
 ) -> tuple[list[dict[str, Any]], str]:
     """Focused per-market discovery (works better for the Gemma fallback model)."""
     split_listings = list(seed_listings or [])
@@ -1603,8 +1616,12 @@ def _discover_listings_per_market(
             elapsed = time.monotonic() - started
             last_raw = market_raw or last_raw
             before = len(split_listings)
-            split_listings.extend(market_listings)
-            split_listings = _dedupe_discovery_listings(split_listings, max_price=max_price)
+            split_listings = _extend_discovery_listings(
+                split_listings,
+                market_listings,
+                max_price=max_price,
+                on_listing_found=on_listing_found,
+            )
             added = len(split_listings) - before
             round_added += added
             if needed_count > 0 and not market_listings:
@@ -1645,9 +1662,11 @@ def _discover_listings_per_market(
                 )
                 last_raw = market_raw or last_raw
                 before = len(split_listings)
-                split_listings.extend(market_listings)
-                split_listings = _dedupe_discovery_listings(
-                    split_listings, max_price=max_price
+                split_listings = _extend_discovery_listings(
+                    split_listings,
+                    market_listings,
+                    max_price=max_price,
+                    on_listing_found=on_listing_found,
                 )
                 _discovery_log(
                     f"[discovery] Top-up {market_name}: +{len(split_listings) - before} new "
@@ -1670,8 +1689,12 @@ def _discover_listings_per_market(
         )
         last_raw = topup_raw or last_raw
         before = len(split_listings)
-        split_listings.extend(topup_listings)
-        split_listings = _dedupe_discovery_listings(split_listings, max_price=max_price)
+        split_listings = _extend_discovery_listings(
+            split_listings,
+            topup_listings,
+            max_price=max_price,
+            on_listing_found=on_listing_found,
+        )
         _discovery_log(
             f"[discovery] Global top-up: +{len(split_listings) - before} new "
             f"(total {len(split_listings)}/{MAX_DISCOVERY_LISTINGS})"
@@ -1685,6 +1708,7 @@ def _discover_listings_for_model(
     model: str,
     max_price: float,
     exclude_addresses: list[str] | None,
+    on_listing_found: Callable[[dict[str, Any]], None] | None = None,
 ) -> tuple[list[dict[str, Any]], str]:
     """Run combined discovery, then top up per market until MAX_DISCOVERY_LISTINGS."""
     model = _resolve_discovery_model(model)
@@ -1698,6 +1722,7 @@ def _discover_listings_for_model(
             model=model,
             max_price=max_price,
             exclude_addresses=exclude_addresses,
+            on_listing_found=on_listing_found,
         )
 
     listings, last_raw = _run_discovery_attempt(
@@ -1705,7 +1730,12 @@ def _discover_listings_for_model(
         max_price=max_price,
         exclude_addresses=exclude_addresses,
     )
-    deduped = _dedupe_discovery_listings(listings, max_price=max_price)
+    deduped = _extend_discovery_listings(
+        [],
+        listings,
+        max_price=max_price,
+        on_listing_found=on_listing_found,
+    )
     if len(deduped) >= MAX_DISCOVERY_LISTINGS:
         return deduped, last_raw
 
@@ -1736,6 +1766,7 @@ def _discover_listings_for_model(
         max_price=max_price,
         exclude_addresses=exclude_addresses,
         seed_listings=deduped,
+        on_listing_found=on_listing_found,
     )
 
 
@@ -1744,6 +1775,7 @@ def discover_hot_market_listings(
     *,
     model: str | None = None,
     exclude_addresses: list[str] | None = None,
+    on_listing_found: Callable[[dict[str, Any]], None] | None = None,
 ) -> list[dict[str, Any]]:
     """
     Stage 1 (Discovery): Search Grounding across prioritized hot markets.
@@ -1760,6 +1792,7 @@ def discover_hot_market_listings(
                 model=active_model,
                 max_price=max_price,
                 exclude_addresses=exclude_addresses,
+                on_listing_found=on_listing_found,
             )
         except _DISCOVERY_API_ERRORS as exc:
             if (

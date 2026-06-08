@@ -8,7 +8,7 @@ from components.property_assumptions_sidebar import (
     render_hitl_save_section,
 )
 from data_provenance import ensure_data_provenance
-from engine import safe_float
+from engine import backfill_year_built_if_needed, safe_float
 from knowledge_base import (
     get_effective_display_maint,
     get_effective_display_rent,
@@ -95,9 +95,13 @@ elif _guest_mode and not st.session_state.property_data:
     st.caption("Open a property from the **Portfolio Map** or use the link your friend shared.")
 
 if st.session_state.property_data:
-    property_info = ensure_data_provenance(st.session_state.property_data)
+    property_info = backfill_year_built_if_needed(
+        st.session_state.property_data,
+        address,
+    )
+    property_info = ensure_data_provenance(property_info)
     st.session_state.property_data = property_info
-    field_confidence = property_info.get("confidence_score") or {}
+    total_confidence_pct = property_info.get("total_confidence_pct")
 
     price = safe_float(property_info.get("price"))
     monthly_rent = get_effective_display_rent(property_info)
@@ -155,7 +159,7 @@ if st.session_state.property_data:
             "interest_rate": interest_rate,
             "loan_term": loan_term,
         },
-        field_confidence=field_confidence,
+        total_confidence_pct=total_confidence_pct,
     )
 
     render_hitl_save_section(

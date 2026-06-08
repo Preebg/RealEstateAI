@@ -32,6 +32,20 @@ FIELD_BASE_CONFIDENCE: dict[str, float] = {
     "management_fee": 0.55,
 }
 
+# Underwriting-critical fields weighted for the single property-level score.
+TOTAL_CONFIDENCE_WEIGHTS: dict[str, float] = {
+    "price": 0.25,
+    "rent": 0.25,
+    "tax_rate": 0.15,
+    "insurance": 0.10,
+    "hoa": 0.08,
+    "predicted_value": 0.07,
+    "location_score": 0.05,
+    "maint_percent": 0.03,
+    "vacancy_rate": 0.02,
+    "management_fee": 0.02,
+}
+
 NORMALIZATION_HELPERS: dict[str, str] = {
     "insurance": "finance.normalize_monthly_insurance",
     "tax_rate": "finance.normalize_tax_rate_percent",
@@ -89,11 +103,17 @@ def compute_field_confidence(
     rent = _safe_float(property_data.get("rent") or property_data.get("original_ai_rent"))
     tax_rate = _safe_float(property_data.get("tax_rate"))
 
+    sources = property_data.get("sources") or []
+    source_count = len(set(str(s) for s in sources if s))
+
     price_conf = FIELD_BASE_CONFIDENCE["price"]
     if price <= 0:
         price_conf = 0.15
-    elif research and _safe_float(research.get("price")) > 0:
-        price_conf = min(price_conf + 0.05, 0.95)
+    else:
+        if research and _safe_float(research.get("price")) > 0:
+            price_conf = min(price_conf + 0.05, 0.95)
+        if source_count >= 2:
+            price_conf = min(price_conf + 0.02 * min(source_count, 5), 0.95)
     scores["price"] = _clamp_confidence(price_conf)
 
     rent_conf = FIELD_BASE_CONFIDENCE["rent"]
@@ -106,8 +126,7 @@ def compute_field_confidence(
         rent_conf = min(rent_conf + 0.30, 0.88)
     elif rent <= 0:
         rent_conf = 0.25
-    sources = property_data.get("sources") or []
-    if len(sources) >= 3:
+    if source_count >= 3:
         rent_conf = min(rent_conf + 0.05, 0.90)
     scores["rent"] = _clamp_confidence(rent_conf)
 
@@ -130,10 +149,77 @@ def compute_field_confidence(
         hoa_conf = min(hoa_conf + 0.05, 0.85)
     scores["hoa"] = _clamp_confidence(hoa_conf)
 
-    for key in ("maint_percent", "predicted_value", "location_score", "vacancy_rate", "management_fee"):
-        scores[key] = _clamp_confidence(FIELD_BASE_CONFIDENCE[key])
+    pred_conf = FIELD_BASE_CONFIDENCE["predicted_value"]
+    predicted_value = _safe_float(property_data.get("predicted_value"))
+    if predicted_value <= 0:
+        pred_conf = 0.20
+    else:
+        reasoning = str(property_data.get("prediction_reasoning", "")).strip()
+        if len(reasoning) >= 40:
+            pred_conf = min(pred_conf + 0.15, 0.85)
+        if price > 0 and abs(predicted_value - price) / price <= 0.15:
+            pred_conf = min(pred_conf + 0.05, 0.85)
+    scores["predicted_value"] = _clamp_confidence(pred_conf)
+
+    loc_conf = FIELD_BASE_CONFIDENCE["location_score"]
+    if location_score := _safe_float(property_data.get("location_score")):
+        loc_conf = min(loc_conf + 0.08, 0.70)
+        if property_data.get("market_city"):
+            loc_conf = min(loc_conf + 0.12, 0.82)
+    else:
+        loc_conf = 0.25
+    scores["location_score"] = _clamp_confidence(loc_conf)
+
+    maint_conf = FIELD_BASE_CONFIDENCE["maint_percent"]
+    if _safe_float(property_data.get("maint_percent")) > 0:
+        maint_conf = min(maint_conf + 0.15, 0.70)
+    scores["maint_percent"] = _clamp_confidence(maint_conf)
+
+    vacancy_conf = FIELD_BASE_CONFIDENCE["vacancy_rate"]
+    if _safe_float(property_data.get("vacancy_rate") or property_data.get("ai_vacancy_rate")) > 0:
+        vacancy_conf = min(vacancy_conf + 0.12, 0.72)
+    scores["vacancy_rate"] = _clamp_confidence(vacancy_conf)
+
+    mgmt_conf = FIELD_BASE_CONFIDENCE["management_fee"]
+    if _safe_float(property_data.get("management_fee") or property_data.get("ai_management_fee")) > 0:
+        mgmt_conf = min(mgmt_conf + 0.12, 0.72)
+    scores["management_fee"] = _clamp_confidence(mgmt_conf)
 
     return scores
+
+
+def compute_total_confidence(
+    property_data: dict[str, Any],
+    research: dict[str, Any] | None = None,
+    *,
+    field_scores: dict[str, float] | None = None,
+) -> int:
+    """Weighted property-level data confidence (0–100), unique per listing signals."""
+    scores = field_scores or compute_field_confidence(property_data, research)
+
+    weighted_sum = 0.0
+    weight_total = 0.0
+    for field, weight in TOTAL_CONFIDENCE_WEIGHTS.items():
+        if field in scores:
+            weighted_sum += scores[field] * weight
+            weight_total += weight
+    base = weighted_sum / weight_total if weight_total else 0.5
+
+    sources = property_data.get("sources") or []
+    source_bonus = min(len(set(str(s) for s in sources if s)), 5) / 5.0 * 0.04
+
+    completeness_bonus = 0.0
+    if property_data.get("year_built") or (research and research.get("year_built")):
+        completeness_bonus += 0.02
+    if research and research.get("square_footage"):
+        completeness_bonus += 0.02
+    if research and research.get("property_type"):
+        completeness_bonus += 0.01
+    if str(property_data.get("summary", "")).strip():
+        completeness_bonus += 0.02
+
+    total = _clamp_confidence(base + source_bonus + completeness_bonus)
+    return int(round(total * 100))
 
 
 def _extraction_stage(
@@ -274,8 +360,12 @@ def attach_data_provenance(
     *,
     pipeline: str = "underwriter_ui",
 ) -> dict[str, Any]:
-    """Attach confidence_score and data_provenance to a property record in place."""
-    property_data["confidence_score"] = compute_field_confidence(property_data, research)
+    """Attach per-field scores, total confidence %, and data_provenance in place."""
+    field_scores = compute_field_confidence(property_data, research)
+    property_data["confidence_score"] = field_scores
+    property_data["total_confidence_pct"] = compute_total_confidence(
+        property_data, research, field_scores=field_scores
+    )
     property_data["data_provenance"] = build_data_provenance(
         property_data, research, pipeline=pipeline
     )
@@ -284,7 +374,11 @@ def attach_data_provenance(
 
 def ensure_data_provenance(property_data: dict[str, Any]) -> dict[str, Any]:
     """Backfill provenance for cached records that predate this feature."""
-    if property_data.get("confidence_score") and property_data.get("data_provenance"):
+    if (
+        property_data.get("confidence_score")
+        and property_data.get("data_provenance")
+        and property_data.get("total_confidence_pct") is not None
+    ):
         return property_data
     return attach_data_provenance(property_data)
 
