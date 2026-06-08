@@ -897,40 +897,58 @@ def persist_comps_to_canonical(
     show_errors: bool = False,
 ) -> bool:
     """
-    Upsert comps_analysis (and adjusted predicted_value) on the canonical property row.
+    Persist comps to Supabase via save_property_comps RPC.
 
-    No-op when comps are missing or the address is not yet in the shared catalog.
+    Writes properties.comps_analysis and normalized rows in property_comparables.
+    Bypasses the full canonical save path (and its ROI reliability gate).
     """
     comps = property_data.get("comps_analysis")
     if not isinstance(comps, dict) or not comps.get("comparable_properties"):
         return False
 
     address = str(property_data.get("address") or "").strip()
-    if not address:
+    property_id = property_data.get("id") or (
+        get_property_id_by_address(address) if address else None
+    )
+    if not property_id or not is_valid_uuid(str(property_id)):
         return False
 
-    property_id = property_data.get("id") or get_property_id_by_address(address)
-    if not property_id:
+    from authenticate import get_authenticated_client
+
+    client = get_authenticated_client()
+    if client is None:
+        if show_errors and st is not None:
+            st.error("Sign in to save comparable sales.")
         return False
 
-    uid = get_admin_uid()
-    if not uid:
-        from authenticate import get_logged_in_user
+    params: dict[str, Any] = {
+        "p_property_id": str(property_id),
+        "p_comps_analysis": comps,
+    }
+    if property_data.get("predicted_value") is not None:
+        params["p_predicted_value"] = float(property_data["predicted_value"])
+    if property_data.get("prediction_reasoning"):
+        params["p_prediction_reasoning"] = str(property_data["prediction_reasoning"])
 
-        user = get_logged_in_user()
-        uid = user["id"] if user else None
-    if not uid:
+    try:
+        response = client.rpc("save_property_comps", params).execute()
+    except APIError as exc:
+        report_error(
+            log,
+            "comps_persist_failed",
+            exc,
+            property_id=str(property_id),
+            address=address,
+        )
+        if show_errors and st is not None:
+            st.error(f"Could not save comparable sales: {exc}")
         return False
 
-    payload = dict(property_data)
-    payload["address"] = address
-    payload.setdefault("from_kb", True)
-
-    result = save_canonical_property(payload, user_id=uid, show_errors=show_errors)
-    if result is not None:
+    saved = bool(response.data)
+    if saved:
         invalidate_kb_cache()
-        return True
-    return False
+        log.info("comps_persist_success", property_id=str(property_id), address=address)
+    return saved
 
 
 def save_user_property_override(

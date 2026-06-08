@@ -12,6 +12,11 @@ from engine import fetch_comparable_properties, safe_float
 from services.deferred_analysis import is_task_pending
 
 
+def _markdown_safe_text(text: str) -> str:
+    """Escape ``$`` so Streamlit info/warning boxes render currency as plain text."""
+    return text.replace("$", r"\$")
+
+
 def _comps_table_rows(comps: list[dict[str, Any]]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for comp in comps:
@@ -72,7 +77,7 @@ def render_property_comps_section(
             property_info.pop("quantum_risk_score", None)
             from knowledge_base import persist_comps_to_canonical
 
-            persist_comps_to_canonical(property_info)
+            persist_comps_to_canonical(property_info, show_errors=True)
             st.session_state.property_data = property_info
             st.session_state.quantum_finance_sig = None
             queue = list(st.session_state.get("deferred_tasks") or [])
@@ -124,7 +129,7 @@ def render_property_comps_section(
     metric_col4.metric("AI Predicted Value", f"${predicted:,.0f}" if predicted else "—")
 
     if comps_analysis.get("summary"):
-        st.info(comps_analysis["summary"])
+        st.info(_markdown_safe_text(comps_analysis["summary"]))
 
     if property_info.get("comps_adjusted_predicted_value"):
         st.caption(
@@ -138,7 +143,8 @@ def render_property_comps_section(
 
     with st.expander("How this check works"):
         st.markdown(
-            """
+            _markdown_safe_text(
+                """
             1. **Search** — Grounded search finds 3–5 recent sales near the subject with
                similar beds, baths, sqft, and property type.
             2. **Median** — We compute median sale price and median $/sqft across comps.
@@ -147,6 +153,7 @@ def render_property_comps_section(
             4. **Adjustment** — When flagged, `predicted_value` is raised to the comp-implied
                value so appreciation and ROI metrics reflect market reality.
             """
+            )
         )
 
 

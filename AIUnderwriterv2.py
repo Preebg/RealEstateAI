@@ -77,4 +77,14 @@ if not authenticated:
 
 pg = st.navigation(nav_pages)
 pg.run()
+
+if authenticated:
+    from services.deferred_analysis import (
+        render_background_deferred_worker,
+        render_global_deferred_status,
+    )
+
+    render_background_deferred_worker()
+    render_global_deferred_status()
+
 render_app_footer_glossary()

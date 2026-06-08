@@ -9,7 +9,10 @@ import streamlit as st
 from engine import get_final_analysis, get_initial_analysis, safe_float
 from finance import analyze_investment
 from knowledge_base import lookup_property
-from services.deferred_analysis import build_deferred_task_queue
+from services.deferred_analysis import (
+    build_deferred_task_queue,
+    set_active_analysis_address,
+)
 
 
 def run_initial_property_analysis(address: str, *, guest_mode: bool = False) -> None:
@@ -45,11 +48,14 @@ def run_initial_property_analysis(address: str, *, guest_mode: bool = False) -> 
             skip_comps=True,
         )
         final_result["from_kb"] = from_kb
+        final_result["address"] = address
+        set_active_analysis_address(address)
 
         queue = build_deferred_task_queue(final_result, guest_mode=guest_mode)
         st.session_state.property_data = final_result
         st.session_state.deferred_tasks = queue
         st.session_state.deferred_tasks_total = len(queue)
+        st.session_state["address_input"] = [address]
 
         done_label = (
             "✅ Loaded from Knowledge Base — opening analysis..."

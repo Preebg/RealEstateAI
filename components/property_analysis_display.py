@@ -11,6 +11,7 @@ import streamlit as st
 import tldextract
 
 from components.property_comps import ensure_comps_analysis, render_property_comps_section
+from components.property_share import render_pending_share_clipboard_copy
 from services.deferred_analysis import is_task_pending
 from components.property_share import render_share_popover
 from engine import (
@@ -258,6 +259,7 @@ def render_analysis_results(
     total_confidence_pct: int | None,
 ) -> None:
     """Render the full analysis overview: metrics, tabs, charts, and expanders."""
+    render_pending_share_clipboard_copy()
     property_info = backfill_year_built_if_needed(property_info, address)
     property_info = ensure_comps_analysis(property_info)
     final_monthly_rent = assumptions["final_monthly_rent"]

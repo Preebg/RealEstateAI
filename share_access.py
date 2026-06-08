@@ -156,6 +156,40 @@ def fetch_guest_property(
     return prop if isinstance(prop, dict) else None
 
 
+def save_share_comps_snapshot(
+    share_token: str,
+    property_id: str,
+    property_data: dict[str, Any],
+) -> bool:
+    """Freeze comps on a share link so guests see the same table the sharer had."""
+    comps = property_data.get("comps_analysis")
+    if not isinstance(comps, dict) or not comps.get("comparable_properties"):
+        return False
+
+    from authenticate import get_authenticated_client
+
+    client = get_authenticated_client()
+    if client is None:
+        return False
+
+    params: dict[str, Any] = {
+        "p_share_token": str(share_token).strip(),
+        "p_property_id": str(property_id),
+        "p_comps_analysis": comps,
+    }
+    if property_data.get("predicted_value") is not None:
+        params["p_predicted_value"] = float(property_data["predicted_value"])
+    if property_data.get("prediction_reasoning"):
+        params["p_prediction_reasoning"] = str(property_data["prediction_reasoning"])
+
+    try:
+        response = client.rpc("save_share_comps_snapshot", params).execute()
+    except APIError as exc:
+        report_error(log, "share_comps_snapshot_failed", exc, property_id=property_id)
+        return False
+    return bool(response.data)
+
+
 def create_property_share_link(
     property_id: str,
     *,

@@ -2005,6 +2005,27 @@ class TestDeferredAnalysis(unittest.TestCase):
         self.assertNotIn("comps", queue)
         self.assertIn("quantum", queue)
 
+    def test_get_active_analysis_address_prefers_session_key(self):
+        import streamlit as st
+
+        from services.deferred_analysis import (
+            INDIVIDUAL_SEARCH_ADDRESS_KEY,
+            get_active_analysis_address,
+        )
+
+        st.session_state[INDIVIDUAL_SEARCH_ADDRESS_KEY] = "10 Park Ave"
+        st.session_state["property_data"] = {"address": "Other St"}
+        self.assertEqual(get_active_analysis_address(), "10 Park Ave")
+
+    def test_ensure_deferred_task_queue_does_not_rebuild_existing_queue(self):
+        import streamlit as st
+
+        from services.deferred_analysis import DEFERRED_TASKS_KEY, ensure_deferred_task_queue
+
+        st.session_state[DEFERRED_TASKS_KEY] = ["quantum"]
+        ensure_deferred_task_queue({"price": 200000}, guest_mode=False)
+        self.assertEqual(st.session_state[DEFERRED_TASKS_KEY], ["quantum"])
+
 
 class TestPersistCompsToCanonical(unittest.TestCase):
     def test_persist_skips_without_comps(self):
@@ -2032,9 +2053,7 @@ class TestPersistCompsToCanonical(unittest.TestCase):
         from knowledge_base import persist_comps_to_canonical
 
         mock_client = MagicMock()
-        mock_table = MagicMock()
-        mock_client.table.return_value = mock_table
-        mock_table.upsert.return_value.execute.return_value = MagicMock(data=[{}])
+        mock_client.rpc.return_value.execute.return_value = MagicMock(data=True)
         property_id = "7f35bc1e-9de5-484d-8f73-27fd3da733eb"
         comps = {
             "comparable_properties": [{"address": "2 Oak", "sale_price": 200000}],
@@ -2042,9 +2061,8 @@ class TestPersistCompsToCanonical(unittest.TestCase):
         }
 
         with (
-            patch("knowledge_base.get_client", return_value=mock_client),
+            patch("authenticate.get_authenticated_client", return_value=mock_client),
             patch("knowledge_base.get_property_id_by_address", return_value=property_id),
-            patch("knowledge_base.get_admin_uid", return_value=property_id),
             patch("knowledge_base.invalidate_kb_cache"),
         ):
             saved = persist_comps_to_canonical(
@@ -2057,10 +2075,12 @@ class TestPersistCompsToCanonical(unittest.TestCase):
             )
 
         self.assertTrue(saved)
-        payload = mock_table.upsert.call_args.args[0]
-        self.assertEqual(payload["comps_analysis"], comps)
-        self.assertEqual(payload["predicted_value"], 190000)
-        self.assertTrue(payload["from_kb"])
+        mock_client.rpc.assert_called_once()
+        rpc_name, rpc_params = mock_client.rpc.call_args.args
+        self.assertEqual(rpc_name, "save_property_comps")
+        self.assertEqual(rpc_params["p_property_id"], property_id)
+        self.assertEqual(rpc_params["p_comps_analysis"], comps)
+        self.assertEqual(rpc_params["p_predicted_value"], 190000)
 
 
 class TestCompsAnalysis(unittest.TestCase):

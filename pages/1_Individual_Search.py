@@ -19,9 +19,12 @@ from knowledge_base import (
 from market_pulse import render_market_pulse
 from property_nav import consume_map_property_selection, load_property_from_kb
 from services.deferred_analysis import (
-    build_deferred_task_queue,
-    process_next_deferred_task,
+    clear_deferred_analysis_state,
+    ensure_deferred_task_queue,
     render_deferred_progress,
+    set_active_analysis_address,
+    store_deferred_finance_context,
+    restore_individual_search_address_input,
     sync_quantum_recompute_queue,
 )
 from services.property_analysis_flow import (
@@ -42,8 +45,10 @@ _guest_mode = is_guest_viewer()
 _map_address = consume_map_property_selection()
 if _map_address:
     st.session_state["address_input"] = [_map_address]
+    set_active_analysis_address(_map_address)
     _map_loaded = load_property_from_kb(_map_address)
     if _map_loaded:
+        _map_loaded["address"] = _map_address
         st.session_state["property_data"] = _map_loaded
         st.toast(f"Loaded {_map_address} from Portfolio Map", icon="🗺️")
     else:
@@ -67,9 +72,21 @@ with st.sidebar:
     render_market_pulse()
     st.divider()
     st.header("Investment Parameters")
-    down_payment = st.number_input("Expected Down Payment (%)", value=25)
-    loan_term = st.number_input("Loan Term (yrs)", value=30)
-    interest_rate = st.number_input("Your Mortgage Rate (%)", value=6.000)
+    down_payment = st.number_input(
+        "Expected Down Payment (%)",
+        value=25,
+        key="individual_search_down_payment_pct",
+    )
+    loan_term = st.number_input(
+        "Loan Term (yrs)",
+        value=30,
+        key="individual_search_loan_term",
+    )
+    interest_rate = st.number_input(
+        "Your Mortgage Rate (%)",
+        value=6.000,
+        key="individual_search_interest_rate",
+    )
 
 if _guest_mode:
     st.info(
@@ -77,6 +94,7 @@ if _guest_mode:
         "sign in to run new AI research or save assumptions."
     )
 
+restore_individual_search_address_input()
 address = render_property_address_input(disabled=_guest_mode)
 
 if "property_data" not in st.session_state:
@@ -90,9 +108,10 @@ if st.button("Analyze Property", disabled=_guest_mode):
             "investment decisions in NY, NC, FL, TX, AL,  PA, or SC."
         )
         st.session_state.property_data = None
-        st.session_state.deferred_tasks = []
+        clear_deferred_analysis_state()
         st.session_state.pop("quantum_finance_sig", None)
         st.session_state.pop("run_market_crash_sim", None)
+        set_active_analysis_address(address)
         run_initial_property_analysis(address, guest_mode=_guest_mode)
     else:
         st.warning("Please enter a property address.")
@@ -100,12 +119,12 @@ elif _guest_mode and not st.session_state.property_data:
     st.caption("Open a property from the **Portfolio Map** or use the link your friend shared.")
 
 if st.session_state.property_data:
-    if "deferred_tasks" not in st.session_state:
-        st.session_state.deferred_tasks = build_deferred_task_queue(
-            st.session_state.property_data,
-            guest_mode=_guest_mode,
-        )
-        st.session_state.deferred_tasks_total = len(st.session_state.deferred_tasks)
+    ensure_deferred_task_queue(
+        st.session_state.property_data,
+        guest_mode=_guest_mode,
+    )
+    if address:
+        set_active_analysis_address(address)
 
     property_info = backfill_year_built_if_needed(
         st.session_state.property_data,
@@ -156,6 +175,11 @@ if st.session_state.property_data:
         forecast_rate=forecast_rate,
         location_score=location_score,
     )
+    store_deferred_finance_context(
+        monthly_net_cash_flow=finance["monthly_net_cash_flow"],
+        forecast_rate=forecast_rate,
+        location_score=location_score,
+    )
     st.session_state.property_data = property_info
 
     render_deferred_progress()
@@ -191,13 +215,4 @@ if st.session_state.property_data:
         appreciation_forecast=appreciation_forecast,
         branding_label=branding_label,
         get_pretty_label=get_pretty_label,
-    )
-
-    process_next_deferred_task(
-        address=address,
-        finance_context={
-            "monthly_net_cash_flow": finance["monthly_net_cash_flow"],
-            "forecast_rate": forecast_rate,
-            "location_score": location_score,
-        },
     )

@@ -7,16 +7,19 @@ import json
 import streamlit as st
 import streamlit.components.v1 as components
 
+COPY_PENDING_SHARE_URL_KEY = "_pending_clipboard_share_url"
 
-def _copy_text_to_clipboard(text: str) -> None:
-    """Copy text to the browser clipboard (best-effort across Streamlit iframe quirks)."""
+
+def copy_text_to_clipboard(text: str) -> None:
+    """Copy text to the browser clipboard (run at page root, not inside a popover)."""
     components.html(
         f"""
         <script>
         (function() {{
             const text = {json.dumps(text)};
-            const write = async () => {{
-                const nav = window.parent?.navigator || navigator;
+            const doc = window.parent?.document || document;
+            const nav = window.parent?.navigator || navigator;
+            const copy = async () => {{
                 if (nav?.clipboard?.writeText) {{
                     try {{
                         await nav.clipboard.writeText(text);
@@ -25,25 +28,33 @@ def _copy_text_to_clipboard(text: str) -> None:
                         /* fall through */
                     }}
                 }}
-                const ta = document.createElement("textarea");
+                const ta = doc.createElement("textarea");
                 ta.value = text;
                 ta.setAttribute("readonly", "");
                 ta.style.position = "fixed";
                 ta.style.left = "-9999px";
-                (window.parent?.document || document).body.appendChild(ta);
+                doc.body.appendChild(ta);
+                ta.focus();
                 ta.select();
                 try {{
-                    (window.parent?.document || document).execCommand("copy");
+                    doc.execCommand("copy");
                 }} finally {{
                     ta.remove();
                 }}
             }};
-            write();
+            copy();
         }})();
         </script>
         """,
         height=0,
     )
+
+
+def render_pending_share_clipboard_copy() -> None:
+    """Run clipboard copy on the main page after the share popover closes."""
+    pending = st.session_state.pop(COPY_PENDING_SHARE_URL_KEY, None)
+    if pending and str(pending).strip():
+        copy_text_to_clipboard(str(pending).strip())
 
 
 def render_share_popover(
@@ -55,7 +66,11 @@ def render_share_popover(
 ) -> None:
     """Render the share-link popover in the analysis header column."""
     from knowledge_base import persist_comps_to_canonical
-    from share_access import build_share_url, create_property_share_link
+    from share_access import (
+        build_share_url,
+        create_property_share_link,
+        save_share_comps_snapshot,
+    )
 
     if not guest_mode and share_property_id:
         with st.popover("🔗 Share with a friend"):
@@ -75,7 +90,7 @@ def render_share_popover(
                 if isinstance(active_property, dict):
                     active_property = dict(active_property)
                     active_property.setdefault("id", share_property_id)
-                    persist_comps_to_canonical(active_property)
+                    persist_comps_to_canonical(active_property, show_errors=True)
                 token = create_property_share_link(
                     str(share_property_id),
                     include_assumptions=include_assumptions,
@@ -83,7 +98,23 @@ def render_share_popover(
                 if token:
                     share_url = build_share_url(token)
                     st.session_state["last_share_url"] = share_url
-                    _copy_text_to_clipboard(share_url)
+                    if isinstance(active_property, dict):
+                        snapshot_saved = save_share_comps_snapshot(
+                            token,
+                            str(share_property_id),
+                            active_property,
+                        )
+                        if (
+                            active_property.get("comps_analysis", {}).get(
+                                "comparable_properties"
+                            )
+                            and not snapshot_saved
+                        ):
+                            st.warning(
+                                "Link created, but comparable sales could not be attached. "
+                                "Run **Check Area Comps** again, then regenerate the link."
+                            )
+                    st.session_state[COPY_PENDING_SHARE_URL_KEY] = share_url
                     st.toast("Share link copied to clipboard", icon="🔗")
                 else:
                     st.error("Could not create share link. Try again.")
