@@ -14,6 +14,7 @@ from comps_analysis import (
     resolve_market_value,
 )
 from engine import fetch_comparable_properties, fetch_rental_comparables, safe_float
+from services.deferred_analysis import is_task_pending
 
 
 def _markdown_safe_text(text: str) -> str:
