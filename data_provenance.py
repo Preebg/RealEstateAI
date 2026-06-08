@@ -162,6 +162,7 @@ def _extraction_stage(
                     "source": "listing description rent/income language",
                     "notes": str(research.get("listing_rent_notes", "")).strip(),
                 },
+                "year_built": research.get("year_built"),
                 "square_footage": research.get("square_footage"),
                 "property_condition": research.get("property_condition"),
                 "property_type": research.get("property_type"),

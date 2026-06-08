@@ -253,6 +253,19 @@ def normalize_address_key(address: str) -> str:
 
 
 _ZIPCODE_PATTERN = re.compile(r"\b(\d{5})(?:-\d{4})?\b")
+_STATE_CODE_PATTERN = re.compile(
+    r",\s*([A-Z]{2})(?:\s+\d{5}(?:-\d{4})?|\s*$)",
+    re.IGNORECASE,
+)
+_VALID_US_STATE_CODES = frozenset(
+    {
+        "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA",
+        "HI", "ID", "IL", "IN", "IA", "KS", "KY", "LA", "ME", "MD",
+        "MA", "MI", "MN", "MS", "MO", "MT", "NE", "NV", "NH", "NJ",
+        "NM", "NY", "NC", "ND", "OH", "OK", "OR", "PA", "RI", "SC",
+        "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV", "WI", "WY", "DC",
+    }
+)
 
 
 def parse_zipcode_from_address(address: str | None) -> str | None:
@@ -271,6 +284,25 @@ def parse_zipcode_from_address(address: str | None) -> str | None:
     return matches[-1]
 
 
+def parse_state_code_from_address(address: str | None) -> str | None:
+    """
+    Extract a 2-letter US state code from a property address string.
+
+    Examples:
+        "123 Main St, Rochester, NY 14607" -> "NY"
+        "4838 Gearus Dr, Charlotte, NC 28269" -> "NC"
+    """
+    if not address or not str(address).strip():
+        return None
+    match = _STATE_CODE_PATTERN.search(str(address))
+    if not match:
+        return None
+    state_code = match.group(1).upper()
+    if state_code not in _VALID_US_STATE_CODES:
+        return None
+    return state_code
+
+
 def _apply_zipcode_from_address(payload: dict[str, Any]) -> None:
     """Populate zip_code on save when it can be parsed from the address."""
     address = payload.get("address")
@@ -279,6 +311,16 @@ def _apply_zipcode_from_address(payload: dict[str, Any]) -> None:
     zip_code = parse_zipcode_from_address(str(address))
     if zip_code:
         payload["zip_code"] = zip_code
+
+
+def _apply_state_code_from_address(payload: dict[str, Any]) -> None:
+    """Populate state_code on save when it can be parsed from the address."""
+    address = payload.get("address")
+    if not address:
+        return
+    state_code = parse_state_code_from_address(str(address))
+    if state_code:
+        payload["state_code"] = state_code
 
 
 def get_scanned_addresses(user_id: str | None = None) -> set[str]:
@@ -403,7 +445,10 @@ def user_has_override_changes(
 
 def _normalize_record_numerics(record: dict[str, Any]) -> dict[str, Any]:
     """Apply read-time normalization for legacy or malformed stored values."""
+    from engine import canonicalize_year_built_fields
+
     normalized = dict(record)
+    canonicalize_year_built_fields(normalized)
     if normalized.get("insurance") is not None:
         try:
             normalized["insurance"] = normalize_monthly_insurance(
@@ -510,6 +555,7 @@ def _prepare_canonical_payload(property_data: dict[str, Any], user_id: str) -> d
         payload["year_built"] = payload.pop("year")
 
     _apply_zipcode_from_address(payload)
+    _apply_state_code_from_address(payload)
     return {k: v for k, v in payload.items() if k in CANONICAL_PROPERTY_COLUMNS}
 
 
@@ -1177,6 +1223,7 @@ __all__ = [
     "is_valid_uuid",
     "normalize_address_key",
     "parse_zipcode_from_address",
+    "parse_state_code_from_address",
     "get_scanned_addresses",
     "is_property_already_scanned",
     "get_ai_baseline_rent",

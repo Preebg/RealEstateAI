@@ -2,6 +2,7 @@ import json
 import logging
 import math
 import unittest
+from datetime import date
 from unittest.mock import patch
 
 from scipy.optimize import minimize as scipy_minimize
@@ -937,6 +938,36 @@ class TestZipcodeParsing(unittest.TestCase):
         self.assertIsNone(parse_zipcode_from_address("123 Main St, Rochester, NY"))
         self.assertIsNone(parse_zipcode_from_address(""))
 
+    def test_parse_state_code_from_standard_address(self):
+        from knowledge_base import parse_state_code_from_address
+
+        self.assertEqual(
+            parse_state_code_from_address("123 Main St, Rochester, NY 14607"),
+            "NY",
+        )
+        self.assertEqual(
+            parse_state_code_from_address("4838 Gearus Dr, Charlotte, NC 28269"),
+            "NC",
+        )
+        self.assertEqual(
+            parse_state_code_from_address("1304 Sylvan Dr, Garland, TX 75040"),
+            "TX",
+        )
+        self.assertEqual(
+            parse_state_code_from_address("4207 Deepwood Ln, Cincinnati, OH 45245"),
+            "OH",
+        )
+        self.assertEqual(
+            parse_state_code_from_address("7955 Timbercreek UNIT G, North Charleston, SC 29418"),
+            "SC",
+        )
+
+    def test_parse_state_code_returns_none_when_missing(self):
+        from knowledge_base import parse_state_code_from_address
+
+        self.assertIsNone(parse_state_code_from_address("123 Main St, Rochester"))
+        self.assertIsNone(parse_state_code_from_address(""))
+
     def test_save_knowledge_base_includes_parsed_zipcode(self):
         from unittest.mock import MagicMock, patch
 
@@ -958,7 +989,31 @@ class TestZipcodeParsing(unittest.TestCase):
 
         payload = mock_table.upsert.call_args.args[0]
         self.assertEqual(payload["zip_code"], "14609")
+        self.assertEqual(payload["state_code"], "NY")
         self.assertNotIn("rent", payload)
+
+    def test_save_canonical_property_parses_non_ny_state(self):
+        from unittest.mock import MagicMock, patch
+
+        from knowledge_base import save_canonical_property
+
+        mock_client = MagicMock()
+        mock_table = MagicMock()
+        mock_client.table.return_value = mock_table
+        mock_table.upsert.return_value.execute.return_value = MagicMock(data=[{}])
+
+        with patch("knowledge_base.get_client", return_value=mock_client):
+            save_canonical_property(
+                {
+                    "address": "4838 Gearus Dr, Charlotte, NC 28269",
+                    "price": 200000,
+                },
+                user_id="7f35bc1e-9de5-484d-8f73-27fd3da733eb",
+            )
+
+        payload = mock_table.upsert.call_args.args[0]
+        self.assertEqual(payload["state_code"], "NC")
+        self.assertEqual(payload["zip_code"], "28269")
 
 
 class TestPropertyComparison(unittest.TestCase):
@@ -1213,6 +1268,39 @@ class TestHeadlessDetection(unittest.TestCase):
                 from authenticate import _headless_mode
 
                 self.assertTrue(_headless_mode())
+
+
+class TestPropertyAge(unittest.TestCase):
+    def test_parse_year_built_rejects_suspicious_current_year_default(self):
+        from engine import parse_year_built
+
+        current = date.today().year
+        self.assertIsNone(parse_year_built({"year_built": current}))
+        self.assertIsNone(parse_year_built({"year": current - 1}))
+
+    def test_parse_year_built_accepts_valid_construction_year(self):
+        from engine import parse_year_built
+
+        self.assertEqual(parse_year_built({"year_built": 1920}), 1920)
+        self.assertEqual(parse_year_built({"year": 1968}), 1968)
+
+    def test_parse_year_built_interprets_small_values_as_age(self):
+        from engine import parse_year_built
+
+        self.assertEqual(parse_year_built({"year": 50}), date.today().year - 50)
+
+    def test_calculate_property_age_uses_valid_year_built(self):
+        from engine import calculate_property_age_years
+
+        age = calculate_property_age_years({"year_built": 1920})
+        self.assertGreater(age, 90)
+
+    def test_normalize_record_strips_placeholder_year_built(self):
+        from knowledge_base import _normalize_record_numerics
+
+        current = date.today().year
+        normalized = _normalize_record_numerics({"year_built": current, "price": 100000})
+        self.assertNotIn("year_built", normalized)
 
 
 class TestDataProvenance(unittest.TestCase):

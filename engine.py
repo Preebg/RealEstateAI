@@ -1391,6 +1391,22 @@ def safe_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
+_SUSPICIOUS_YEAR_BUILT_WINDOW = 3
+_YEAR_BUILT_BACKFILL_CACHE: dict[str, int | None] = {}
+
+
+def _is_suspicious_default_year_built(year: int | float | None) -> bool:
+    """True when year_built looks like an LLM 'current year' placeholder."""
+    if year is None:
+        return False
+    try:
+        built = int(safe_float(year))
+    except (TypeError, ValueError):
+        return False
+    current = date.today().year
+    return current - _SUSPICIOUS_YEAR_BUILT_WINDOW <= built <= current
+
+
 def parse_year_built(property_info: dict[str, Any]) -> int | None:
     """Extract construction year from year_built or year fields."""
     for key in ("year_built", "year"):
@@ -1399,8 +1415,68 @@ def parse_year_built(property_info: dict[str, Any]) -> int | None:
             continue
         year = safe_float(raw, default=0.0)
         if year >= 1800:
+            if _is_suspicious_default_year_built(year):
+                continue
             return int(year)
+        if 0 < year < 300:
+            return date.today().year - int(year)
     return None
+
+
+def canonicalize_year_built_fields(data: dict[str, Any]) -> None:
+    """Normalize year/year_built to a single trustworthy year_built value."""
+    year = parse_year_built(data)
+    if year is not None:
+        data["year_built"] = year
+        data["year"] = year
+        return
+    data.pop("year_built", None)
+    data.pop("year", None)
+
+
+def backfill_year_built_if_needed(
+    property_data: dict[str, Any],
+    address: str,
+) -> dict[str, Any]:
+    """
+    Re-research year_built when cached records contain a suspicious placeholder
+    (e.g. harvester synthesis defaulting to the current year).
+    """
+    from knowledge_base import normalize_address_key
+
+    existing = parse_year_built(property_data)
+    if existing is not None:
+        return property_data
+
+    key = normalize_address_key(address)
+    if not key:
+        return property_data
+
+    if key in _YEAR_BUILT_BACKFILL_CACHE:
+        cached_year = _YEAR_BUILT_BACKFILL_CACHE[key]
+        if cached_year is None:
+            return property_data
+        updated = dict(property_data)
+        updated["year_built"] = cached_year
+        updated["year"] = cached_year
+        return updated
+
+    research = research_property(address)
+    year_built: int | None = None
+    raw = research.get("year_built")
+    if raw is not None:
+        parsed = safe_float(raw)
+        if parsed >= 1800 and not _is_suspicious_default_year_built(parsed):
+            year_built = int(parsed)
+
+    _YEAR_BUILT_BACKFILL_CACHE[key] = year_built
+    if year_built is None:
+        return property_data
+
+    updated = dict(property_data)
+    updated["year_built"] = year_built
+    updated["year"] = year_built
+    return updated
 
 
 def calculate_property_age_years(property_info: dict[str, Any]) -> int | None:
@@ -1771,6 +1847,7 @@ Extract ONLY these fields:
 - price (current list price USD, number only)
 - taxes (total ANNUAL property tax USD)
 - hoa (monthly HOA fee USD, 0 if none)
+- year_built (4-digit construction year from listing facts — NOT property age in years; 0 if unknown)
 - square_footage (integer)
 - property_condition: exactly one of "Excellent", "Good", "Fair", "Poor"
 - property_type: e.g. "Single Family", "Townhome", "Duplex", "Triplex", "Fourplex",
@@ -1787,6 +1864,7 @@ Return ONLY JSON:
   "price": number,
   "taxes": number,
   "hoa": number,
+  "year_built": 1968,
   "square_footage": number,
   "property_condition": "Good",
   "property_type": "Single Family",
@@ -1802,6 +1880,7 @@ def _normalize_research_payload(address: str, data: Any) -> dict[str, Any]:
             "price": 0.0,
             "taxes": 0.0,
             "hoa": 0.0,
+            "year_built": 0,
             "square_footage": 0,
             "property_condition": "Unknown",
             "property_type": "Unknown",
@@ -1813,6 +1892,8 @@ def _normalize_research_payload(address: str, data: Any) -> dict[str, Any]:
     data["price"] = safe_float(data.get("price"))
     data["taxes"] = safe_float(data.get("taxes"))
     data["hoa"] = safe_float(data.get("hoa"))
+    year_built = int(safe_float(data.get("year_built")))
+    data["year_built"] = year_built if year_built >= 1800 else None
     data["square_footage"] = int(safe_float(data.get("square_footage")))
     condition = str(data.get("property_condition", "Unknown")).strip()
     data["property_condition"] = condition
@@ -1953,7 +2034,11 @@ CONTEXT FROM DATABASE:
 RESEARCH DATA (verified extraction):
 {json.dumps(research, indent=2)}
 
-Produce a complete investment underwriting. Use research price/taxes/hoa/sqft as anchors.
+Produce a complete investment underwriting. Use research price/taxes/hoa/sqft/year_built as anchors.
+
+YEAR BUILT (critical):
+- "year" must be the 4-digit construction year (e.g. 1968), NOT property age in years.
+- If research includes year_built >= 1800, use that exact value. Do not substitute the current year.
 
 RENT (critical):
 - If research includes stated_gross_monthly_rent > 0 or listing_rent_notes, use that as rent
@@ -1985,12 +2070,45 @@ Return ONLY JSON with these keys:
 No currency symbols or commas outside JSON."""
 
 
+def _research_year_built(research: dict[str, Any]) -> int | None:
+    raw = research.get("year_built")
+    if raw is None:
+        return None
+    parsed = safe_float(raw)
+    if parsed >= 1800 and not _is_suspicious_default_year_built(parsed):
+        return int(parsed)
+    return None
+
+
+def _apply_research_year_built(data: dict[str, Any], research: dict[str, Any]) -> None:
+    """Prefer grounded research year_built over synthesis guesses."""
+    research_year = _research_year_built(research)
+    if research_year is not None:
+        data["year"] = research_year
+        data["year_built"] = research_year
+        return
+
+    synth_year = None
+    for key in ("year_built", "year"):
+        raw = data.get(key)
+        if raw is None:
+            continue
+        parsed = safe_float(raw)
+        if parsed >= 1800:
+            synth_year = int(parsed)
+            break
+
+    if synth_year is not None and _is_suspicious_default_year_built(synth_year):
+        data.pop("year", None)
+        data.pop("year_built", None)
+
+
 def _synthesis_fallback_payload(research: dict[str, Any]) -> dict[str, Any]:
     price = safe_float(research.get("price"))
     taxes = safe_float(research.get("taxes"))
-    return {
+    fallback_year = _research_year_built(research)
+    payload: dict[str, Any] = {
         "price": price,
-        "year": 1980,
         "rent": 0.0,
         "tax_rate": (taxes / price * 100) if price > 0 else 0.0,
         "hoa": safe_float(research.get("hoa")),
@@ -2007,6 +2125,10 @@ def _synthesis_fallback_payload(research: dict[str, Any]) -> dict[str, Any]:
         "property_condition": research.get("property_condition", "Unknown"),
         "sources": [],
     }
+    if fallback_year is not None:
+        payload["year"] = fallback_year
+        payload["year_built"] = fallback_year
+    return payload
 
 
 def _finalize_synthesis_payload(
@@ -2024,7 +2146,9 @@ def _finalize_synthesis_payload(
     data["property_condition"] = data.get(
         "property_condition", research.get("property_condition")
     )
+    _apply_research_year_built(data, research)
     _sanitize_synthesis_numerics(data)
+    canonicalize_year_built_fields(data)
     enriched = enrich_with_forecast(data)
     return attach_data_provenance(enriched, research, pipeline="harvester")
 
@@ -2174,7 +2298,7 @@ def analyzer_agent(
     Return ONLY a JSON object with these keys:
     {{
         "price": number,
-        "year": number,
+        "year": number, (4-digit year BUILT — e.g. 1968 — NOT property age in years),
         "rent": number,
         "tax_rate": number, (Annual Tax / Price * 100 as a PERCENT value — e.g. 3.4 for 3.4%, NOT 0.034),
         "hoa": number,
@@ -2220,6 +2344,7 @@ def get_initial_analysis(address: str) -> tuple[dict[str, Any], bool, str | None
         )
 
     _sanitize_synthesis_numerics(extracted)
+    canonicalize_year_built_fields(extracted)
     return extracted, False, research_results
 
 
@@ -2229,7 +2354,8 @@ def get_final_analysis(
     research_results: str | None = None,
 ) -> dict[str, Any]:
     """Stage 2: Verification, detailed mapping, and forecasting."""
-    property_data = dict(initial_data)
+    property_data = backfill_year_built_if_needed(dict(initial_data), address)
+    canonicalize_year_built_fields(property_data)
     if not property_data.get("sources"):
         property_data["sources"] = [
             f"https://www.google.com/search?q={address.replace(' ', '+')}"
