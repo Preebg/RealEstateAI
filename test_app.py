@@ -2139,7 +2139,47 @@ class TestCompsAnalysis(unittest.TestCase):
         changed = apply_comps_valuation_adjustment(property_data, comps_analysis)
         self.assertTrue(changed)
         self.assertEqual(property_data["predicted_value"], 215000)
-        self.assertIn("Adjusted upward", property_data["prediction_reasoning"])
+        self.assertIn("Market value set", property_data["prediction_reasoning"])
+
+    def test_evaluate_offer_success_favors_below_market(self):
+        from comps_analysis import evaluate_offer_success
+
+        at_market = evaluate_offer_success(200_000, 200_000, 175_000)
+        below_market = evaluate_offer_success(180_000, 200_000, 175_000)
+        above_market = evaluate_offer_success(220_000, 200_000, 175_000)
+
+        self.assertGreater(below_market["success_pct"], at_market["success_pct"])
+        self.assertGreater(at_market["success_pct"], above_market["success_pct"])
+
+    def test_resolve_market_value_prefers_comps(self):
+        from comps_analysis import resolve_market_value
+
+        data = {
+            "price": 175000,
+            "predicted_value": 180000,
+            "comps_analysis": {
+                "comp_count": 3,
+                "comp_suggested_value": 215000,
+            },
+        }
+        self.assertEqual(resolve_market_value(data), 215000)
+
+    def test_rent_comps_flags_underrented(self):
+        from rent_comps_analysis import evaluate_rent_comps_against_subject, normalize_rent_comps_payload
+
+        payload = normalize_rent_comps_payload(
+            {
+                "comparable_rentals": [
+                    {"address": "1 A St", "monthly_rent": 1800, "square_footage": 1200},
+                    {"address": "2 B St", "monthly_rent": 1750, "square_footage": 1180},
+                ],
+                "market_summary": "Rentals cluster near $1.45/sqft.",
+            }
+        )
+        subject = {"rent": 1200, "square_footage": 1200}
+        summary = evaluate_rent_comps_against_subject(payload, subject)
+        self.assertTrue(summary["is_underrented"])
+        self.assertGreater(summary["comp_suggested_rent"], 1200)
 
     def test_fetch_comparable_properties_attaches_summary(self):
         from engine import fetch_comparable_properties
@@ -2173,6 +2213,82 @@ class TestCompsAnalysis(unittest.TestCase):
         self.assertIn("comps_analysis", result)
         self.assertEqual(result["comps_analysis"]["comp_count"], 2)
         self.assertTrue(result.get("comps_adjusted_predicted_value"))
+
+
+class TestPdfGenerator(unittest.TestCase):
+    def test_generate_property_pdf_includes_comps_and_forecast(self):
+        from pdf_generator import generate_property_pdf
+
+        property_info = {
+            "summary": "Test property summary.",
+            "comps_analysis": {
+                "comparable_properties": [
+                    {
+                        "address": "1 Oak Ave",
+                        "sale_price": 200000,
+                        "square_footage": 1400,
+                        "sale_date": "2024-01",
+                        "distance_miles": 0.3,
+                    }
+                ],
+                "comp_suggested_value": 200000,
+                "median_sale_price": 200000,
+                "list_price": 175000,
+                "summary": "Aligned with area comps.",
+            },
+            "rent_comps_analysis": {
+                "comparable_rentals": [
+                    {
+                        "address": "2 Oak Ave",
+                        "monthly_rent": 1800,
+                        "square_footage": 1200,
+                        "lease_date": "2024-02",
+                        "distance_miles": 0.4,
+                    }
+                ],
+                "comp_suggested_rent": 1800,
+                "median_monthly_rent": 1800,
+                "subject_rent": 1600,
+                "rent_vs_comps_pct": -11.1,
+                "summary": "Rent slightly below comps.",
+            },
+        }
+        forecast = {
+            "future_value_p50": 250000,
+            "future_value_p10": 220000,
+            "future_value_p90": 280000,
+            "annual_rate": 4.5,
+            "value_schedule_p50": [200000 + i * 5000 for i in range(11)],
+            "value_schedule_p10": [190000 + i * 4000 for i in range(11)],
+            "value_schedule_p90": [210000 + i * 6000 for i in range(11)],
+        }
+        table_data = {
+            "Description": ["Gross Monthly Rent", "Cash Flow Monthly"],
+            "Amount": ["$1,600.00", "$200.00"],
+        }
+        params = {
+            "Offer Amount": "$175,000",
+            "Down Payment": "25.0% ($43,750)",
+            "Interest Rate": "6.0%",
+            "Loan Term": "30 Years",
+        }
+        pdf_bytes = generate_property_pdf(
+            "123 Main St",
+            property_info,
+            {"Cap Rate": "7.0%"},
+            table_data,
+            params,
+            location_score=7.5,
+            quantum_risk={
+                "cashflow_success_pct": 80.0,
+                "appreciation_success_pct": 70.0,
+                "combined_wealth_success_pct": 75.0,
+                "overall_success_pct": 72.0,
+            },
+            forecast_display=forecast,
+        )
+        self.assertTrue(pdf_bytes.startswith(b"%PDF"))
+        self.assertGreater(len(pdf_bytes), 5000)
 
 
 if __name__ == "__main__":

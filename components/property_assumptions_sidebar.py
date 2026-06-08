@@ -29,6 +29,74 @@ from knowledge_base import (
 from portfolio_map_page import invalidate_portfolio_cache
 
 
+DOWN_PAYMENT_MODE_KEY = "down_payment_input_mode"
+
+
+def _render_down_payment_input(purchase_price: float) -> tuple[float, str]:
+    """Render down payment as percent or dollars; return pct and display label."""
+    mode = st.session_state.get(DOWN_PAYMENT_MODE_KEY, "percent")
+    purchase_price = max(float(purchase_price or 0), 0.0)
+
+    label_col, toggle_col = st.sidebar.columns([5, 1])
+    with toggle_col:
+        if st.button(
+            "⇄",
+            key="toggle_down_payment_mode",
+            help="Switch down payment between % and $",
+        ):
+            if mode == "percent":
+                pct = float(st.session_state.get("individual_search_down_payment_pct", 25))
+                st.session_state["individual_search_down_payment_dollars"] = (
+                    purchase_price * pct / 100 if purchase_price > 0 else 50_000.0
+                )
+            else:
+                dollars = float(
+                    st.session_state.get(
+                        "individual_search_down_payment_dollars",
+                        purchase_price * 0.25 if purchase_price > 0 else 50_000.0,
+                    )
+                )
+                if purchase_price > 0:
+                    st.session_state["individual_search_down_payment_pct"] = (
+                        dollars / purchase_price * 100
+                    )
+            st.session_state[DOWN_PAYMENT_MODE_KEY] = (
+                "dollars" if mode == "percent" else "percent"
+            )
+            st.rerun()
+
+    with label_col:
+        if mode == "dollars":
+            max_dp = purchase_price if purchase_price > 0 else 500_000.0
+            if "individual_search_down_payment_dollars" not in st.session_state:
+                stored_pct = float(st.session_state.get("individual_search_down_payment_pct", 25))
+                st.session_state["individual_search_down_payment_dollars"] = (
+                    purchase_price * stored_pct / 100 if purchase_price > 0 else 50_000.0
+                )
+            dollars = st.number_input(
+                "Down Payment ($)",
+                min_value=0.0,
+                max_value=float(max_dp),
+                step=1000.0,
+                key="individual_search_down_payment_dollars",
+            )
+            pct = (dollars / purchase_price * 100) if purchase_price > 0 else 25.0
+            display = f"${dollars:,.0f} ({pct:.1f}%)"
+        else:
+            pct = st.number_input(
+                "Down Payment (%)",
+                min_value=0.0,
+                max_value=100.0,
+                value=float(st.session_state.get("individual_search_down_payment_pct", 25)),
+                step=0.5,
+                key="individual_search_down_payment_pct",
+            )
+            dollars = purchase_price * pct / 100 if purchase_price > 0 else 0.0
+            display = f"{pct:.1f}% (${dollars:,.0f})"
+
+    return pct, display
+
+
 def render_assumption_sliders(property_info: dict[str, Any]) -> dict[str, float]:
     """
     Render AI baselines and personal assumption sliders in the sidebar.
@@ -106,12 +174,57 @@ def render_assumption_sliders(property_info: dict[str, Any]) -> dict[str, float]
         help="Standard closing costs are around 3-5% of the purchase price.",
     )
 
+    list_price = float(property_info.get("price") or 0)
+    if list_price > 0:
+        offer_min = int(list_price * 0.70)
+        offer_max = int(list_price * 1.10)
+        offer_default = int(list_price)
+    else:
+        offer_min, offer_max, offer_default = 50_000, 500_000, 200_000
+    offer_default = max(offer_min, min(offer_max, offer_default))
+    offer_amount = st.sidebar.slider(
+        "Your Offer Amount ($)",
+        float(offer_min),
+        float(offer_max),
+        value=float(offer_default),
+        step=1000.0,
+        help=(
+            "Model your purchase offer — used for deal success scoring and "
+            "finance metrics (mortgage, cap rate, cash on cash)."
+        ),
+    )
+
+    down_payment_pct, down_payment_label = _render_down_payment_input(offer_amount)
+
+    loan_term = st.sidebar.number_input(
+        "Loan Term (yrs)",
+        min_value=1,
+        max_value=40,
+        value=int(st.session_state.get("individual_search_loan_term", 30)),
+        step=1,
+        key="individual_search_loan_term",
+    )
+    interest_rate = st.sidebar.number_input(
+        "Mortgage Rate (%)",
+        min_value=0.0,
+        max_value=20.0,
+        value=float(st.session_state.get("individual_search_interest_rate", 6.0)),
+        step=0.125,
+        format="%.3f",
+        key="individual_search_interest_rate",
+    )
+
     return {
         "final_monthly_rent": final_monthly_rent,
         "final_maint_percent": final_maint_percent,
         "user_vacancy_reserve": user_vacancy_reserve,
         "user_management_fee": user_management_fee,
         "user_closing_costs_pct": user_closing_costs_pct,
+        "offer_amount": offer_amount,
+        "down_payment_pct": down_payment_pct,
+        "down_payment_label": down_payment_label,
+        "loan_term": float(loan_term),
+        "interest_rate": interest_rate,
         "original_ai_rent": original_ai_rent,
         "original_ai_maint": original_ai_maint,
     }

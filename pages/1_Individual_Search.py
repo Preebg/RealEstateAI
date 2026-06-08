@@ -70,23 +70,6 @@ with st.sidebar:
         render_user_saved_properties_sidebar()
     st.divider()
     render_market_pulse()
-    st.divider()
-    st.header("Investment Parameters")
-    down_payment = st.number_input(
-        "Expected Down Payment (%)",
-        value=25,
-        key="individual_search_down_payment_pct",
-    )
-    loan_term = st.number_input(
-        "Loan Term (yrs)",
-        value=30,
-        key="individual_search_loan_term",
-    )
-    interest_rate = st.number_input(
-        "Your Mortgage Rate (%)",
-        value=6.000,
-        key="individual_search_interest_rate",
-    )
 
 if _guest_mode:
     st.info(
@@ -153,11 +136,12 @@ if st.session_state.property_data:
 
     assumptions = render_assumption_sliders(property_info)
 
+    purchase_price = safe_float(assumptions.get("offer_amount")) or price
     finance = run_finance_analysis(
-        price=price,
-        down_payment_pct=down_payment,
-        interest_rate=interest_rate,
-        loan_term=int(loan_term),
+        price=purchase_price,
+        down_payment_pct=assumptions["down_payment_pct"],
+        interest_rate=assumptions["interest_rate"],
+        loan_term=int(assumptions["loan_term"]),
         closing_costs_pct=assumptions["user_closing_costs_pct"],
         tax_rate=tax_rate,
         monthly_insurance=monthly_insurance,
@@ -196,9 +180,10 @@ if st.session_state.property_data:
         assumptions=assumptions,
         finance=finance,
         loan_params={
-            "down_payment": down_payment,
-            "interest_rate": interest_rate,
-            "loan_term": loan_term,
+            "down_payment": assumptions["down_payment_pct"],
+            "interest_rate": assumptions["interest_rate"],
+            "loan_term": assumptions["loan_term"],
+            "down_payment_label": assumptions.get("down_payment_label"),
         },
         total_confidence_pct=total_confidence_pct,
     )

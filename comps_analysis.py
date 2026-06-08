@@ -172,18 +172,94 @@ def evaluate_comps_against_subject(
     }
 
 
-def apply_comps_valuation_adjustment(
+def resolve_market_value(property_data: dict[str, Any]) -> float:
+    """Return comp-implied value when enough comps exist, else predicted or list price."""
+    comps = property_data.get("comps_analysis")
+    if isinstance(comps, dict) and int(comps.get("comp_count") or 0) >= MIN_COMPS_FOR_SUMMARY:
+        comp_value = safe_float(comps.get("comp_suggested_value"))
+        if comp_value > 0:
+            return comp_value
+    predicted = safe_float(property_data.get("predicted_value"))
+    if predicted > 0:
+        return predicted
+    return safe_float(property_data.get("price"))
+
+
+def evaluate_offer_success(
+    offer_amount: float,
+    market_value: float,
+    list_price: float,
+) -> dict[str, Any]:
+    """
+    Estimate deal success: how favorable is this offer vs comp-implied market value.
+
+    Higher scores mean the offer is at or below market value (better buy).
+    """
+    if market_value <= 0:
+        market_value = list_price
+    if offer_amount <= 0 or market_value <= 0:
+        return {
+            "success_pct": None,
+            "offer_vs_market_pct": None,
+            "market_value": market_value,
+            "message": "Enter an offer amount to see deal success probability.",
+        }
+
+    offer_vs_market_pct = round((offer_amount - market_value) / market_value * 100, 1)
+    ratio = offer_amount / market_value
+
+    if ratio <= 0.90:
+        success = 95.0
+    elif ratio <= 1.0:
+        success = 95.0 - (ratio - 0.90) / 0.10 * 15.0
+    elif ratio <= 1.05:
+        success = 80.0 - (ratio - 1.0) / 0.05 * 30.0
+    elif ratio <= 1.15:
+        success = 50.0 - (ratio - 1.05) / 0.10 * 35.0
+    else:
+        success = max(5.0, 15.0 - (ratio - 1.15) * 50.0)
+
+    if list_price > 0 and offer_amount <= list_price and market_value > list_price:
+        discount_pct = (market_value - list_price) / market_value * 100
+        success = min(98.0, success + discount_pct * 0.4)
+
+    if offer_vs_market_pct <= -5:
+        message = (
+            f"Offer is {abs(offer_vs_market_pct):.1f}% below comp-implied market value "
+            "— strong deal potential."
+        )
+    elif offer_vs_market_pct <= 0:
+        message = "Offer is at or slightly below comp-implied market value."
+    elif offer_vs_market_pct <= 5:
+        message = (
+            f"Offer is {offer_vs_market_pct:.1f}% above comp-implied value "
+            "— moderate risk of overpaying."
+        )
+    else:
+        message = (
+            f"Offer is {offer_vs_market_pct:.1f}% above comp-implied value "
+            "— likely overpaying."
+        )
+
+    return {
+        "success_pct": round(success, 1),
+        "offer_vs_market_pct": offer_vs_market_pct,
+        "market_value": market_value,
+        "message": message,
+    }
+
+
+def apply_comp_implied_market_value(
     property_data: dict[str, Any],
     comps_analysis: dict[str, Any],
-    *,
-    min_adjustment_pct: float = 5.0,
 ) -> bool:
     """
-    Raise predicted_value when comps imply material upside.
+    Set predicted_value to comp-implied value when enough comps exist.
 
-    Returns True when predicted_value was adjusted.
+    Returns True when predicted_value was updated.
     """
-    if not comps_analysis.get("is_undervalued"):
+    comp_count = int(comps_analysis.get("comp_count") or 0)
+    if comp_count < MIN_COMPS_FOR_SUMMARY:
         return False
 
     suggested = safe_float(comps_analysis.get("comp_suggested_value"))
@@ -195,23 +271,32 @@ def apply_comps_valuation_adjustment(
     current = safe_float(property_data.get("predicted_value"))
     if current <= 0:
         current = safe_float(property_data.get("price"))
-    if current <= 0:
-        return False
 
-    uplift_pct = (suggested - current) / current * 100
-    if uplift_pct < min_adjustment_pct:
-        return False
+    rounded = round(suggested)
+    property_data["predicted_value"] = rounded
+    property_data["market_value"] = rounded
 
-    property_data["predicted_value"] = round(suggested)
-    prior = str(property_data.get("prediction_reasoning") or "").strip()
-    comp_count = int(comps_analysis.get("comp_count") or 0)
-    median_price = safe_float(comps_analysis.get("median_sale_price"))
-    adjustment_note = (
-        f"Adjusted upward to ${suggested:,.0f} based on {comp_count} area comps "
-        f"(median sale ${median_price:,.0f})."
-    )
-    property_data["prediction_reasoning"] = (
-        f"{prior} {adjustment_note}".strip() if prior else adjustment_note
-    )
+    if abs(suggested - current) > 0.01:
+        prior = str(property_data.get("prediction_reasoning") or "").strip()
+        median_price = safe_float(comps_analysis.get("median_sale_price"))
+        adjustment_note = (
+            f"Market value set to ${rounded:,.0f} from {comp_count} area comps "
+            f"(median sale ${median_price:,.0f})."
+        )
+        property_data["prediction_reasoning"] = (
+            f"{prior} {adjustment_note}".strip() if prior else adjustment_note
+        )
+
     property_data["comps_adjusted_predicted_value"] = True
     return True
+
+
+def apply_comps_valuation_adjustment(
+    property_data: dict[str, Any],
+    comps_analysis: dict[str, Any],
+    *,
+    min_adjustment_pct: float = 5.0,
+) -> bool:
+    """Backward-compatible alias — always applies comp-implied value when comps qualify."""
+    _ = min_adjustment_pct
+    return apply_comp_implied_market_value(property_data, comps_analysis)

@@ -26,9 +26,14 @@ from finance import (
     normalize_tax_rate_percent,
 )
 from comps_analysis import (
-    apply_comps_valuation_adjustment,
+    apply_comp_implied_market_value,
     evaluate_comps_against_subject,
     normalize_comps_payload,
+)
+from rent_comps_analysis import (
+    apply_rent_comps_adjustment,
+    evaluate_rent_comps_against_subject,
+    normalize_rent_comps_payload,
 )
 from data_provenance import attach_data_provenance
 from knowledge_base import get_kb_context, lookup_property
@@ -3358,7 +3363,7 @@ def fetch_comparable_properties(
 
     updated = dict(property_data)
     updated["comps_analysis"] = comps_analysis
-    if apply_comps_valuation_adjustment(updated, comps_analysis):
+    if apply_comp_implied_market_value(updated, comps_analysis):
         enriched = enrich_with_forecast(updated)
         updated.update(
             {
@@ -3371,6 +3376,71 @@ def fetch_comparable_properties(
                 "forecast_growth": enriched.get("forecast_growth"),
             }
         )
+    return updated
+
+
+def rent_comps_agent(address: str, property_data: dict[str, Any], model: str) -> str:
+    """Grounded search for structured comparable rentals near the subject property."""
+    context = _comps_context_block(property_data)
+    rent = safe_float(property_data.get("rent"))
+    if rent > 0:
+        context += f"\n- AI / listing rent: ${rent:,.0f}/mo"
+    prompt = f"""Find recent comparable RENTALS (active listings or signed leases) near:
+{address}
+
+SUBJECT PROPERTY CONTEXT:
+{context}
+
+Requirements:
+- Return 3 to 5 comps listed or leased within the last 12 months when possible.
+- Match property type, beds/baths, square footage (+/- 20%), and neighborhood.
+- Prefer rentals within 1 mile of the subject.
+- Use Zillow rentals, Apartments.com, Realtor.com rentals, Craigslist, or MLS lease data.
+- Each comp must have a verified monthly rent amount.
+
+Return ONLY JSON:
+{{
+  "comparable_rentals": [
+    {{
+      "address": "full street address or building name",
+      "monthly_rent": number,
+      "lease_date": "YYYY-MM or YYYY-MM-DD",
+      "square_footage": number,
+      "bedrooms": number,
+      "bathrooms": number,
+      "property_type": "Single Family | Duplex | Townhome | etc",
+      "distance_miles": number,
+      "comparison_notes": "how this rental compares to the subject",
+      "source_url": "url"
+    }}
+  ],
+  "market_summary": "1-2 sentences on what rental comps imply for subject rent"
+}}
+
+No currency symbols or commas outside JSON numbers."""
+    return generate_with_retry(model, prompt, use_search=True)
+
+
+def fetch_rental_comparables(
+    address: str,
+    property_data: dict[str, Any],
+    *,
+    model: str | None = None,
+) -> dict[str, Any]:
+    """
+    Research area rental comps and attach rent_comps_analysis to a copy of property_data.
+
+    May adjust rent upward when comps show material upside vs listing/AI rent.
+    """
+    active_model = model or PRIMARY_SEARCH_MODEL
+    raw = rent_comps_agent(address, property_data, active_model)
+    extracted = _extract_json(raw)
+    rent_payload = normalize_rent_comps_payload(extracted if isinstance(extracted, dict) else {})
+    rent_comps_analysis = evaluate_rent_comps_against_subject(rent_payload, property_data)
+
+    updated = dict(property_data)
+    updated["rent_comps_analysis"] = rent_comps_analysis
+    apply_rent_comps_adjustment(updated, rent_comps_analysis)
     return updated
 
 

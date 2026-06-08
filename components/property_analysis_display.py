@@ -10,7 +10,12 @@ import pandas as pd
 import streamlit as st
 import tldextract
 
-from components.property_comps import ensure_comps_analysis, render_property_comps_section
+from comps_analysis import resolve_market_value
+from components.property_comps import (
+    _markdown_safe_text,
+    ensure_comps_analysis,
+    render_property_comps_section,
+)
 from components.property_share import render_pending_share_clipboard_copy
 from services.deferred_analysis import is_task_pending
 from components.property_share import render_share_popover
@@ -268,6 +273,12 @@ def render_analysis_results(
     monthly_insurance = safe_float(property_info.get("insurance"))
 
     predicted_value = safe_float(property_info.get("predicted_value"))
+    market_value = resolve_market_value(property_info)
+    has_comp_market_value = (
+        isinstance(property_info.get("comps_analysis"), dict)
+        and int(property_info["comps_analysis"].get("comp_count") or 0) >= 2
+        and safe_float(property_info["comps_analysis"].get("comp_suggested_value")) > 0
+    )
     prediction_reasoning = property_info.get("prediction_reasoning", "No reasoning provided.")
     location_score = safe_float(property_info.get("location_score"))
     market_city = property_info.get("market_city")
@@ -362,15 +373,27 @@ def render_analysis_results(
 
         st.markdown(f"**Strategy Status:** :blue[{branding_label}]")
         st.subheader("🎯 AI Valuation")
-        st.info(
-            f"**Predicted Market Value:** ${predicted_value:,.2f}\n\n"
-            f"**Reasoning:** {prediction_reasoning}"
-        )
+        if has_comp_market_value:
+            st.info(
+                _markdown_safe_text(
+                    f"**Market Value (from comps):** ${market_value:,.2f}\n\n"
+                    f"**Reasoning:** {prediction_reasoning}"
+                )
+            )
+        else:
+            st.info(
+                _markdown_safe_text(
+                    f"**Predicted Market Value:** ${predicted_value:,.2f}\n\n"
+                    f"**Reasoning:** {prediction_reasoning}\n\n"
+                    "_Run **Check Area Comps** below to set market value from nearby sales._"
+                )
+            )
 
         render_property_comps_section(
             guest_mode=guest_mode,
             address=address,
             property_info=property_info,
+            offer_amount=assumptions.get("offer_amount") or safe_float(property_info.get("price")),
         )
 
         with st.expander("📈 10-Year Appreciation Forecast"):
@@ -511,9 +534,11 @@ def render_analysis_results(
         st.sidebar.write(f"💸 Total Cash Required: **${total_investment:,.2f}**")
 
         investment_params = {
-            "Down Payment": f"{down_payment}%",
+            "Offer Amount": f"${assumptions.get('offer_amount', price):,.0f}",
+            "Down Payment": loan_params.get("down_payment_label")
+            or f"{down_payment:.1f}%",
             "Interest Rate": f"{interest_rate}%",
-            "Loan Term": f"{loan_term} Years",
+            "Loan Term": f"{int(loan_term)} Years",
         }
 
         pdf_metrics = {
@@ -522,6 +547,9 @@ def render_analysis_results(
             "Monthly Net Cash Flow": f"${monthly_net_cash_flow:,.2f}",
             "Total Cash Required": f"${total_investment:,.2f}",
         }
+
+        live_forecast = property_info.get("_forecast_display_cache")
+        forecast_for_pdf = live_forecast if isinstance(live_forecast, dict) else None
 
         st.write("---")
         if quantum_ready:
@@ -533,6 +561,7 @@ def render_analysis_results(
                 investment_params,
                 location_score,
                 quantum_risk=quantum_risk,
+                forecast_display=forecast_for_pdf,
             )
 
             st.download_button(
