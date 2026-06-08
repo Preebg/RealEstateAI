@@ -23,6 +23,8 @@ from finance import (
 
 log = configure_logging("knowledge_base")
 
+KB_CACHE_TTL_SECONDS = 300
+
 try:
     import streamlit as st
 except ImportError:
@@ -163,15 +165,25 @@ def get_property_id_by_address(address: str) -> str | None:
     """Resolve canonical property UUID from address."""
     if not address or not str(address).strip():
         return None
-    key = normalize_address_key(address)
-    for row in _fetch_canonical_properties():
-        if normalize_address_key(str(row.get("address", ""))) == key:
-            pid = row.get("id")
-            return str(pid) if pid else None
-    return None
+    hit = get_kb_raw_data().get(normalize_address_key(address))
+    if not hit:
+        return None
+    pid = hit.get("id")
+    return str(pid) if pid else None
 
 
-def get_kb_raw_data(user_id: str | None = None) -> dict[str, dict[str, Any]]:
+def _kb_cache_scope_key(user_id: str | None) -> str:
+    """Stable Streamlit cache key for scoped KB reads."""
+    if in_streamlit_app():
+        from share_access import is_guest_viewer
+
+        if is_guest_viewer():
+            return "guest"
+    uid = _resolve_user_id(user_id)
+    return f"user:{uid}" if uid else "shared"
+
+
+def _build_kb_raw_data(user_id: str | None = None) -> dict[str, dict[str, Any]]:
     """Fetch properties keyed by normalized address for reliable lookup."""
     rows = _fetch_properties(user_id)
     if not rows:
@@ -181,6 +193,37 @@ def get_kb_raw_data(user_id: str | None = None) -> dict[str, dict[str, Any]]:
         for item in rows
         if item.get("address")
     }
+
+
+if st is not None:
+
+    @st.cache_data(ttl=KB_CACHE_TTL_SECONDS, show_spinner=False)
+    def _get_kb_raw_data_cached(scope_key: str) -> dict[str, dict[str, Any]]:
+        if scope_key == "guest":
+            return _build_kb_raw_data(None)
+        if scope_key.startswith("user:"):
+            return _build_kb_raw_data(scope_key[5:])
+        return _build_kb_raw_data(None)
+
+
+def invalidate_kb_cache() -> None:
+    """Clear cached KB reads (portfolio map invalidation calls this too)."""
+    if st is not None:
+        try:
+            _get_kb_raw_data_cached.clear()
+        except Exception:
+            pass
+        try:
+            _get_market_pulse_cached.clear()
+        except Exception:
+            pass
+
+
+def get_kb_raw_data(user_id: str | None = None) -> dict[str, dict[str, Any]]:
+    """Fetch properties keyed by normalized address for reliable lookup."""
+    if in_streamlit_app() and st is not None:
+        return _get_kb_raw_data_cached(_kb_cache_scope_key(user_id))
+    return _build_kb_raw_data(user_id)
 
 
 def lookup_property(address: str, user_id: str | None = None) -> dict[str, Any] | None:
@@ -332,11 +375,7 @@ def _apply_state_code_from_address(payload: dict[str, Any]) -> None:
 def get_scanned_addresses(user_id: str | None = None) -> set[str]:
     """Return normalized addresses in the shared canonical catalog."""
     _ = user_id  # canonical catalog is shared across users
-    return {
-        normalize_address_key(row["address"])
-        for row in _fetch_canonical_properties()
-        if row.get("address")
-    }
+    return set(get_kb_raw_data(user_id).keys())
 
 
 def is_property_already_scanned(address: str, user_id: str | None = None) -> bool:
@@ -1304,10 +1343,8 @@ def _infer_market_city(record: dict[str, Any]) -> str | None:
     return matched or None
 
 
-def get_market_pulse(user_id: str | None = None) -> dict[str, dict[str, Any]]:
-    """
-    Aggregate per-metro stats for UI 'Market Pulse'.
-    """
+def _compute_market_pulse(user_id: str | None = None) -> dict[str, dict[str, Any]]:
+    """Aggregate per-metro stats for UI 'Market Pulse'."""
     from engine import DISCOVERY_MARKET_KEYS
 
     empty = {
@@ -1348,6 +1385,24 @@ def get_market_pulse(user_id: str | None = None) -> dict[str, dict[str, Any]]:
         }
 
     return pulse
+
+
+if st is not None:
+
+    @st.cache_data(ttl=KB_CACHE_TTL_SECONDS, show_spinner=False)
+    def _get_market_pulse_cached(scope_key: str) -> dict[str, dict[str, Any]]:
+        if scope_key == "guest":
+            return _compute_market_pulse(None)
+        if scope_key.startswith("user:"):
+            return _compute_market_pulse(scope_key[5:])
+        return _compute_market_pulse(None)
+
+
+def get_market_pulse(user_id: str | None = None) -> dict[str, dict[str, Any]]:
+    """Aggregate per-metro stats for UI 'Market Pulse'."""
+    if in_streamlit_app() and st is not None:
+        return _get_market_pulse_cached(_kb_cache_scope_key(user_id))
+    return _compute_market_pulse(user_id)
 
 
 def get_telemetry_stats(user_id: str | None = None) -> dict[str, Any]:
@@ -1427,6 +1482,7 @@ __all__ = [
     "get_property_id_by_address",
     "get_client",
     "get_admin_uid",
+    "invalidate_kb_cache",
     "get_kb_raw_data",
     "lookup_property",
     "save_canonical_property",

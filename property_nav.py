@@ -36,4 +36,4 @@ def load_property_from_kb(address: str) -> dict[str, Any] | None:
     cached = lookup_property(address)
     if not cached:
         return None
-    return get_final_analysis(cached, address, None)
+    return get_final_analysis(cached, address, None, skip_comps=True)

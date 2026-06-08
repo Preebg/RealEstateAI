@@ -17,11 +17,17 @@ from knowledge_base import (
 )
 from market_pulse import render_market_pulse
 from property_nav import consume_map_property_selection, load_property_from_kb
+from services.deferred_analysis import (
+    build_deferred_task_queue,
+    process_next_deferred_task,
+    render_deferred_progress,
+    sync_quantum_recompute_queue,
+)
 from services.property_analysis_flow import (
     initialize_hitl_baselines,
+    resolve_quantum_risk,
     run_finance_analysis,
     run_initial_property_analysis,
-    run_quantum_simulation,
 )
 from share_access import is_guest_viewer, render_guest_sidebar
 from ui_theme import render_page_hero
@@ -88,13 +94,23 @@ if st.button("Analyze Property", disabled=_guest_mode):
             "investment decisions in NY, NC, FL, TX, AL,  PA, or SC."
         )
         st.session_state.property_data = None
-        run_initial_property_analysis(address)
+        st.session_state.deferred_tasks = []
+        st.session_state.pop("quantum_finance_sig", None)
+        st.session_state.pop("run_market_crash_sim", None)
+        run_initial_property_analysis(address, guest_mode=_guest_mode)
     else:
         st.warning("Please enter a property address.")
 elif _guest_mode and not st.session_state.property_data:
     st.caption("Open a property from the **Portfolio Map** or use the link your friend shared.")
 
 if st.session_state.property_data:
+    if "deferred_tasks" not in st.session_state:
+        st.session_state.deferred_tasks = build_deferred_task_queue(
+            st.session_state.property_data,
+            guest_mode=_guest_mode,
+        )
+        st.session_state.deferred_tasks_total = len(st.session_state.deferred_tasks)
+
     property_info = backfill_year_built_if_needed(
         st.session_state.property_data,
         address,
@@ -138,12 +154,17 @@ if st.session_state.property_data:
     )
     render_closing_costs_caption(finance["user_closing_costs_total"])
 
-    quantum_risk = run_quantum_simulation(
+    sync_quantum_recompute_queue(
         property_info,
-        finance["monthly_net_cash_flow"],
-        forecast_rate,
-        location_score,
+        monthly_net_cash_flow=finance["monthly_net_cash_flow"],
+        forecast_rate=forecast_rate,
+        location_score=location_score,
     )
+    st.session_state.property_data = property_info
+
+    render_deferred_progress()
+
+    quantum_risk = resolve_quantum_risk(property_info)
 
     render_analysis_results(
         guest_mode=_guest_mode,
@@ -174,4 +195,13 @@ if st.session_state.property_data:
         appreciation_forecast=appreciation_forecast,
         branding_label=branding_label,
         get_pretty_label=get_pretty_label,
+    )
+
+    process_next_deferred_task(
+        address=address,
+        finance_context={
+            "monthly_net_cash_flow": finance["monthly_net_cash_flow"],
+            "forecast_rate": forecast_rate,
+            "location_score": location_score,
+        },
     )

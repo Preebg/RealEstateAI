@@ -10,6 +10,7 @@ from typing import Any
 import folium
 import pandas as pd
 import streamlit as st
+from folium.plugins import MarkerCluster
 import streamlit.components.v1 as components
 from streamlit_folium import st_folium
 
@@ -22,6 +23,7 @@ from knowledge_base import (
     get_ai_baseline_maint,
     get_ai_baseline_rent,
     normalize_address_key,
+    parse_state_code_from_address,
     parse_zipcode_from_address,
 )
 from market_pulse import render_market_pulse
@@ -349,11 +351,20 @@ def load_global_portfolio_properties() -> list[dict[str, Any]]:
 
 def invalidate_portfolio_cache() -> None:
     """Clear portfolio map caches without st.cache_data.clear() (avoids stale module KeyErrors)."""
-    for cached in (load_global_portfolio_properties, attach_coordinates):
+    for cached in (
+        load_global_portfolio_properties,
+        load_geocoded_portfolio_dataframe,
+    ):
         try:
             cached.clear()
         except Exception:
             pass
+    try:
+        from knowledge_base import invalidate_kb_cache
+
+        invalidate_kb_cache()
+    except Exception:
+        pass
 
 
 def _resolve_monthly_cash_flow(prop: dict[str, Any], price: float, rent: float) -> float:
@@ -429,6 +440,10 @@ def build_portfolio_dataframe(properties: list[dict[str, Any]]) -> pd.DataFrame:
         )
         market_city = prop.get("market_city") or _infer_market_city(address) or "—"
         zip_code = _normalize_zip_code(prop.get("zip_code"), address)
+        state_code = prop.get("state_code") or parse_state_code_from_address(address) or "—"
+        year_raw = prop.get("year_built")
+        year_built = int(_safe_float(year_raw)) if year_raw not in (None, "", 0) else pd.NA
+        location_score = _safe_float(prop.get("location_score"))
 
         records.append(
             {
@@ -442,6 +457,9 @@ def build_portfolio_dataframe(properties: list[dict[str, Any]]) -> pd.DataFrame:
                 "one_year_roi": one_year_roi,
                 "quantum_success": quantum_success,
                 "market_city": str(market_city),
+                "state_code": str(state_code),
+                "year_built": year_built,
+                "location_score": location_score,
             }
         )
 
@@ -456,6 +474,9 @@ def build_portfolio_dataframe(properties: list[dict[str, Any]]) -> pd.DataFrame:
                 "one_year_roi",
                 "quantum_success",
                 "market_city",
+                "state_code",
+                "year_built",
+                "location_score",
                 "lat",
                 "lon",
                 "color",
@@ -530,26 +551,35 @@ def resolve_coordinates_local(
     return None, None
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+MAP_MARKER_CLUSTER_THRESHOLD = 75
+
+
 def attach_coordinates(df: pd.DataFrame) -> pd.DataFrame:
     """Resolve lat/lon instantly from ZIP centroids and market fallbacks (no network)."""
     if df.empty:
         return df
 
     enriched = df.copy()
-
-    def _resolve_row(row: pd.Series) -> pd.Series:
+    latitudes: list[float | None] = []
+    longitudes: list[float | None] = []
+    for row in enriched.itertuples(index=False):
         lat, lon = resolve_coordinates_local(
-            str(row["address"]),
-            row.get("zip_code"),
-            str(row["market_city"]),
+            str(row.address),
+            getattr(row, "zip_code", None),
+            str(row.market_city),
         )
-        return pd.Series({"lat": lat, "lon": lon})
-
-    coords = enriched.apply(_resolve_row, axis=1)
-    enriched["lat"] = coords["lat"]
-    enriched["lon"] = coords["lon"]
+        latitudes.append(lat)
+        longitudes.append(lon)
+    enriched["lat"] = latitudes
+    enriched["lon"] = longitudes
     return enriched
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_geocoded_portfolio_dataframe() -> pd.DataFrame:
+    """Load, analyze, and geocode the full portfolio once per cache window."""
+    properties = load_global_portfolio_properties()
+    return attach_coordinates(build_portfolio_dataframe(properties))
 
 
 def _profitability_to_hex(
@@ -862,6 +892,12 @@ def _build_folium_map(
         ]
         fmap.fit_bounds(bounds, padding=(60, 60))
 
+    marker_parent = (
+        MarkerCluster(name="Properties").add_to(fmap)
+        if len(mappable) >= MAP_MARKER_CLUSTER_THRESHOLD
+        else fmap
+    )
+
     for row in mappable.itertuples(index=False):
         is_focus = focus_address is not None and row.address == focus_address
         tooltip = (
@@ -894,9 +930,141 @@ def _build_folium_map(
             fill=True,
             fill_color=getattr(row, "marker_color", "#78dc8c"),
             fill_opacity=0.95 if is_focus else 0.88,
-        ).add_to(fmap)
+        ).add_to(marker_parent)
 
     return fmap
+
+
+def _numeric_column_bounds(
+    series: pd.Series,
+    *,
+    default_min: float = 0.0,
+    default_max: float = 100.0,
+    as_int: bool = False,
+) -> tuple[float, float]:
+    """Return slider bounds from a numeric column, with sane fallbacks."""
+    values = series.dropna()
+    if values.empty:
+        lo, hi = default_min, default_max
+    else:
+        lo, hi = float(values.min()), float(values.max())
+    if hi <= lo:
+        hi = lo + 1
+    if as_int:
+        return int(lo), int(hi)
+    return lo, hi
+
+
+def _range_filter_active(
+    selected: tuple[float, float],
+    bounds: tuple[float, float],
+) -> bool:
+    """True when the user narrowed a range slider below the full data extent."""
+    return selected[0] > bounds[0] or selected[1] < bounds[1]
+
+
+def filter_portfolio_dataframe(
+    df: pd.DataFrame,
+    *,
+    states: list[str] | None = None,
+    cities: list[str] | None = None,
+    price_range: tuple[float, float] | None = None,
+    price_bounds: tuple[float, float] | None = None,
+    year_range: tuple[int, int] | None = None,
+    year_bounds: tuple[int, int] | None = None,
+    cashflow_range: tuple[float, float] | None = None,
+    cashflow_bounds: tuple[float, float] | None = None,
+    roi_range: tuple[float, float] | None = None,
+    roi_bounds: tuple[float, float] | None = None,
+    location_range: tuple[float, float] | None = None,
+    location_bounds: tuple[float, float] | None = None,
+    risk_range: tuple[float, float] | None = None,
+    risk_bounds: tuple[float, float] | None = None,
+) -> pd.DataFrame:
+    """Apply portfolio map filters; empty categorical selections mean no filter."""
+    if df.empty:
+        return df
+
+    result = df.copy()
+    if states:
+        result = result[result["state_code"].isin(states)]
+    if cities:
+        result = result[result["market_city"].isin(cities)]
+
+    if price_range and price_bounds and _range_filter_active(price_range, price_bounds):
+        result = result[
+            (result["price"] >= price_range[0]) & (result["price"] <= price_range[1])
+        ]
+
+    if year_range and year_bounds and _range_filter_active(
+        (float(year_range[0]), float(year_range[1])),
+        (float(year_bounds[0]), float(year_bounds[1])),
+    ):
+        year_mask = result["year_built"].isna() | (
+            (result["year_built"] >= year_range[0])
+            & (result["year_built"] <= year_range[1])
+        )
+        result = result[year_mask]
+
+    if cashflow_range and cashflow_bounds and _range_filter_active(
+        cashflow_range, cashflow_bounds
+    ):
+        result = result[
+            (result["monthly_cash_flow"] >= cashflow_range[0])
+            & (result["monthly_cash_flow"] <= cashflow_range[1])
+        ]
+
+    if roi_range and roi_bounds and _range_filter_active(roi_range, roi_bounds):
+        result = result[
+            (result["one_year_roi"] >= roi_range[0])
+            & (result["one_year_roi"] <= roi_range[1])
+        ]
+
+    if location_range and location_bounds and _range_filter_active(
+        location_range, location_bounds
+    ):
+        result = result[
+            (result["location_score"] >= location_range[0])
+            & (result["location_score"] <= location_range[1])
+        ]
+
+    if risk_range and risk_bounds and _range_filter_active(risk_range, risk_bounds):
+        result = result[
+            (result["quantum_success"] >= risk_range[0])
+            & (result["quantum_success"] <= risk_range[1])
+        ]
+
+    return result
+
+
+def build_portfolio_filter_signature(
+    *,
+    states: list[str],
+    cities: list[str],
+    price_range: tuple[float, float],
+    year_range: tuple[int, int],
+    cashflow_range: tuple[float, float],
+    roi_range: tuple[float, float],
+    location_range: tuple[float, float],
+    risk_range: tuple[float, float],
+    sort_key: str,
+    result_count: int,
+) -> str:
+    """Stable signature for resetting map viewport when filters change."""
+    return "|".join(
+        [
+            ",".join(sorted(states)),
+            ",".join(sorted(cities)),
+            f"{price_range[0]}-{price_range[1]}",
+            f"{year_range[0]}-{year_range[1]}",
+            f"{cashflow_range[0]}-{cashflow_range[1]}",
+            f"{roi_range[0]}-{roi_range[1]}",
+            f"{location_range[0]}-{location_range[1]}",
+            f"{risk_range[0]}-{risk_range[1]}",
+            sort_key,
+            str(result_count),
+        ]
+    )
 
 
 def sort_portfolio(df: pd.DataFrame, sort_key: str) -> pd.DataFrame:
@@ -1130,51 +1298,162 @@ def render_portfolio_map_page() -> None:
         st.divider()
         render_market_pulse()
 
-    properties = load_global_portfolio_properties()
-    portfolio_df = build_portfolio_dataframe(properties)
+    portfolio_df = load_geocoded_portfolio_dataframe()
 
     if portfolio_df.empty:
         st.info("No properties in the knowledge base yet. Run the harvester to populate the map.")
         return
 
+    price_min, price_max = _numeric_column_bounds(
+        portfolio_df["price"], default_min=0, default_max=1_000_000, as_int=True
+    )
+    year_min, year_max = _numeric_column_bounds(
+        portfolio_df["year_built"], default_min=1900, default_max=2025, as_int=True
+    )
+    cashflow_min, cashflow_max = _numeric_column_bounds(
+        portfolio_df["monthly_cash_flow"], default_min=-5_000, default_max=5_000, as_int=True
+    )
+    roi_min, roi_max = _numeric_column_bounds(
+        portfolio_df["one_year_roi"], default_min=-50.0, default_max=100.0
+    )
+    location_min, location_max = _numeric_column_bounds(
+        portfolio_df["location_score"], default_min=0.0, default_max=10.0
+    )
+    risk_min, risk_max = _numeric_column_bounds(
+        portfolio_df["quantum_success"], default_min=0.0, default_max=100.0
+    )
+
+    state_options = sorted(
+        portfolio_df.loc[portfolio_df["state_code"] != "—", "state_code"].dropna().unique()
+    )
+    city_options = sorted(
+        portfolio_df.loc[portfolio_df["market_city"] != "—", "market_city"].dropna().unique()
+    )
+
     with st.container(border=True):
         st.markdown("##### Filters & sorting")
-        filter_col1, filter_col2 = st.columns([2, 1])
+        cat_col1, cat_col2, sort_col = st.columns([1, 1, 1])
 
-        price_values = portfolio_df["price"].dropna()
-        price_min = int(price_values.min()) if not price_values.empty else 0
-        price_max = int(price_values.max()) if not price_values.empty else 1_000_000
-        if price_max <= price_min:
-            price_max = price_min + 1
-
-        with filter_col1:
-            min_price = st.slider(
-                "Minimum price",
-                min_value=price_min,
-                max_value=price_max,
-                value=price_min,
-                step=max(1_000, (price_max - price_min) // 100 or 1_000),
-                format="$%d",
+        with cat_col1:
+            selected_states = st.multiselect(
+                "State",
+                options=state_options,
+                placeholder="All states",
             )
-
-        with filter_col2:
+        with cat_col2:
+            selected_cities = st.multiselect(
+                "City",
+                options=city_options,
+                placeholder="All cities",
+            )
+        with sort_col:
             sort_label = st.selectbox(
                 "Sort by",
                 options=list(SORT_OPTIONS.keys()),
                 index=0,
             )
+
+        range_col1, range_col2, range_col3 = st.columns(3)
+        with range_col1:
+            price_range = st.slider(
+                "Price range",
+                min_value=price_min,
+                max_value=price_max,
+                value=(price_min, price_max),
+                step=max(1_000, (price_max - price_min) // 100 or 1_000),
+                format="$%d",
+            )
+        with range_col2:
+            year_range = st.slider(
+                "Year built",
+                min_value=year_min,
+                max_value=year_max,
+                value=(year_min, year_max),
+                step=1,
+            )
+        with range_col3:
+            cashflow_range = st.slider(
+                "Monthly cash flow",
+                min_value=cashflow_min,
+                max_value=cashflow_max,
+                value=(cashflow_min, cashflow_max),
+                step=max(50, (cashflow_max - cashflow_min) // 100 or 50),
+                format="$%d",
+            )
+
+        range_col4, range_col5, range_col6 = st.columns(3)
+        with range_col4:
+            roi_range = st.slider(
+                "1-yr ROI (%)",
+                min_value=roi_min,
+                max_value=roi_max,
+                value=(roi_min, roi_max),
+                step=max(0.1, round((roi_max - roi_min) / 100, 1) or 0.1),
+            )
+        with range_col5:
+            location_range = st.slider(
+                "Location score",
+                min_value=location_min,
+                max_value=location_max,
+                value=(location_min, location_max),
+                step=max(0.1, round((location_max - location_min) / 20, 1) or 0.1),
+            )
+        with range_col6:
+            risk_range = st.slider(
+                "Risk score (alignment %)",
+                min_value=risk_min,
+                max_value=risk_max,
+                value=(risk_min, risk_max),
+                step=max(0.1, round((risk_max - risk_min) / 20, 1) or 0.1),
+            )
+
     sort_key = SORT_OPTIONS[sort_label]
 
-    filtered_df = portfolio_df[portfolio_df["price"] >= min_price].copy()
+    filtered_df = filter_portfolio_dataframe(
+        portfolio_df,
+        states=selected_states or None,
+        cities=selected_cities or None,
+        price_range=price_range,
+        price_bounds=(price_min, price_max),
+        year_range=year_range,
+        year_bounds=(year_min, year_max),
+        cashflow_range=cashflow_range,
+        cashflow_bounds=(cashflow_min, cashflow_max),
+        roi_range=roi_range,
+        roi_bounds=(roi_min, roi_max),
+        location_range=location_range,
+        location_bounds=(location_min, location_max),
+        risk_range=risk_range,
+        risk_bounds=(risk_min, risk_max),
+    )
+    if filtered_df.empty:
+        st.info("No properties match the current filters. Widen a range or clear state/city selections.")
+        return
+
     sorted_df = sort_portfolio(filtered_df, sort_key)
+    map_df = apply_map_colors(sorted_df)
 
-    geo_df = attach_coordinates(sorted_df)
-    map_df = apply_map_colors(geo_df)
-
-    filter_sig = f"{min_price}|{sort_key}|{len(map_df)}"
+    filter_sig = build_portfolio_filter_signature(
+        states=selected_states,
+        cities=selected_cities,
+        price_range=price_range,
+        year_range=year_range,
+        cashflow_range=cashflow_range,
+        roi_range=roi_range,
+        location_range=location_range,
+        risk_range=risk_range,
+        sort_key=sort_key,
+        result_count=len(map_df),
+    )
     if st.session_state.get("_map_filter_sig") != filter_sig:
         st.session_state["_map_filter_sig"] = filter_sig
         st.session_state.pop("map_viewport", None)
+
+    if len(filtered_df) < len(portfolio_df):
+        st.caption(
+            f"Showing **{len(filtered_df):,}** of **{len(portfolio_df):,}** properties "
+            "matching the filters above."
+        )
 
     st.markdown("##### Map")
     st.caption(

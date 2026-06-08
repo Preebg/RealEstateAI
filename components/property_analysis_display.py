@@ -11,6 +11,7 @@ import streamlit as st
 import tldextract
 
 from components.property_comps import ensure_comps_analysis, render_property_comps_section
+from services.deferred_analysis import is_task_pending
 from components.property_share import render_share_popover
 from engine import (
     backfill_year_built_if_needed,
@@ -18,9 +19,13 @@ from engine import (
     parse_year_built,
     safe_float,
 )
-from finance import calculate_10yr_appreciation, simulate_market_crash
+from finance import simulate_market_crash
 from pdf_generator import generate_property_pdf
 from ui_theme import style_matplotlib_chart
+
+
+def _pending_metric(label: str, *, help_text: str = "") -> None:
+    st.metric(label=label, value="Computing…", help=help_text or "Running in the background.")
 
 
 def _render_market_crash_simulation(
@@ -42,6 +47,16 @@ def _render_market_crash_simulation(
             "Model a sudden downturn for **this property** — value drop, rent decline, "
             "and higher vacancy — then compare baseline vs stressed outcomes."
         )
+
+        if not st.session_state.get("run_market_crash_sim"):
+            st.info(
+                "Stress-test simulation is computed on demand so the main analysis "
+                "view loads faster."
+            )
+            if st.button("Run market crash simulation", key="start_market_crash_sim"):
+                st.session_state["run_market_crash_sim"] = True
+                st.rerun()
+            return
 
         preset_col1, preset_col2, preset_col3 = st.columns(3)
         with preset_col1:
@@ -236,7 +251,7 @@ def render_analysis_results(
     property_info: dict[str, Any],
     property_id: str | None,
     from_kb: bool,
-    quantum_risk: dict[str, Any],
+    quantum_risk: dict[str, Any] | None,
     assumptions: dict[str, float],
     finance: dict[str, Any],
     loan_params: dict[str, float],
@@ -282,32 +297,57 @@ def render_analysis_results(
             from_kb=from_kb,
         )
 
+    quantum_ready = isinstance(quantum_risk, dict) and bool(quantum_risk)
     with header_col2:
-        st.metric(
-            label="⚛️ Cash Flow Success",
-            value=f"{quantum_risk['cashflow_success_pct']:.1f}%",
-            help="QAOA alignment with positive cash-flow targets (0–100%).",
-        )
+        if quantum_ready:
+            st.metric(
+                label="⚛️ Cash Flow Success",
+                value=f"{quantum_risk['cashflow_success_pct']:.1f}%",
+                help="QAOA alignment with positive cash-flow targets (0–100%).",
+            )
+        else:
+            _pending_metric(
+                "⚛️ Cash Flow Success",
+                help_text="QAOA alignment with positive cash-flow targets (0–100%).",
+            )
     with header_col3:
-        st.metric(
-            label="📈 Appreciation Success",
-            value=f"{quantum_risk['appreciation_success_pct']:.1f}%",
-            help="QAOA alignment with appreciation forecast targets (0–100%).",
-        )
+        if quantum_ready:
+            st.metric(
+                label="📈 Appreciation Success",
+                value=f"{quantum_risk['appreciation_success_pct']:.1f}%",
+                help="QAOA alignment with appreciation forecast targets (0–100%).",
+            )
+        else:
+            _pending_metric(
+                "📈 Appreciation Success",
+                help_text="QAOA alignment with appreciation forecast targets (0–100%).",
+            )
 
     qcol1, qcol2 = st.columns(2)
     with qcol1:
-        st.metric(
-            label="💰 Combined Wealth Success",
-            value=f"{quantum_risk['combined_wealth_success_pct']:.1f}%",
-            help="Joint cash-flow and appreciation alignment from QAOA (0–100%).",
-        )
+        if quantum_ready:
+            st.metric(
+                label="💰 Combined Wealth Success",
+                value=f"{quantum_risk['combined_wealth_success_pct']:.1f}%",
+                help="Joint cash-flow and appreciation alignment from QAOA (0–100%).",
+            )
+        else:
+            _pending_metric(
+                "💰 Combined Wealth Success",
+                help_text="Joint cash-flow and appreciation alignment from QAOA (0–100%).",
+            )
     with qcol2:
-        st.metric(
-            label="⚛️ Quantum Alignment Score",
-            value=f"{quantum_risk['overall_success_pct']:.1f}%",
-            help="Weighted overall QAOA alignment across cash flow, appreciation, and location.",
-        )
+        if quantum_ready:
+            st.metric(
+                label="⚛️ Quantum Alignment Score",
+                value=f"{quantum_risk['overall_success_pct']:.1f}%",
+                help="Weighted overall QAOA alignment across cash flow, appreciation, and location.",
+            )
+        else:
+            _pending_metric(
+                "⚛️ Quantum Alignment Score",
+                help_text="Weighted overall QAOA alignment across cash flow, appreciation, and location.",
+            )
 
     tab1 = st.tabs(["📋 Detailed Metrics"])[0]
 
@@ -331,61 +371,67 @@ def render_analysis_results(
         )
 
         with st.expander("📈 10-Year Appreciation Forecast"):
-            live_forecast = calculate_10yr_appreciation(
-                predicted_value, location_score, market_city
-            )
-            end_year = datetime.datetime.now().year + 10
-            metro_label = market_city or "National default"
-            st.write(
-                f"**Median estimated value in {end_year}:** "
-                f"${live_forecast['future_value_p50']:,.2f}"
-            )
-            st.write(
-                f"**Uncertainty band (10th–90th percentile):** "
-                f"${live_forecast['future_value_p10']:,.0f} – ${live_forecast['future_value_p90']:,.0f}"
-            )
-            st.write(
-                f"**Expected annual growth:** {live_forecast['annual_rate']:.2f}% "
-                f"(metro base {live_forecast['metro_base_rate']:.2f}% "
-                f"+ location {live_forecast['location_adjustment']:+.2f}%)"
-            )
-            st.info(
-                f"**Methodology:** Forecast starts from **{metro_label}** historical metro CAGR, "
-                f"then adjusts ±1.5%/yr max based on Location Score ({location_score}/10). "
-                f"Shaded band reflects Monte Carlo uncertainty on the appreciation rate."
-            )
+            live_forecast = property_info.get("_forecast_display_cache")
+            if not isinstance(live_forecast, dict):
+                if is_task_pending("forecast_chart"):
+                    st.info("Building Monte Carlo appreciation forecast in the background…")
+                else:
+                    st.info("Forecast chart is not ready yet.")
+                live_forecast = None
 
-            start_year = datetime.datetime.now().year
-            years = list(range(start_year, start_year + 11))
-            values_p50 = live_forecast["value_schedule_p50"]
-            values_p10 = live_forecast["value_schedule_p10"]
-            values_p90 = live_forecast["value_schedule_p90"]
+            if isinstance(live_forecast, dict):
+                end_year = datetime.datetime.now().year + 10
+                metro_label = market_city or "National default"
+                st.write(
+                    f"**Median estimated value in {end_year}:** "
+                    f"${live_forecast['future_value_p50']:,.2f}"
+                )
+                st.write(
+                    f"**Uncertainty band (10th–90th percentile):** "
+                    f"${live_forecast['future_value_p10']:,.0f} – ${live_forecast['future_value_p90']:,.0f}"
+                )
+                st.write(
+                    f"**Expected annual growth:** {live_forecast['annual_rate']:.2f}% "
+                    f"(metro base {live_forecast['metro_base_rate']:.2f}% "
+                    f"+ location {live_forecast['location_adjustment']:+.2f}%)"
+                )
+                st.info(
+                    f"**Methodology:** Forecast starts from **{metro_label}** historical metro CAGR, "
+                    f"then adjusts ±1.5%/yr max based on Location Score ({location_score}/10). "
+                    f"Shaded band reflects Monte Carlo uncertainty on the appreciation rate."
+                )
 
-            fig, ax = plt.subplots(figsize=(8, 4))
-            ax.fill_between(
-                years,
-                values_p10,
-                values_p90,
-                alpha=0.25,
-                color="#2ecc71",
-                label="10th–90th percentile",
-            )
-            ax.plot(
-                years,
-                values_p50,
-                marker="o",
-                color="#2ecc71",
-                linewidth=2,
-                label="Median forecast",
-            )
-            ax.set_title("Projected Property Value Growth (Median + Uncertainty)", fontsize=14)
-            ax.set_xlabel("Year")
-            ax.set_ylabel("Estimated Value ($)")
-            ax.ticklabel_format(style="plain", axis="y")
-            ax.legend(loc="upper left", fontsize=8)
-            style_matplotlib_chart(fig, ax)
+                start_year = datetime.datetime.now().year
+                years = list(range(start_year, start_year + 11))
+                values_p50 = live_forecast["value_schedule_p50"]
+                values_p10 = live_forecast["value_schedule_p10"]
+                values_p90 = live_forecast["value_schedule_p90"]
 
-            st.pyplot(fig)
+                fig, ax = plt.subplots(figsize=(8, 4))
+                ax.fill_between(
+                    years,
+                    values_p10,
+                    values_p90,
+                    alpha=0.25,
+                    color="#2ecc71",
+                    label="10th–90th percentile",
+                )
+                ax.plot(
+                    years,
+                    values_p50,
+                    marker="o",
+                    color="#2ecc71",
+                    linewidth=2,
+                    label="Median forecast",
+                )
+                ax.set_title("Projected Property Value Growth (Median + Uncertainty)", fontsize=14)
+                ax.set_xlabel("Year")
+                ax.set_ylabel("Estimated Value ($)")
+                ax.ticklabel_format(style="plain", axis="y")
+                ax.legend(loc="upper left", fontsize=8)
+                style_matplotlib_chart(fig, ax)
+
+                st.pyplot(fig)
 
         _render_market_crash_simulation(
             price=price,
@@ -475,19 +521,22 @@ def render_analysis_results(
         }
 
         st.write("---")
-        pdf_bytes = generate_property_pdf(
-            address,
-            property_info,
-            pdf_metrics,
-            table_data,
-            investment_params,
-            location_score,
-            quantum_risk=quantum_risk,
-        )
+        if quantum_ready:
+            pdf_bytes = generate_property_pdf(
+                address,
+                property_info,
+                pdf_metrics,
+                table_data,
+                investment_params,
+                location_score,
+                quantum_risk=quantum_risk,
+            )
 
-        st.download_button(
-            label="📩 Download Full PDF Report",
-            data=pdf_bytes,
-            file_name=f"Analysis_{address.replace(' ', '_')}.pdf",
-            mime="application/pdf",
-        )
+            st.download_button(
+                label="📩 Download Full PDF Report",
+                data=pdf_bytes,
+                file_name=f"Analysis_{address.replace(' ', '_')}.pdf",
+                mime="application/pdf",
+            )
+        else:
+            st.caption("PDF export unlocks after quantum alignment scores finish computing.")

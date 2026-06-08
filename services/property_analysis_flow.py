@@ -2,38 +2,32 @@
 
 from __future__ import annotations
 
-import datetime
 from typing import Any
 
 import streamlit as st
 
-from engine import calculate_quantum_risk, get_final_analysis, get_initial_analysis, safe_float
-from finance import analyze_investment, calculate_10yr_appreciation
+from engine import get_final_analysis, get_initial_analysis, safe_float
+from finance import analyze_investment
 from knowledge_base import lookup_property
+from services.deferred_analysis import build_deferred_task_queue
 
 
-def run_initial_property_analysis(address: str) -> bool:
+def run_initial_property_analysis(address: str, *, guest_mode: bool = False) -> None:
     """
-    Run KB instant-pull or full AI research for *address*.
+    Fast path: AI research or KB pull, then defer comps / quantum / charts.
 
-    Updates ``st.session_state.property_data`` on success. Returns False when
-    analysis cannot proceed (missing price, etc.).
+    Sets ``st.session_state.property_data`` and queues background work, then reruns
+    so the main analysis page can render before heavy simulations run.
     """
-    with st.status("🔍 Researching property and estimating value...") as status:
+    with st.status("🔍 Researching property and estimating value...", expanded=True) as status:
         cached = lookup_property(address)
         if cached:
-            status.update(
-                label="⚡ Instant Pull from Knowledge Base",
-                state="running",
-            )
+            status.update(label="⚡ Instant Pull from Knowledge Base", state="running")
             initial_data = cached
             from_kb = True
             research_results = None
         else:
-            status.update(
-                label="🔍 No cache hit — running AI research...",
-                state="running",
-            )
+            status.update(label="🔍 No cache hit — running AI research...", state="running")
             initial_data, from_kb, research_results = get_initial_analysis(address)
 
         if not from_kb and safe_float(initial_data.get("price")) == 0:
@@ -43,39 +37,28 @@ def run_initial_property_analysis(address: str) -> bool:
             )
             st.stop()
 
-        st.markdown("### 📝 AI Property Summary")
-        st.write(initial_data.get("summary", "No summary available."))
-
-        loc_score = safe_float(initial_data.get("location_score"))
-        pred_val = safe_float(initial_data.get("predicted_value"))
-        market_city = initial_data.get("market_city")
-        forecast = calculate_10yr_appreciation(pred_val, loc_score, market_city)
-
-        st.subheader("📈 10-Year Appreciation Forecast")
-        end_year = datetime.datetime.now().year + 10
-        st.write(
-            f"**Median estimated value in {end_year}:** "
-            f"${forecast['future_value_p50']:,.2f} "
-            f"(${forecast['future_value_p10']:,.0f}–${forecast['future_value_p90']:,.0f} range)"
+        status.update(label="📋 Preparing analysis view...", state="running")
+        final_result = get_final_analysis(
+            initial_data,
+            address,
+            research_results,
+            skip_comps=True,
         )
-        st.write(
-            f"**Expected annual growth (metro + location):** {forecast['annual_rate']:.2f}% "
-            f"(10th–90th: {forecast['annual_rate_p10']:.2f}%–{forecast['annual_rate_p90']:.2f}%)"
-        )
+        final_result["from_kb"] = from_kb
 
-        status.update(
-            label="🏘️ Checking comparable sales and verifying valuation...",
-            state="running",
-        )
-        final_result = get_final_analysis(initial_data, address, research_results)
+        queue = build_deferred_task_queue(final_result, guest_mode=guest_mode)
         st.session_state.property_data = final_result
+        st.session_state.deferred_tasks = queue
+        st.session_state.deferred_tasks_total = len(queue)
+
         done_label = (
-            "✅ Loaded from Knowledge Base (Instant Pull)"
+            "✅ Loaded from Knowledge Base — opening analysis..."
             if from_kb
-            else "✅ Analysis Complete!"
+            else "✅ Research complete — opening analysis..."
         )
         status.update(label=done_label, state="complete")
-    return True
+
+    st.rerun()
 
 
 def initialize_hitl_baselines(property_info: dict[str, Any], monthly_rent: float, ai_maint_percent: float) -> None:
@@ -134,19 +117,9 @@ def run_finance_analysis(
     }
 
 
-def run_quantum_simulation(
-    property_info: dict[str, Any],
-    monthly_net_cash_flow: float,
-    forecast_rate: float,
-    location_score: float,
-) -> dict[str, Any]:
-    """Run quantum risk simulation and attach results to *property_info*."""
-    with st.spinner("⚛️ Running Quantum Simulation..."):
-        quantum_risk = calculate_quantum_risk(
-            monthly_net_cash_flow,
-            forecast_rate,
-            location_score,
-        )
-        property_info["quantum_risk_score"] = quantum_risk["overall_success_pct"]
-        property_info["quantum_risk"] = quantum_risk
-    return quantum_risk
+def resolve_quantum_risk(property_info: dict[str, Any]) -> dict[str, Any] | None:
+    """Return cached quantum scores or None while the background task is pending."""
+    cached = property_info.get("quantum_risk")
+    if isinstance(cached, dict) and cached:
+        return cached
+    return None

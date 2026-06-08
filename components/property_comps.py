@@ -9,6 +9,7 @@ import streamlit as st
 
 from comps_analysis import evaluate_comps_against_subject
 from engine import fetch_comparable_properties, safe_float
+from services.deferred_analysis import is_task_pending
 
 
 def _comps_table_rows(comps: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -65,18 +66,26 @@ def render_property_comps_section(
         with st.spinner("Searching for comparable sales in the area..."):
             updated = fetch_comparable_properties(address, property_info)
             property_info.update(updated)
+            property_info.pop("_forecast_display_cache", None)
+            property_info.pop("quantum_risk", None)
+            property_info.pop("quantum_risk_score", None)
             st.session_state.property_data = property_info
-            comps_analysis = property_info.get("comps_analysis")
-            has_comps = bool(
-                isinstance(comps_analysis, dict)
-                and comps_analysis.get("comparable_properties")
-            )
+            st.session_state.quantum_finance_sig = None
+            queue = list(st.session_state.get("deferred_tasks") or [])
+            for task in ("quantum", "forecast_chart"):
+                if task not in queue:
+                    queue.append(task)
+            st.session_state.deferred_tasks = queue
+            st.rerun()
 
     if not has_comps:
-        st.info(
-            "No comparable sales loaded yet. Click **Check Area Comps** to research "
-            "recent nearby sales and verify the AI valuation."
-        )
+        if is_task_pending("comps"):
+            st.info("Searching for comparable sales in the area…")
+        else:
+            st.info(
+                "No comparable sales loaded yet. Click **Check Area Comps** to research "
+                "recent nearby sales and verify the AI valuation."
+            )
         return
 
     assert isinstance(comps_analysis, dict)

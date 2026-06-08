@@ -1690,6 +1690,118 @@ class TestPortfolioMapGeocoding(unittest.TestCase):
         self.assertEqual(rows, [2])
 
 
+class TestPortfolioMapFilters(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        import sys
+        from unittest.mock import MagicMock
+
+        sys.modules.setdefault("folium", MagicMock())
+        sys.modules.setdefault("streamlit_folium", MagicMock())
+
+    def _sample_df(self):
+        import pandas as pd
+
+        return pd.DataFrame(
+            [
+                {
+                    "address": "1 Main St, Rochester, NY 14607",
+                    "state_code": "NY",
+                    "market_city": "Rochester",
+                    "price": 200_000,
+                    "year_built": 1985,
+                    "monthly_cash_flow": 400,
+                    "one_year_roi": 12.5,
+                    "location_score": 7.0,
+                    "quantum_success": 82.0,
+                },
+                {
+                    "address": "2 Oak Ave, Charlotte, NC 28269",
+                    "state_code": "NC",
+                    "market_city": "Charlotte",
+                    "price": 350_000,
+                    "year_built": 2010,
+                    "monthly_cash_flow": -100,
+                    "one_year_roi": 5.0,
+                    "location_score": 5.5,
+                    "quantum_success": 60.0,
+                },
+            ]
+        )
+
+    def test_filter_by_state_and_city(self):
+        from portfolio_map_page import filter_portfolio_dataframe
+
+        df = self._sample_df()
+        filtered = filter_portfolio_dataframe(df, states=["NY"], cities=["Rochester"])
+        self.assertEqual(len(filtered), 1)
+        self.assertEqual(filtered.iloc[0]["state_code"], "NY")
+
+    def test_filter_by_price_and_roi_ranges(self):
+        from portfolio_map_page import filter_portfolio_dataframe
+
+        df = self._sample_df()
+        filtered = filter_portfolio_dataframe(
+            df,
+            price_range=(300_000, 400_000),
+            price_bounds=(200_000, 350_000),
+            roi_range=(4.0, 6.0),
+            roi_bounds=(5.0, 12.5),
+        )
+        self.assertEqual(len(filtered), 1)
+        self.assertEqual(filtered.iloc[0]["market_city"], "Charlotte")
+
+    def test_build_portfolio_dataframe_includes_filter_fields(self):
+        from portfolio_map_page import build_portfolio_dataframe
+
+        props = [
+            {
+                "address": "10 State St, Rochester, NY 14607",
+                "price": 180000,
+                "year_built": 1992,
+                "location_score": 6.5,
+                "quantum_risk_score": 75.0,
+                "market_city": "Rochester",
+                "state_code": "NY",
+            }
+        ]
+        df = build_portfolio_dataframe(props)
+        self.assertEqual(df.iloc[0]["state_code"], "NY")
+        self.assertEqual(int(df.iloc[0]["year_built"]), 1992)
+        self.assertEqual(df.iloc[0]["location_score"], 6.5)
+
+
+class TestDeferredAnalysis(unittest.TestCase):
+    def test_build_deferred_task_queue_orders_work(self):
+        from services.deferred_analysis import build_deferred_task_queue
+
+        queue = build_deferred_task_queue(
+            {"price": 200000, "predicted_value": 205000, "location_score": 6.0},
+            guest_mode=False,
+        )
+        self.assertEqual(queue, ["comps", "quantum", "forecast_chart"])
+
+    def test_build_deferred_task_queue_skips_existing(self):
+        from services.deferred_analysis import build_deferred_task_queue
+
+        queue = build_deferred_task_queue(
+            {
+                "comps_analysis": {"comparable_properties": [{"sale_price": 1}]},
+                "quantum_risk": {"overall_success_pct": 70.0},
+                "_forecast_display_cache": {"annual_rate": 4.0},
+            },
+            guest_mode=False,
+        )
+        self.assertEqual(queue, [])
+
+    def test_build_deferred_task_queue_guest_skips_comps(self):
+        from services.deferred_analysis import build_deferred_task_queue
+
+        queue = build_deferred_task_queue({"price": 200000}, guest_mode=True)
+        self.assertNotIn("comps", queue)
+        self.assertIn("quantum", queue)
+
+
 class TestCompsAnalysis(unittest.TestCase):
     def test_evaluate_flags_undervaluation(self):
         from comps_analysis import evaluate_comps_against_subject, normalize_comps_payload
