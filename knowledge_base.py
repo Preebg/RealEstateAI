@@ -898,7 +898,6 @@ def save_canonical_property(
 
     unreliable_reason = one_year_roi_unreliable_reason(property_data)
     if unreliable_reason:
-        delete_unreliable_property(property_data)
         log.warning(
             "kb_canonical_save_unreliable",
             address=property_data.get("address"),
@@ -907,7 +906,7 @@ def save_canonical_property(
         if show_errors and st is not None:
             st.warning(
                 f"Property not saved — {unreliable_reason}. "
-                "It was removed from the database if it was already stored."
+                "Existing catalog entries are kept; use Portfolio Map purge for cleanup."
             )
         return None
 

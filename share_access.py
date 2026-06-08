@@ -202,8 +202,13 @@ def ensure_property_saved_for_share(
     if not addr:
         return None
 
+    invalidate_kb_cache()
+
     payload = dict(property_data)
     payload["address"] = addr
+    stale_id = payload.get("id")
+    if stale_id and is_valid_uuid(str(stale_id)) and not _property_exists(str(stale_id)):
+        payload.pop("id", None)
 
     resolved = get_property_id_by_address(addr)
     if resolved and is_valid_uuid(resolved) and _property_exists(resolved):

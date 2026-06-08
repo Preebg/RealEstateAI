@@ -1129,6 +1129,24 @@ class TestUnreliableForeclosureROI(unittest.TestCase):
         self.assertIsNone(result)
         mock_table.upsert.assert_not_called()
 
+    def test_save_canonical_unreliable_does_not_delete_existing(self):
+        from unittest.mock import MagicMock, patch
+
+        from knowledge_base import save_canonical_property
+
+        listing = self._foreclosure_like_listing()
+        listing["id"] = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+
+        with patch("knowledge_base.delete_canonical_property_by_id") as mock_delete:
+            result = save_canonical_property(
+                listing,
+                user_id="7f35bc1e-9de5-484d-8f73-27fd3da733eb",
+                show_errors=False,
+            )
+
+        self.assertIsNone(result)
+        mock_delete.assert_not_called()
+
     def test_purge_deletes_unreliable_rows(self):
         from unittest.mock import MagicMock, patch
 
