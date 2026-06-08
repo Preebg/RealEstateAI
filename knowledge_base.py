@@ -386,6 +386,48 @@ def get_scanned_addresses(user_id: str | None = None) -> set[str]:
     return set(get_kb_raw_data(user_id).keys())
 
 
+def get_kb_address_options(user_id: str | None = None) -> list[str]:
+    """Sorted display addresses for search widgets (Individual Search autocomplete)."""
+    rows = get_kb_raw_data(user_id)
+    addresses = {
+        str(item.get("address", "")).strip()
+        for item in rows.values()
+        if str(item.get("address", "")).strip()
+    }
+    return sorted(addresses, key=str.casefold)
+
+
+def _address_matches_search_token(token: str, address: str) -> bool:
+    """Match street numbers on word boundaries so ``28`` does not hit ``128``."""
+    haystack = address.casefold()
+    if token.isdigit():
+        return bool(
+            re.search(rf"(?:^|[\s,]){re.escape(token)}(?:\s|,|$)", haystack)
+        )
+    return token in haystack
+
+
+def search_kb_addresses(
+    query: str,
+    *,
+    user_id: str | None = None,
+    limit: int = 12,
+) -> list[str]:
+    """Return KB addresses matching every whitespace-separated query token."""
+    needle = str(query or "").strip().casefold()
+    if not needle:
+        return []
+
+    tokens = [part for part in needle.split() if part]
+    matches: list[str] = []
+    for address in get_kb_address_options(user_id):
+        if all(_address_matches_search_token(token, address) for token in tokens):
+            matches.append(address)
+            if len(matches) >= limit:
+                break
+    return matches
+
+
 def is_property_already_scanned(address: str, user_id: str | None = None) -> bool:
     """True when this address already exists in the KB for the scoped user."""
     if not address or not str(address).strip():
@@ -1480,6 +1522,8 @@ __all__ = [
     "parse_zipcode_from_address",
     "parse_state_code_from_address",
     "get_scanned_addresses",
+    "get_kb_address_options",
+    "search_kb_addresses",
     "is_property_already_scanned",
     "get_ai_baseline_rent",
     "get_ai_baseline_maint",

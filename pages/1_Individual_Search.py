@@ -1,6 +1,7 @@
 import streamlit as st
 
 from authenticate import render_auth_page, render_auth_sidebar
+from components.address_search import render_property_address_input
 from components.property_analysis_display import get_pretty_label, render_analysis_results
 from components.property_assumptions_sidebar import (
     render_assumption_sliders,
@@ -40,7 +41,7 @@ _guest_mode = is_guest_viewer()
 
 _map_address = consume_map_property_selection()
 if _map_address:
-    st.session_state["address_input"] = _map_address
+    st.session_state["address_input"] = [_map_address]
     _map_loaded = load_property_from_kb(_map_address)
     if _map_loaded:
         st.session_state["property_data"] = _map_loaded
@@ -76,13 +77,7 @@ if _guest_mode:
         "sign in to run new AI research or save assumptions."
     )
 
-address = st.text_input(
-    label="Property Address",
-    key="address_input",
-    placeholder="123 Main St, New York, NY",
-    disabled=_guest_mode,
-    help="Guests can open properties from the Portfolio Map. Sign in to search new addresses.",
-)
+address = render_property_address_input(disabled=_guest_mode)
 
 if "property_data" not in st.session_state:
     st.session_state["property_data"] = None

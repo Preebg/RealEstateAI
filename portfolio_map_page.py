@@ -1308,12 +1308,12 @@ def _render_ledger_click_helper(addresses: list[str]) -> None:
 # ---------------------------------------------------------------------------
 def render_portfolio_map_page() -> None:
     """Portfolio map home view."""
+    from share_access import is_guest_viewer, render_guest_sidebar
+
     render_page_hero(
         "🗺️ Portfolio Map",
         "Explore harvested properties by one-year ROI, cash flow, and quantum alignment score.",
     )
-
-    from share_access import is_guest_viewer, render_guest_sidebar
 
     with st.sidebar:
         if is_guest_viewer():

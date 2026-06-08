@@ -44,23 +44,22 @@ _log = get_logger("engine")
 DISCOVERY_MODEL = "gemini-2.5-flash"
 DISCOVERY_FALLBACK_MODELS: tuple[str, ...] = (
     "gemini-2.5-flash-lite",
-    "gemma-4-21b-it",
+    "gemma-4-26b-a4b-it",
 )
 DISCOVERY_MODEL_CHAIN: tuple[str, ...] = (
     DISCOVERY_MODEL,
     *DISCOVERY_FALLBACK_MODELS,
 )
-# Tier 3 / research-fallback label; Gemini API hosts gemma-4-26b-a4b-it (no gemma-4-21b-it).
+# Legacy label → hosted API slug.
 _MODEL_API_SLUGS: dict[str, str] = {
     "gemma-4-21b-it": "gemma-4-26b-a4b-it",
 }
 # Backward-compatible alias for tests and harvester UI.
 DISCOVERY_FALLBACK_MODEL = DISCOVERY_FALLBACK_MODELS[-1]
 RESEARCH_MODEL = "gemma-4-31b-it"
-RESEARCH_FALLBACK_MODEL = "gemma-4-21b-it"
-SYNTHESIS_MODEL = "gemini-3-flash-preview"
+SYNTHESIS_MODEL = "gemini-3.1-flash-lite-preview"
 SYNTHESIS_FALLBACK_MODELS: tuple[str, ...] = (
-    "gemini-3.1-flash-lite-preview",
+    "gemini-3.5-flash",
     "gemma-4-26b-a4b-it",
 )
 SYNTHESIS_MODEL_CHAIN: tuple[str, ...] = (
@@ -68,13 +67,12 @@ SYNTHESIS_MODEL_CHAIN: tuple[str, ...] = (
     *SYNTHESIS_FALLBACK_MODELS,
 )
 # Backward-compatible alias for harvester RPD fallback.
-SYNTHESIS_FALLBACK_MODEL = SYNTHESIS_FALLBACK_MODELS[0]
+SYNTHESIS_FALLBACK_MODEL = SYNTHESIS_FALLBACK_MODELS[-1]
 
-# Geospatial agent chain — map + search grounding on Gemini flash tiers.
+# Geospatial agent chain — same Gemini tiers as discovery (Maps grounding).
 GEOCODING_MODEL_CHAIN: tuple[str, ...] = (
     "gemini-2.5-flash",
     "gemini-2.5-flash-lite",
-    "gemini-3.1-flash-lite-preview",
 )
 GEOCODING_FALLBACK_MODEL = GEOCODING_MODEL_CHAIN[-1]
 # Daily grounding budgets (RPD) — favor search scouts over map lookups.
@@ -218,6 +216,7 @@ DISCOVERY_MAX_REMOTE_CALLS = 25
 DISCOVERY_FALLBACK_MAX_REMOTE_CALLS = 8
 DISCOVERY_SPLIT_MAX_REMOTE_CALLS = 12
 DISCOVERY_REGION_MAX_REMOTE_CALLS = 20
+DISCOVERY_MAP_MAX_REMOTE_CALLS = 6
 DISCOVERY_TOPUP_MAX_ROUNDS = 3
 MAX_SYNTHESIS_PRICE = 400_000
 MAX_API_RETRIES = 5
@@ -456,6 +455,50 @@ def _grounded_search_config(
     )
 
 
+_DISCOVERY_REGION_HINTS: dict[str, tuple[float, float]] = {
+    "Upstate NY": (43.1, -77.6),
+    "Mid-Atlantic": (40.0, -75.5),
+    "Florida": (28.5, -81.4),
+    "Carolinas": (35.2, -80.8),
+}
+
+
+def _grounded_discovery_config(
+    model: str,
+    *,
+    max_remote_calls: int = DISCOVERY_MAX_REMOTE_CALLS,
+    hint_lat: float | None = None,
+    hint_lon: float | None = None,
+) -> types.GenerateContentConfig:
+    """Search grounding for all discovery models; Maps only on Gemini tiers."""
+    tools: list[types.Tool] = []
+    if _model_supports_grounding(model):
+        tools.append(types.Tool(google_search=types.GoogleSearch()))
+    if _model_supports_map_grounding(model):
+        tools.append(types.Tool(google_maps=types.GoogleMaps()))
+
+    tool_config = None
+    if (
+        hint_lat is not None
+        and hint_lon is not None
+        and _model_supports_map_grounding(model)
+    ):
+        tool_config = types.ToolConfig(
+            retrieval_config=types.RetrievalConfig(
+                lat_lng=types.LatLng(latitude=hint_lat, longitude=hint_lon),
+                language_code="en_US",
+            )
+        )
+
+    return types.GenerateContentConfig(
+        tools=tools,
+        tool_config=tool_config,
+        automatic_function_calling=types.AutomaticFunctionCallingConfig(
+            maximum_remote_calls=max_remote_calls,
+        ),
+    )
+
+
 def _discovery_log(message: str) -> None:
     """Discovery progress lines — flush so long API waits show liveness in the console."""
     print(message, flush=True)
@@ -617,6 +660,9 @@ def _generate_with_grounding_retry(
     contents: str,
     *,
     use_search: bool = False,
+    use_maps: bool = False,
+    hint_lat: float | None = None,
+    hint_lon: float | None = None,
     max_retries: int = MAX_API_RETRIES,
     session: GenaiSession | None = None,
     max_remote_calls: int = DISCOVERY_MAX_REMOTE_CALLS,
@@ -625,12 +671,24 @@ def _generate_with_grounding_retry(
     """Like generate_with_retry but also returns grounded search URLs for discovery."""
     active = session or get_session()
     config = None
-    if use_search:
-        config = _grounded_search_config(max_remote_calls=max_remote_calls)
-        _discovery_log(
-            f"[discovery] Grounded search in progress on {model} "
-            f"(up to {max_remote_calls} search calls; often 30–90s)..."
-        )
+    if use_search or use_maps:
+        if use_maps:
+            config = _grounded_discovery_config(
+                model,
+                max_remote_calls=max_remote_calls,
+                hint_lat=hint_lat,
+                hint_lon=hint_lon,
+            )
+            _discovery_log(
+                f"[discovery] Grounded search + Maps in progress on {model} "
+                f"(up to {max_remote_calls} tool calls; often 30–90s)..."
+            )
+        else:
+            config = _grounded_search_config(max_remote_calls=max_remote_calls)
+            _discovery_log(
+                f"[discovery] Grounded search in progress on {model} "
+                f"(up to {max_remote_calls} search calls; often 30–90s)..."
+            )
 
     last_error: BaseException | None = None
     total_wait_sec = 0.0
@@ -1448,7 +1506,7 @@ def run_geospatial_enrichment(
     Agentic geocode pipeline:
     1) Search-grounded scout (higher RPD budget)
     2) Maps-grounded coordinate + environmental risk (lower RPD budget)
-    Model order: gemini-2.5-flash -> gemini-2.5-flash-lite -> gemini-3.1-flash-lite
+    Model order: gemini-2.5-flash -> gemini-2.5-flash-lite
     """
     active_budget = budget or GroundingRpdBudget()
     hint_lat, hint_lon = _geocode_hint_lat_lng(address, market_city=market_city)
@@ -1701,12 +1759,18 @@ def _normalize_discovery_item(item: Any) -> dict[str, Any] | None:
         or item.get("url")
         or ""
     ).strip()
-    return {
+    listing: dict[str, Any] = {
         "address": address,
         "city": city,
         "list_price": list_price,
         "listing_url": listing_url,
     }
+    lat = safe_float(item.get("latitude", item.get("lat")))
+    lon = safe_float(item.get("longitude", item.get("lon", item.get("lng"))))
+    if -90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0 and (lat != 0.0 or lon != 0.0):
+        listing["latitude"] = lat
+        listing["longitude"] = lon
+    return listing
 
 
 def _parse_discovery_fallback(text: str) -> list[dict[str, Any]]:
@@ -1887,6 +1951,7 @@ def _discovery_prompt(
     exclude_addresses: list[str] | None = None,
     needed_count: int | None = None,
     total_needed: int | None = None,
+    use_maps: bool = False,
 ) -> str:
     """Build a grounded-search discovery prompt."""
     ask_total = needed_count if needed_count and needed_count > 0 else MAX_DISCOVERY_LISTINGS
@@ -1983,6 +2048,18 @@ def _discovery_prompt(
         else f"You MUST return {MAX_DISCOVERY_LISTINGS} distinct listings when possible."
     )
 
+    maps_coords_rule = ""
+    maps_example_fields = ""
+    if use_maps:
+        maps_coords_rule = (
+            "- Use Google Maps grounding to resolve exact latitude/longitude for each "
+            "property parcel (decimal degrees). Do not return city-center coordinates.\n"
+        )
+        maps_example_fields = (
+            '    "latitude": 43.12345,\n'
+            '    "longitude": -77.54321,\n'
+        )
+
     return f"""You are a real estate discovery agent for US hot rental markets.
 
 Use Google Search to find {scope}.
@@ -1995,13 +2072,13 @@ Return ONLY a JSON array (no markdown, no commentary). Example:
     "address": "123 Main St, Henrietta, NY 14623",
     "city": "Rochester",
     "list_price": 189000,
-    "listing_url": "https://www.zillow.com/homedetails/123-Main-St-Henrietta-NY-14623/12345678_zpid/"
+{maps_example_fields}    "listing_url": "https://www.zillow.com/homedetails/123-Main-St-Henrietta-NY-14623/12345678_zpid/"
   }},
   {{
     "address": "456 Oak Ave, Penfield, NY 14526",
     "city": "Rochester",
     "list_price": 175000,
-    "listing_url": "https://www.redfin.com/NY/Penfield/456-Oak-Ave-14526/home/12345678"
+{maps_example_fields}    "listing_url": "https://www.redfin.com/NY/Penfield/456-Oak-Ave-14526/home/12345678"
   }}
 ]
 
@@ -2027,7 +2104,7 @@ Rules:
 - Use real street addresses with city/town, state, and ZIP (5-digit ZIP required).
 - list_price must be the active asking price as a plain number (no $ or commas).
 - city must be the parent metro key: one of {market_keys} (NOT the suburb name).
-- If you cannot verify a listing with a real URL and asking price, omit it — do not pad
+{maps_coords_rule}- If you cannot verify a listing with a real URL and asking price, omit it — do not pad
   the list with speculative addresses.{exclude_block}"""
 
 
@@ -2050,6 +2127,18 @@ def _run_discovery_attempt(
         region_market_needs=region_market_needs,
         needed_count=needed_count,
     )
+    use_maps = _model_supports_map_grounding(model)
+    hint_lat: float | None = None
+    hint_lon: float | None = None
+    if use_maps and split_region:
+        hint = _DISCOVERY_REGION_HINTS.get(split_region)
+        if hint:
+            hint_lat, hint_lon = hint
+    elif use_maps and split_market:
+        hint = _MARKET_GEO_HINTS.get(split_market)
+        if hint:
+            hint_lat, hint_lon = hint
+
     prompt = _discovery_prompt(
         max_price,
         split_market=split_market,
@@ -2058,11 +2147,15 @@ def _run_discovery_attempt(
         exclude_addresses=exclude_addresses,
         needed_count=needed_count,
         total_needed=total_needed,
+        use_maps=use_maps,
     )
     raw, grounding_urls = _generate_with_grounding_retry(
         model,
         prompt,
         use_search=_model_supports_grounding(model),
+        use_maps=use_maps,
+        hint_lat=hint_lat,
+        hint_lon=hint_lon,
         max_remote_calls=afc_budget,
         rate_limiter=rate_limiter,
     )
@@ -2588,7 +2681,8 @@ def discover_hot_market_listings(
     Stage 1 (Discovery): Search Grounding across prioritized hot markets.
     Returns up to MAX_DISCOVERY_LISTINGS listings (< max_price).
 
-    Model order: gemini-2.5-flash -> gemini-2.5-flash-lite -> gemma-4-21b-it
+    Model order: gemini-2.5-flash -> gemini-2.5-flash-lite -> gemma-4-26b-a4b-it
+    Gemini tiers also enable Maps grounding; Gemma is search-only.
     (tier 3 resolves to gemma-4-26b-a4b-it on the hosted API).
 
     Per-market discovery agents run in parallel (shared sync rate limiter).

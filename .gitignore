@@ -5,6 +5,9 @@ venv/
 .agents/
 scripts/
 supabase/
+# Turnkey email digest (deferred — requires domain + Resend)
+turnkey.py
+components/turnkey_recommendations.py
 __pycache__/
 property_kb.json
 .streamlit/cache/

@@ -31,7 +31,6 @@ with patch("streamlit.secrets", {"GEMINI_API_KEY": "fake_key"}):
         DISCOVERY_FALLBACK_MODELS,
         DISCOVERY_MODEL,
         DISCOVERY_MODEL_CHAIN,
-        RESEARCH_FALLBACK_MODEL,
         RESEARCH_MODEL,
         discover_hot_market_listings,
         is_daily_quota_exhausted,
@@ -437,7 +436,10 @@ class TestDailyQuotaDetection(unittest.TestCase):
             listings = discover_hot_market_listings()
         self.assertEqual(len(listings), 1)
         self.assertEqual(calls[0], DISCOVERY_MODEL)
-        self.assertEqual(DISCOVERY_MODEL_CHAIN, ("gemini-2.5-flash", "gemini-2.5-flash-lite", "gemma-4-21b-it"))
+        self.assertEqual(
+            DISCOVERY_MODEL_CHAIN,
+            ("gemini-2.5-flash", "gemini-2.5-flash-lite", "gemma-4-26b-a4b-it"),
+        )
         self.assertTrue(any(model == "gemma-4-26b-a4b-it" for model in calls))
 
     def test_discovery_on_listing_found_fires_per_new_listing(self):
@@ -501,7 +503,7 @@ class TestSearchGrounding(unittest.TestCase):
             self.assertTrue(mock_gen.call_args.kwargs["use_search"])
             self.assertEqual(mock_gen.call_args.args[0], RESEARCH_MODEL)
 
-    def test_research_fallback_resolves_to_gemma_a4b_slug(self):
+    def test_research_uses_only_gemma_31b(self):
         payload = json.dumps(
             {
                 "address": "1 Main St, Rochester, NY",
@@ -513,8 +515,23 @@ class TestSearchGrounding(unittest.TestCase):
             }
         )
         with patch("engine.generate_with_retry", return_value=payload) as mock_gen:
-            research_property("1 Main St, Rochester, NY", model=RESEARCH_FALLBACK_MODEL)
-            self.assertEqual(mock_gen.call_args.args[0], "gemma-4-26b-a4b-it")
+            research_property("1 Main St, Rochester, NY")
+            self.assertEqual(mock_gen.call_args.args[0], RESEARCH_MODEL)
+            self.assertEqual(RESEARCH_MODEL, "gemma-4-31b-it")
+
+    def test_discovery_enables_maps_only_for_gemini(self):
+        with patch(
+            "engine._generate_with_grounding_retry",
+            return_value=_discovery_generate_return("[]"),
+        ) as mock_gen:
+            for discovery_model in DISCOVERY_MODEL_CHAIN:
+                discover_hot_market_listings(model=discovery_model)
+                use_maps = mock_gen.call_args.kwargs.get("use_maps")
+                if discovery_model.startswith("gemini"):
+                    self.assertTrue(use_maps, discovery_model)
+                else:
+                    self.assertFalse(use_maps, discovery_model)
+                mock_gen.reset_mock()
 
 
 class TestGeospatialEnrichment(unittest.TestCase):
@@ -527,15 +544,17 @@ class TestGeospatialEnrichment(unittest.TestCase):
 
         self.assertEqual(
             GEOCODING_MODEL_CHAIN,
+            ("gemini-2.5-flash", "gemini-2.5-flash-lite"),
+        )
+        self.assertEqual(SYNTHESIS_MODEL, "gemini-3.1-flash-lite-preview")
+        self.assertEqual(
+            SYNTHESIS_MODEL_CHAIN,
             (
-                "gemini-2.5-flash",
-                "gemini-2.5-flash-lite",
                 "gemini-3.1-flash-lite-preview",
+                "gemini-3.5-flash",
+                "gemma-4-26b-a4b-it",
             ),
         )
-        self.assertEqual(SYNTHESIS_MODEL, "gemini-3-flash-preview")
-        self.assertEqual(SYNTHESIS_MODEL_CHAIN[0], "gemini-3-flash-preview")
-        self.assertIn("gemini-3.1-flash-lite-preview", SYNTHESIS_MODEL_CHAIN)
 
     def test_run_geospatial_enrichment_uses_search_then_maps(self):
         from engine import run_geospatial_enrichment
@@ -1264,6 +1283,39 @@ class TestScannedAddressDetection(unittest.TestCase):
         self.assertIsNotNone(hit)
         self.assertTrue(hit.get("from_kb"))
         self.assertEqual(hit["price"], 200000)
+
+    def test_get_kb_address_options_sorted(self):
+        from unittest.mock import patch
+
+        from knowledge_base import get_kb_address_options
+
+        rows = [
+            {"address": "28 Grant Ave, Rochester, NY"},
+            {"address": "10 Park Ave, Rochester, NY"},
+            {"address": "28 Grant Ave, Rochester, NY"},
+        ]
+        with patch("knowledge_base._fetch_canonical_properties", return_value=rows):
+            with patch("knowledge_base._fetch_user_overrides_map", return_value={}):
+                options = get_kb_address_options()
+        self.assertEqual(
+            options,
+            ["10 Park Ave, Rochester, NY", "28 Grant Ave, Rochester, NY"],
+        )
+
+    def test_search_kb_addresses_filters_by_tokens(self):
+        from unittest.mock import patch
+
+        from knowledge_base import search_kb_addresses
+
+        rows = [
+            {"address": "28 Grant Ave, Rochester, NY"},
+            {"address": "128 Grant St, Syracuse, NY"},
+            {"address": "10 Park Ave, Rochester, NY"},
+        ]
+        with patch("knowledge_base._fetch_canonical_properties", return_value=rows):
+            with patch("knowledge_base._fetch_user_overrides_map", return_value={}):
+                matches = search_kb_addresses("28 grant")
+        self.assertEqual(matches, ["28 Grant Ave, Rochester, NY"])
 
 
 class TestMaintPercentNormalization(unittest.TestCase):

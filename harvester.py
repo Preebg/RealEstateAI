@@ -297,40 +297,15 @@ async def _research_listing_with_fallback(
     rate_limiter: engine.ModelRateLimiter,
     session: engine.GenaiSession,
 ) -> dict[str, Any]:
-    model = await model_state.get_research_model()
-    try:
-        return await engine.research_property_async(
-            address,
-            discovery=listing,
-            model=model,
-            rate_limiter=rate_limiter,
-            session=session,
-        )
-    except _HARVESTER_API_ERRORS as exc:
-        if (
-            engine.is_daily_quota_exhausted(exc)
-            and model != engine.RESEARCH_FALLBACK_MODEL
-        ):
-            log.warning(
-                "rpd_model_fallback",
-                stage="research",
-                from_model=model,
-                to_model=engine.RESEARCH_FALLBACK_MODEL,
-                error=str(exc),
-            )
-            print(
-                f"  [research] daily quota exhausted for {model} "
-                f"— switching to {engine.RESEARCH_FALLBACK_MODEL}"
-            )
-            await model_state.set_research_fallback(engine.RESEARCH_FALLBACK_MODEL)
-            return await engine.research_property_async(
-                address,
-                discovery=listing,
-                model=engine.RESEARCH_FALLBACK_MODEL,
-                rate_limiter=rate_limiter,
-                session=session,
-            )
-        raise
+    """Stage 2 research — always gemma-4-31b-it with search grounding."""
+    _ = model_state  # research model is fixed; state kept for pipeline symmetry
+    return await engine.research_property_async(
+        address,
+        discovery=listing,
+        model=engine.RESEARCH_MODEL,
+        rate_limiter=rate_limiter,
+        session=session,
+    )
 
 
 async def _research_listing(
@@ -392,44 +367,18 @@ async def _synthesize_harvest_property_with_fallback(
     *,
     geospatial: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    """Stage 3 synthesis — model chain handled in engine (no grounding)."""
     model = await model_state.get_synthesis_model()
-    try:
-        return await engine.synthesize_harvest_property_async(
-            address,
-            research,
-            market_city,
-            model=model,
-            user_id=admin_user_id,
-            rate_limiter=rate_limiter,
-            session=session,
-            geospatial=geospatial,
-        )
-    except _HARVESTER_API_ERRORS as exc:
-        if engine.is_daily_quota_exhausted(exc) and model != engine.SYNTHESIS_FALLBACK_MODELS[-1]:
-            fallback_model = engine.SYNTHESIS_FALLBACK_MODELS[-1]
-            log.warning(
-                "rpd_model_fallback",
-                stage="synthesis",
-                from_model=model,
-                to_model=fallback_model,
-                error=str(exc),
-            )
-            print(
-                f"  [synthesis] daily quota exhausted for {model} "
-                f"— switching to {fallback_model}"
-            )
-            await model_state.set_synthesis_fallback(fallback_model)
-            return await engine.synthesize_harvest_property_async(
-                address,
-                research,
-                market_city,
-                model=fallback_model,
-                user_id=admin_user_id,
-                rate_limiter=rate_limiter,
-                session=session,
-                geospatial=geospatial,
-            )
-        raise
+    return await engine.synthesize_harvest_property_async(
+        address,
+        research,
+        market_city,
+        model=model,
+        user_id=admin_user_id,
+        rate_limiter=rate_limiter,
+        session=session,
+        geospatial=geospatial,
+    )
 
 
 async def _synthesize_listing(
