@@ -1714,6 +1714,26 @@ class TestPropertyAge(unittest.TestCase):
         normalized = _normalize_record_numerics({"year_built": current, "price": 100000})
         self.assertNotIn("year_built", normalized)
 
+    def test_prepare_canonical_payload_clears_placeholder_year_built(self):
+        from knowledge_base import _prepare_canonical_payload
+
+        current = date.today().year
+        payload = _prepare_canonical_payload(
+            {"address": "1 Main St", "year": current, "price": 100000},
+            "00000000-0000-0000-0000-000000000001",
+        )
+        self.assertIsNone(payload.get("year_built"))
+
+    def test_normalize_research_payload_rejects_placeholder_year_built(self):
+        from engine import _normalize_research_payload
+
+        current = date.today().year
+        normalized = _normalize_research_payload(
+            "1 Main St",
+            {"year_built": current, "price": 100000},
+        )
+        self.assertIsNone(normalized.get("year_built"))
+
 
 class TestDataProvenance(unittest.TestCase):
     def test_price_confidence_high_when_listed(self):

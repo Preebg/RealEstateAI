@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import streamlit as st
 
-from knowledge_base import get_kb_address_options
-
 
 def _coerce_address_input_state(key: str) -> None:
     """Multiselect stores a list; legacy map handoff may set a plain string."""
@@ -30,6 +28,8 @@ def render_property_address_input(
     key: str = "address_input",
 ) -> str:
     """Type-to-filter KB addresses; accept new addresses not yet in the database."""
+    from knowledge_base import get_kb_address_options
+
     _coerce_address_input_state(key)
 
     st.multiselect(

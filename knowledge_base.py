@@ -817,8 +817,12 @@ def _prepare_canonical_payload(property_data: dict[str, Any], user_id: str) -> d
 
     payload.setdefault("from_kb", False)
 
-    if "year" in payload and "year_built" not in payload:
-        payload["year_built"] = payload.pop("year")
+    from engine import canonicalize_year_built_fields
+
+    canonicalize_year_built_fields(payload)
+    # Always send year_built so upserts clear stale LLM placeholder years (e.g. 2024).
+    if "year_built" not in payload:
+        payload["year_built"] = None
 
     _apply_zipcode_from_address(payload)
     _apply_state_code_from_address(payload)

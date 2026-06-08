@@ -2831,7 +2831,10 @@ def _normalize_research_payload(address: str, data: Any) -> dict[str, Any]:
     data["taxes"] = safe_float(data.get("taxes"))
     data["hoa"] = safe_float(data.get("hoa"))
     year_built = int(safe_float(data.get("year_built")))
-    data["year_built"] = year_built if year_built >= 1800 else None
+    if year_built >= 1800 and not _is_suspicious_default_year_built(year_built):
+        data["year_built"] = year_built
+    else:
+        data["year_built"] = None
     data["square_footage"] = int(safe_float(data.get("square_footage")))
     condition = str(data.get("property_condition", "Unknown")).strip()
     data["property_condition"] = condition
