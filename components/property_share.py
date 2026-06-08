@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import streamlit as st
 
-from share_access import build_share_url, create_property_share_link
-
 
 def render_share_popover(
     *,
@@ -14,6 +12,8 @@ def render_share_popover(
     from_kb: bool,
 ) -> None:
     """Render the share-link popover in the analysis header column."""
+    from share_access import build_share_url, create_property_share_link
+
     if not guest_mode and share_property_id:
         with st.popover("🔗 Share with a friend"):
             st.caption(

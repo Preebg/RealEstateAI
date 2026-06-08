@@ -10,12 +10,10 @@ from typing import Any
 import folium
 import pandas as pd
 import streamlit as st
-from folium.plugins import MarkerCluster
 import streamlit.components.v1 as components
 from streamlit_folium import st_folium
 
 from authenticate import render_auth_sidebar
-from share_access import is_guest_viewer, render_guest_sidebar
 from finance import analyze_investment, calculate_10yr_appreciation, calculate_one_year_roi
 from knowledge_base import (
     _fetch_canonical_properties,
@@ -892,11 +890,12 @@ def _build_folium_map(
         ]
         fmap.fit_bounds(bounds, padding=(60, 60))
 
-    marker_parent = (
-        MarkerCluster(name="Properties").add_to(fmap)
-        if len(mappable) >= MAP_MARKER_CLUSTER_THRESHOLD
-        else fmap
-    )
+    if len(mappable) >= MAP_MARKER_CLUSTER_THRESHOLD:
+        from folium.plugins import MarkerCluster
+
+        marker_parent = MarkerCluster(name="Properties").add_to(fmap)
+    else:
+        marker_parent = fmap
 
     for row in mappable.itertuples(index=False):
         is_focus = focus_address is not None and row.address == focus_address
@@ -1289,6 +1288,8 @@ def render_portfolio_map_page() -> None:
         "🗺️ Portfolio Map",
         "Explore harvested properties by one-year ROI, cash flow, and quantum alignment score.",
     )
+
+    from share_access import is_guest_viewer, render_guest_sidebar
 
     with st.sidebar:
         if is_guest_viewer():

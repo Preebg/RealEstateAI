@@ -20,7 +20,6 @@ from knowledge_base import (
     render_user_saved_properties_sidebar,
 )
 from market_pulse import render_market_pulse
-from share_access import is_guest_viewer, render_guest_sidebar
 from ui_theme import render_page_hero, style_matplotlib_chart
 
 MAX_COMPARE_PROPERTIES = 4
@@ -249,6 +248,8 @@ def render_property_compare_page() -> None:
         "⚖️ Compare Saved Properties",
         "Pick up to four bookmarks and compare cash flow, appreciation, and hybrid optimization scores side by side.",
     )
+
+    from share_access import is_guest_viewer
 
     if is_guest_viewer():
         st.info("Sign in to compare properties saved to your personal account.")

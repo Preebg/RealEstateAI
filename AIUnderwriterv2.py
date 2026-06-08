@@ -6,7 +6,6 @@ import streamlit as st
 
 from authenticate import render_auth_page
 from app_nav import INDIVIDUAL_SEARCH_PAGE, MAP_OPEN_ADDRESS_KEY, consume_nav_target
-from share_access import consume_guest_landing_address, is_guest_viewer
 from ui_theme import inject_app_css, render_app_footer_glossary
 
 
@@ -28,8 +27,13 @@ authenticated = render_auth_page()
 
 open_individual_search = consume_nav_target() == INDIVIDUAL_SEARCH_PAGE
 
-if authenticated and is_guest_viewer() and not st.session_state.get("_guest_landing_routed"):
-    landing = consume_guest_landing_address()
+if authenticated and not st.session_state.get("_guest_landing_routed"):
+    from share_access import consume_guest_landing_address, is_guest_viewer
+
+    if is_guest_viewer():
+        landing = consume_guest_landing_address()
+    else:
+        landing = None
     if landing:
         st.session_state[MAP_OPEN_ADDRESS_KEY] = landing
         st.session_state["_guest_landing_routed"] = True

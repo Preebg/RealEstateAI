@@ -11,7 +11,6 @@ import streamlit as st
 from postgrest.exceptions import APIError
 
 from app_logging import configure_logging, report_error
-from authenticate import get_authenticated_client, get_logged_in_user, get_supabase
 
 log = configure_logging("share_access")
 
@@ -40,12 +39,16 @@ def is_guest_viewer() -> bool:
 
 
 def is_authenticated_or_guest() -> bool:
+    from authenticate import get_logged_in_user
+
     return bool(get_logged_in_user()) or is_guest_viewer()
 
 
 def _validate_share_token(token: str) -> dict[str, Any] | None:
     if not token or not str(token).strip():
         return None
+    from authenticate import get_supabase
+
     supabase = get_supabase()
     try:
         response = supabase.rpc(
@@ -67,6 +70,8 @@ def activate_guest_session_from_query() -> bool:
     If ?share=TOKEN is present and valid, persist guest mode in session_state.
     Returns True when guest mode is active after this call.
     """
+    from authenticate import get_logged_in_user
+
     if get_logged_in_user():
         st.session_state.pop(GUEST_SHARE_TOKEN_KEY, None)
         st.session_state.pop(GUEST_LANDING_ADDRESS_KEY, None)
@@ -107,6 +112,8 @@ def fetch_guest_portfolio() -> list[dict[str, Any]]:
     token = get_guest_share_token()
     if not token:
         return []
+    from authenticate import get_supabase
+
     supabase = get_supabase()
     try:
         response = supabase.rpc(
@@ -127,6 +134,8 @@ def fetch_guest_property(
     token = get_guest_share_token()
     if not token:
         return None
+    from authenticate import get_supabase
+
     supabase = get_supabase()
     params: dict[str, Any] = {"p_share_token": token}
     if property_id:
@@ -154,6 +163,8 @@ def create_property_share_link(
     expires_days: int = 30,
 ) -> str | None:
     """Create a share token for the logged-in user. Returns the opaque token."""
+    from authenticate import get_authenticated_client, get_logged_in_user
+
     user = get_logged_in_user()
     if not user:
         return None

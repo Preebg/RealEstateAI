@@ -6,8 +6,10 @@ import json
 import os
 import random
 import re
+import threading
 import time
 from collections import defaultdict, deque
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date
 from collections.abc import Callable
@@ -165,8 +167,10 @@ BACKOFF_MAX_SEC = 60.0
 BACKOFF_MULTIPLIER = 2.0
 # Upper bound for fixed sleeps; prefer retry_delay_seconds() for retries.
 RATE_LIMIT_BACKOFF_SEC = BACKOFF_MAX_SEC
-# Harvester parallel pipeline: stay under 15 RPM account cap (~10 per model).
-HARVESTER_RPM_PER_MODEL = 10
+# Harvester parallel pipeline: 15 RPM account cap; run slightly under to avoid 429s.
+HARVESTER_RPM_CAP = 15
+HARVESTER_RPM_PER_MODEL = 13
+DISCOVERY_RPM_PER_MODEL = 13
 HARVESTER_RPM_WINDOW_SEC = 60.0
 
 
@@ -258,6 +262,33 @@ class ModelRateLimiter:
                     return
                 wait_sec = self._window_sec - (now - window[0])
                 await asyncio.sleep(max(wait_sec, 0.05))
+
+
+class SyncModelRateLimiter:
+    """Thread-safe sliding-window limiter for parallel sync discovery workers."""
+
+    def __init__(
+        self,
+        requests_per_minute: int = DISCOVERY_RPM_PER_MODEL,
+        window_sec: float = HARVESTER_RPM_WINDOW_SEC,
+    ) -> None:
+        self._rpm = requests_per_minute
+        self._window_sec = window_sec
+        self._timestamps: dict[str, deque[float]] = defaultdict(deque)
+        self._locks: dict[str, threading.Lock] = defaultdict(threading.Lock)
+
+    def acquire(self, model: str) -> None:
+        with self._locks[model]:
+            while True:
+                now = time.monotonic()
+                window = self._timestamps[model]
+                while window and now - window[0] >= self._window_sec:
+                    window.popleft()
+                if len(window) < self._rpm:
+                    window.append(now)
+                    return
+                wait_sec = self._window_sec - (now - window[0])
+                time.sleep(max(wait_sec, 0.05))
 
 
 def _log_retry(
@@ -514,6 +545,7 @@ def _generate_with_grounding_retry(
     max_retries: int = MAX_API_RETRIES,
     session: GenaiSession | None = None,
     max_remote_calls: int = DISCOVERY_MAX_REMOTE_CALLS,
+    rate_limiter: SyncModelRateLimiter | None = None,
 ) -> tuple[str, list[str]]:
     """Like generate_with_retry but also returns grounded search URLs for discovery."""
     active = session or get_session()
@@ -530,6 +562,8 @@ def _generate_with_grounding_retry(
 
     for attempt in range(max_retries):
         try:
+            if rate_limiter is not None:
+                rate_limiter.acquire(model)
             response = active.client.models.generate_content(
                 model=model,
                 contents=contents,
@@ -1382,6 +1416,7 @@ def _run_discovery_attempt(
     exclude_addresses: list[str] | None = None,
     needed_count: int | None = None,
     total_needed: int | None = None,
+    rate_limiter: SyncModelRateLimiter | None = None,
 ) -> tuple[list[dict[str, Any]], str]:
     afc_budget = _discovery_afc_budget(
         model,
@@ -1400,6 +1435,7 @@ def _run_discovery_attempt(
         prompt,
         use_search=_model_supports_grounding(model),
         max_remote_calls=afc_budget,
+        rate_limiter=rate_limiter,
     )
     listings = _build_listings_from_raw(raw, max_price, grounding_urls=grounding_urls)
     return listings, raw
@@ -1553,6 +1589,163 @@ _DISCOVERY_API_ERRORS = (
     RuntimeError,
 )
 
+_DiscoveryMarketResult = tuple[
+    str,
+    int,
+    list[dict[str, Any]],
+    str,
+    float,
+]
+
+
+def _run_single_market_discovery(
+    *,
+    market_name: str,
+    needed_count: int,
+    model: str,
+    max_price: float,
+    exclude_addresses: list[str] | None,
+    found_addrs: list[str],
+    rate_limiter: SyncModelRateLimiter | None,
+    round_idx: int | None = None,
+    round_total: int | None = None,
+    market_idx: int | None = None,
+    market_total: int | None = None,
+    split_listings: list[dict[str, Any]] | None = None,
+    label: str = "market",
+) -> _DiscoveryMarketResult:
+    """Run one per-market discovery agent (used by parallel and sequential passes)."""
+    by_market = _count_listings_by_market(split_listings or [])
+    have = by_market.get(market_name, 0)
+    base_target = next(
+        target for name, _, target in HOT_MARKETS if name == market_name
+    )
+    base_deficit = max(0, base_target - have)
+    redistributed = max(0, needed_count - base_deficit)
+    scope_note = (
+        f"need {needed_count} more ({redistributed} redistributed), "
+        if redistributed
+        else f"need {needed_count} more, "
+    )
+    merged_exclude = list(exclude_addresses or []) + found_addrs
+    round_note = (
+        f"Round {round_idx}/{round_total} " if round_idx and round_total else ""
+    )
+    market_note = (
+        f"market {market_idx}/{market_total}: " if market_idx and market_total else ""
+    )
+    total_count = len(split_listings or [])
+    _discovery_log(
+        f"[discovery] {round_note}{market_note}{label} {market_name} "
+        f"({scope_note}have {have}/{base_target}, "
+        f"total {total_count}/{MAX_DISCOVERY_LISTINGS})..."
+    )
+    started = time.monotonic()
+    market_listings, market_raw = _run_discovery_attempt(
+        model=model,
+        max_price=max_price,
+        split_market=market_name,
+        exclude_addresses=merged_exclude,
+        needed_count=needed_count,
+        rate_limiter=rate_limiter,
+    )
+    elapsed = time.monotonic() - started
+    return market_name, needed_count, market_listings, market_raw, elapsed
+
+
+def _execute_discovery_plan(
+    plan: list[tuple[str, int]],
+    *,
+    model: str,
+    max_price: float,
+    exclude_addresses: list[str] | None,
+    split_listings: list[dict[str, Any]],
+    rate_limiter: SyncModelRateLimiter | None,
+    round_idx: int | None = None,
+    round_total: int | None = None,
+    label: str = "market",
+) -> list[_DiscoveryMarketResult]:
+    """Run discovery agents for each market in plan (parallel when len(plan) > 1)."""
+    if not plan:
+        return []
+
+    found_addrs = [str(item.get("address", "")) for item in split_listings]
+    market_total = len(plan)
+
+    def _invoke(
+        market_idx: int,
+        market_name: str,
+        needed_count: int,
+    ) -> _DiscoveryMarketResult:
+        return _run_single_market_discovery(
+            market_name=market_name,
+            needed_count=needed_count,
+            model=model,
+            max_price=max_price,
+            exclude_addresses=exclude_addresses,
+            found_addrs=found_addrs,
+            rate_limiter=rate_limiter,
+            round_idx=round_idx,
+            round_total=round_total,
+            market_idx=market_idx,
+            market_total=market_total,
+            split_listings=split_listings,
+            label=label,
+        )
+
+    if len(plan) == 1:
+        market_name, needed_count = plan[0]
+        return [_invoke(1, market_name, needed_count)]
+
+    results_by_market: dict[str, _DiscoveryMarketResult] = {}
+    with ThreadPoolExecutor(max_workers=len(plan)) as executor:
+        futures = {
+            executor.submit(_invoke, idx, market_name, needed_count): market_name
+            for idx, (market_name, needed_count) in enumerate(plan, start=1)
+        }
+        for future in as_completed(futures):
+            market_name, needed_count, market_listings, market_raw, elapsed = (
+                future.result()
+            )
+            results_by_market[market_name] = (
+                market_name,
+                needed_count,
+                market_listings,
+                market_raw,
+                elapsed,
+            )
+
+    return [results_by_market[market_name] for market_name, _ in plan]
+
+
+def _merge_discovery_market_results(
+    split_listings: list[dict[str, Any]],
+    results: list[_DiscoveryMarketResult],
+    *,
+    max_price: float,
+    on_listing_found: Callable[[dict[str, Any]], None] | None,
+    exhausted_markets: set[str],
+) -> tuple[list[dict[str, Any]], int]:
+    """Merge parallel/sequential market discovery results; return updated list + new count."""
+    round_added = 0
+    for market_name, needed_count, market_listings, _market_raw, elapsed in results:
+        before = len(split_listings)
+        split_listings = _extend_discovery_listings(
+            split_listings,
+            market_listings,
+            max_price=max_price,
+            on_listing_found=on_listing_found,
+        )
+        added = len(split_listings) - before
+        round_added += added
+        if needed_count > 0 and not market_listings:
+            exhausted_markets.add(market_name)
+        _discovery_log(
+            f"[discovery] {market_name}: +{added} new verified in "
+            f"{elapsed:.0f}s (total {len(split_listings)}/{MAX_DISCOVERY_LISTINGS})"
+        )
+    return split_listings, round_added
+
 
 def _discover_listings_per_market(
     *,
@@ -1561,8 +1754,9 @@ def _discover_listings_per_market(
     exclude_addresses: list[str] | None,
     seed_listings: list[dict[str, Any]] | None = None,
     on_listing_found: Callable[[dict[str, Any]], None] | None = None,
+    rate_limiter: SyncModelRateLimiter | None = None,
 ) -> tuple[list[dict[str, Any]], str]:
-    """Focused per-market discovery (works better for the Gemma fallback model)."""
+    """Focused per-market discovery (parallel agents per round; Gemma fallback path)."""
     split_listings = list(seed_listings or [])
     last_raw = ""
     exhausted_markets: set[str] = set()
@@ -1575,8 +1769,6 @@ def _discover_listings_per_market(
         if not plan:
             break
 
-        round_added = 0
-        market_total = len(plan)
         exhausted_before = set(exhausted_markets)
         if exhausted_markets:
             _discovery_log(
@@ -1584,57 +1776,33 @@ def _discover_listings_per_market(
                 f"redistributing unfilled slots from "
                 f"{', '.join(sorted(exhausted_markets))} to other markets"
             )
-
-        for market_idx, (market_name, needed_count) in enumerate(plan, start=1):
-            if len(split_listings) >= MAX_DISCOVERY_LISTINGS:
-                break
-
-            by_market = _count_listings_by_market(split_listings)
-            have = by_market.get(market_name, 0)
-            base_target = next(
-                target for name, _, target in HOT_MARKETS if name == market_name
-            )
-            base_deficit = max(0, base_target - have)
-            redistributed = max(0, needed_count - base_deficit)
-            scope_note = (
-                f"need {needed_count} more ({redistributed} redistributed), "
-                if redistributed
-                else f"need {needed_count} more, "
-            )
-
-            found_addrs = [str(item.get("address", "")) for item in split_listings]
-            merged_exclude = list(exclude_addresses or []) + found_addrs
+        if len(plan) > 1:
             _discovery_log(
-                f"[discovery] Round {round_idx}/{DISCOVERY_TOPUP_MAX_ROUNDS} "
-                f"market {market_idx}/{market_total}: {market_name} "
-                f"({scope_note}have {have}/{base_target}, "
-                f"total {len(split_listings)}/{MAX_DISCOVERY_LISTINGS})..."
+                f"[discovery] Round {round_idx}/{DISCOVERY_TOPUP_MAX_ROUNDS}: "
+                f"spawning {len(plan)} parallel discovery agent(s) "
+                f"(≤{DISCOVERY_RPM_PER_MODEL} RPM shared)..."
             )
-            started = time.monotonic()
-            market_listings, market_raw = _run_discovery_attempt(
-                model=model,
-                max_price=max_price,
-                split_market=market_name,
-                exclude_addresses=merged_exclude,
-                needed_count=needed_count,
-            )
-            elapsed = time.monotonic() - started
+
+        results = _execute_discovery_plan(
+            plan,
+            model=model,
+            max_price=max_price,
+            exclude_addresses=exclude_addresses,
+            split_listings=split_listings,
+            rate_limiter=rate_limiter,
+            round_idx=round_idx,
+            round_total=DISCOVERY_TOPUP_MAX_ROUNDS,
+        )
+        for _market_name, _needed_count, _market_listings, market_raw, _elapsed in results:
             last_raw = market_raw or last_raw
-            before = len(split_listings)
-            split_listings = _extend_discovery_listings(
-                split_listings,
-                market_listings,
-                max_price=max_price,
-                on_listing_found=on_listing_found,
-            )
-            added = len(split_listings) - before
-            round_added += added
-            if needed_count > 0 and not market_listings:
-                exhausted_markets.add(market_name)
-            _discovery_log(
-                f"[discovery] {market_name}: +{added} new verified in "
-                f"{elapsed:.0f}s (total {len(split_listings)}/{MAX_DISCOVERY_LISTINGS})"
-            )
+
+        split_listings, round_added = _merge_discovery_market_results(
+            split_listings,
+            results,
+            max_price=max_price,
+            on_listing_found=on_listing_found,
+            exhausted_markets=exhausted_markets,
+        )
 
         if round_added == 0:
             can_redistribute = (
@@ -1653,30 +1821,28 @@ def _discover_listings_per_market(
                 f"{MAX_DISCOVERY_LISTINGS} listings "
                 f"(have {len(split_listings)}, plan={plan})..."
             )
-            for market_name, needed_count in plan:
-                if len(split_listings) >= MAX_DISCOVERY_LISTINGS:
-                    break
-                found_addrs = [str(item.get("address", "")) for item in split_listings]
-                merged_exclude = list(exclude_addresses or []) + found_addrs
-                market_listings, market_raw = _run_discovery_attempt(
-                    model=model,
-                    max_price=max_price,
-                    split_market=market_name,
-                    exclude_addresses=merged_exclude,
-                    needed_count=needed_count,
-                )
-                last_raw = market_raw or last_raw
-                before = len(split_listings)
-                split_listings = _extend_discovery_listings(
-                    split_listings,
-                    market_listings,
-                    max_price=max_price,
-                    on_listing_found=on_listing_found,
-                )
+            if len(plan) > 1:
                 _discovery_log(
-                    f"[discovery] Top-up {market_name}: +{len(split_listings) - before} new "
-                    f"(total {len(split_listings)}/{MAX_DISCOVERY_LISTINGS})"
+                    f"[discovery] Spawning {len(plan)} parallel top-up discovery agent(s)..."
                 )
+            results = _execute_discovery_plan(
+                plan,
+                model=model,
+                max_price=max_price,
+                exclude_addresses=exclude_addresses,
+                split_listings=split_listings,
+                rate_limiter=rate_limiter,
+                label="top-up",
+            )
+            for _market_name, _needed_count, _market_listings, market_raw, _elapsed in results:
+                last_raw = market_raw or last_raw
+            split_listings, _round_added = _merge_discovery_market_results(
+                split_listings,
+                results,
+                max_price=max_price,
+                on_listing_found=on_listing_found,
+                exhausted_markets=exhausted_markets,
+            )
 
     if len(split_listings) < MAX_DISCOVERY_LISTINGS:
         remaining = MAX_DISCOVERY_LISTINGS - len(split_listings)
@@ -1691,6 +1857,7 @@ def _discover_listings_per_market(
             max_price=max_price,
             exclude_addresses=merged_exclude,
             total_needed=remaining,
+            rate_limiter=rate_limiter,
         )
         last_raw = topup_raw or last_raw
         before = len(split_listings)
@@ -1714,6 +1881,7 @@ def _discover_listings_for_model(
     max_price: float,
     exclude_addresses: list[str] | None,
     on_listing_found: Callable[[dict[str, Any]], None] | None = None,
+    rate_limiter: SyncModelRateLimiter | None = None,
 ) -> tuple[list[dict[str, Any]], str]:
     """Run combined discovery, then top up per market until MAX_DISCOVERY_LISTINGS."""
     model = _resolve_discovery_model(model)
@@ -1721,19 +1889,22 @@ def _discover_listings_for_model(
         _discovery_log(
             f"[discovery] Using per-market searches on {model} "
             f"(combined multi-market search is unreliable on Gemma; "
-            f"~{DISCOVERY_FALLBACK_MAX_REMOTE_CALLS} search calls per market)."
+            f"~{DISCOVERY_FALLBACK_MAX_REMOTE_CALLS} search calls per market; "
+            f"parallel agents ≤{DISCOVERY_RPM_PER_MODEL} RPM)."
         )
         return _discover_listings_per_market(
             model=model,
             max_price=max_price,
             exclude_addresses=exclude_addresses,
             on_listing_found=on_listing_found,
+            rate_limiter=rate_limiter,
         )
 
     listings, last_raw = _run_discovery_attempt(
         model=model,
         max_price=max_price,
         exclude_addresses=exclude_addresses,
+        rate_limiter=rate_limiter,
     )
     deduped = _extend_discovery_listings(
         [],
@@ -1772,6 +1943,7 @@ def _discover_listings_for_model(
         exclude_addresses=exclude_addresses,
         seed_listings=deduped,
         on_listing_found=on_listing_found,
+        rate_limiter=rate_limiter,
     )
 
 
@@ -1788,8 +1960,11 @@ def discover_hot_market_listings(
 
     Model order: gemini-2.5-flash -> gemini-2.5-flash-lite -> gemma-4-21b-it
     (tier 3 resolves to gemma-4-26b-a4b-it on the hosted API).
+
+    Per-market discovery agents run in parallel (shared sync rate limiter).
     """
     models_to_try = _discovery_models_to_try(model)
+    discovery_rate_limiter = SyncModelRateLimiter(requests_per_minute=DISCOVERY_RPM_PER_MODEL)
     last_raw = ""
     for tier_idx, active_model in enumerate(models_to_try):
         try:
@@ -1798,6 +1973,7 @@ def discover_hot_market_listings(
                 max_price=max_price,
                 exclude_addresses=exclude_addresses,
                 on_listing_found=on_listing_found,
+                rate_limiter=discovery_rate_limiter,
             )
         except _DISCOVERY_API_ERRORS as exc:
             if (

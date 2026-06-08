@@ -465,7 +465,7 @@ class TestDailyQuotaDetection(unittest.TestCase):
             )
 
         self.assertGreaterEqual(len(found), 2)
-        self.assertEqual(found[0], rochester_row["address"])
+        self.assertIn(rochester_row["address"], found)
         self.assertIn(syracuse_row["address"], found)
         self.assertGreaterEqual(len(listings), 2)
 

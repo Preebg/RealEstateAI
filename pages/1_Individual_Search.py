@@ -29,11 +29,12 @@ from services.property_analysis_flow import (
     run_finance_analysis,
     run_initial_property_analysis,
 )
-from share_access import is_guest_viewer, render_guest_sidebar
 from ui_theme import render_page_hero
 
 if not render_auth_page():
     st.stop()
+
+from share_access import is_guest_viewer, render_guest_sidebar
 
 _guest_mode = is_guest_viewer()
 

@@ -593,8 +593,9 @@ async def run_harvester_pipeline_async(admin_user_id: str) -> dict[str, Any]:
     Execute the full 3-stage harvester once per run.
 
     Stage 1 overlaps with stages 2–3: each discovered listing is researched as soon as
-    it is verified (critical for slow Gemma per-market discovery). Research -> synthesis
-    stays pipelined per property (capped at 10 RPM per model).
+    it is verified (critical for slow Gemma per-market discovery). Per-market discovery
+    agents run in parallel; research -> synthesis stays pipelined per property
+    (≤13 RPM per model, under the 15 RPM account cap).
 
     On daily quota exhaustion, discovery and synthesis switch to their
     configured fallback models for the remainder of the run.
