@@ -63,66 +63,82 @@ def render_share_popover(
     share_property_id: str | None,
     from_kb: bool,
     property_info: dict | None = None,
+    address: str = "",
 ) -> None:
     """Render the share-link popover in the analysis header column."""
     from knowledge_base import persist_comps_to_canonical
     from share_access import (
         build_share_url,
         create_property_share_link,
+        ensure_property_saved_for_share,
         save_share_comps_snapshot,
     )
 
-    if not guest_mode and share_property_id:
-        with st.popover("🔗 Share with a friend"):
-            st.caption(
-                "Send a read-only link — no account needed. "
-                "Friends can browse the portfolio but cannot save changes."
-            )
-            include_assumptions = st.checkbox(
-                "Include my personal assumptions",
-                value=True,
-                help="When checked, your rent/fee sliders are shown; otherwise AI baselines only.",
-            )
-            if st.button("Generate share link", type="primary", key="create_share_link"):
-                active_property = property_info
-                if not isinstance(active_property, dict):
-                    active_property = st.session_state.get("property_data")
-                if isinstance(active_property, dict):
-                    active_property = dict(active_property)
-                    active_property.setdefault("id", share_property_id)
-                    persist_comps_to_canonical(active_property, show_errors=True)
-                token = create_property_share_link(
-                    str(share_property_id),
-                    include_assumptions=include_assumptions,
+    if guest_mode:
+        return
+
+    with st.popover("🔗 Share with a friend"):
+        st.caption(
+            "Send a read-only link — no account needed. "
+            "Friends can browse the portfolio but cannot save changes."
+        )
+        include_assumptions = st.checkbox(
+            "Include my personal assumptions",
+            value=True,
+            help="When checked, your rent/fee sliders are shown; otherwise AI baselines only.",
+        )
+        if st.button("Generate share link", type="primary", key="create_share_link"):
+            active_property = property_info
+            if not isinstance(active_property, dict):
+                active_property = st.session_state.get("property_data")
+            if not isinstance(active_property, dict):
+                st.error("No property data loaded. Analyze a property first.")
+                st.stop()
+
+            active_property = dict(active_property)
+            resolved_id = ensure_property_saved_for_share(active_property, address)
+            if not resolved_id:
+                st.error(
+                    "Could not save this property for sharing. "
+                    "Use **Save Property + My Assumptions** below, then try again."
                 )
-                if token:
-                    share_url = build_share_url(token)
-                    st.session_state["last_share_url"] = share_url
-                    if isinstance(active_property, dict):
-                        snapshot_saved = save_share_comps_snapshot(
-                            token,
-                            str(share_property_id),
-                            active_property,
-                        )
-                        if (
-                            active_property.get("comps_analysis", {}).get(
-                                "comparable_properties"
-                            )
-                            and not snapshot_saved
-                        ):
-                            st.warning(
-                                "Link created, but comparable sales could not be attached. "
-                                "Run **Check Area Comps** again, then regenerate the link."
-                            )
-                    st.session_state[COPY_PENDING_SHARE_URL_KEY] = share_url
-                    st.toast("Share link copied to clipboard", icon="🔗")
-                else:
-                    st.error("Could not create share link. Try again.")
-            if st.session_state.get("last_share_url"):
-                st.text_input(
-                    "Copy this link",
-                    value=st.session_state["last_share_url"],
-                    label_visibility="collapsed",
+                st.stop()
+
+            active_property["id"] = resolved_id
+            persist_comps_to_canonical(active_property, show_errors=True)
+            token = create_property_share_link(
+                resolved_id,
+                include_assumptions=include_assumptions,
+            )
+            if token:
+                share_url = build_share_url(token)
+                st.session_state["last_share_url"] = share_url
+                snapshot_saved = save_share_comps_snapshot(
+                    token,
+                    resolved_id,
+                    active_property,
                 )
-    elif not guest_mode and not from_kb:
-        st.caption("Save this property to enable sharing with friends.")
+                if (
+                    active_property.get("comps_analysis", {}).get(
+                        "comparable_properties"
+                    )
+                    and not snapshot_saved
+                ):
+                    st.warning(
+                        "Link created, but comparable sales could not be attached. "
+                        "Run **Check Area Comps** again, then regenerate the link."
+                    )
+                st.session_state[COPY_PENDING_SHARE_URL_KEY] = share_url
+                st.session_state["property_data"] = active_property
+                st.toast("Share link copied to clipboard", icon="🔗")
+            else:
+                st.error(
+                    "Could not create share link. Sign in again or save the property, "
+                    "then retry."
+                )
+        if st.session_state.get("last_share_url"):
+            st.text_input(
+                "Copy this link",
+                value=st.session_state["last_share_url"],
+                label_visibility="collapsed",
+            )

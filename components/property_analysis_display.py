@@ -309,6 +309,7 @@ def render_analysis_results(
             share_property_id=share_property_id,
             from_kb=from_kb,
             property_info=property_info,
+            address=address,
         )
 
     quantum_ready = isinstance(quantum_risk, dict) and bool(quantum_risk)

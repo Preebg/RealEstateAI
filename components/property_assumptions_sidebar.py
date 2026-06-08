@@ -17,9 +17,9 @@ from knowledge_base import (
     get_effective_display_maint,
     get_effective_display_rent,
     get_effective_display_vacancy,
-    get_property_id_by_address,
     is_property_saved_for_user,
     is_rent_outlier,
+    resolve_canonical_property_id,
     save_knowledge_base,
     save_property_to_user_account,
     save_user_property_override,
@@ -304,8 +304,8 @@ def render_hitl_save_section(
     )
 
     _logged_in_user = get_logged_in_user()
-    _account_property_id = (
-        str(property_id) if property_id else get_property_id_by_address(address)
+    _account_property_id = resolve_canonical_property_id(
+        address, str(property_id) if property_id else None
     )
     _is_saved_to_account = (
         is_property_saved_for_user(_logged_in_user["id"], _account_property_id)
@@ -414,13 +414,21 @@ def render_hitl_save_section(
         }
 
         if from_kb:
-            pid = property_id or get_property_id_by_address(address)
-            if not pid:
-                st.error("Could not resolve property ID for this address.")
-                st.stop()
-            result = save_user_property_override(
-                user["id"], pid, override_payload
+            pid = resolve_canonical_property_id(
+                address, str(property_id) if property_id else None
             )
+            if pid:
+                result = save_user_property_override(
+                    user["id"], pid, override_payload, address=address
+                )
+            else:
+                property_info["address"] = address
+                property_info["from_kb"] = True
+                property_info["location_score"] = location_score
+                property_info["appreciation_forecast"] = appreciation_forecast
+                property_info["property_category"] = branding_label
+                property_info.update(override_payload)
+                result = save_knowledge_base(property_info, user_id=user["id"])
         else:
             property_info["address"] = address
             property_info["from_kb"] = True

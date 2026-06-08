@@ -156,6 +156,80 @@ def fetch_guest_property(
     return prop if isinstance(prop, dict) else None
 
 
+def _property_exists(property_id: str) -> bool:
+    from authenticate import get_authenticated_client
+    from knowledge_base import is_valid_uuid
+
+    if not is_valid_uuid(property_id):
+        return False
+    client = get_authenticated_client()
+    if client is None:
+        return False
+    try:
+        response = (
+            client.table("properties").select("id").eq("id", property_id).limit(1).execute()
+        )
+    except APIError as exc:
+        report_error(log, "share_property_lookup_failed", exc, property_id=property_id)
+        return False
+    return bool(response.data)
+
+
+def ensure_property_saved_for_share(
+    property_data: dict[str, Any],
+    address: str,
+) -> str | None:
+    """
+    Return a canonical property UUID for sharing, upserting to Supabase when needed.
+
+    Share links reference ``properties.id``; fresh analyses may only exist in session
+    until they are saved to the shared catalog.
+    """
+    from authenticate import get_logged_in_user
+    from knowledge_base import (
+        get_admin_uid,
+        get_property_id_by_address,
+        invalidate_kb_cache,
+        is_valid_uuid,
+        save_canonical_property,
+    )
+
+    user = get_logged_in_user()
+    if not user:
+        return None
+
+    addr = str(address or property_data.get("address") or "").strip()
+    if not addr:
+        return None
+
+    payload = dict(property_data)
+    payload["address"] = addr
+
+    resolved = get_property_id_by_address(addr)
+    if resolved and is_valid_uuid(resolved) and _property_exists(resolved):
+        return str(resolved)
+
+    candidate = payload.get("id")
+    if candidate and is_valid_uuid(str(candidate)) and _property_exists(str(candidate)):
+        return str(candidate)
+
+    canonical_uid = get_admin_uid() or user["id"]
+    payload.setdefault("from_kb", True)
+    response = save_canonical_property(payload, user_id=canonical_uid, show_errors=False)
+    invalidate_kb_cache()
+
+    resolved = get_property_id_by_address(addr)
+    if resolved and is_valid_uuid(resolved):
+        return str(resolved)
+
+    if response and getattr(response, "data", None):
+        rows = response.data
+        if isinstance(rows, list) and rows and rows[0].get("id"):
+            return str(rows[0]["id"])
+
+    return None
+
+
 def save_share_comps_snapshot(
     share_token: str,
     property_id: str,
@@ -205,6 +279,18 @@ def create_property_share_link(
 
     client = get_authenticated_client()
     if client is None:
+        return None
+
+    from knowledge_base import is_valid_uuid
+
+    if not is_valid_uuid(property_id) or not _property_exists(property_id):
+        report_error(
+            log,
+            "share_create_invalid_property",
+            ValueError(f"property_id not in catalog: {property_id}"),
+            property_id=property_id,
+            level="warning",
+        )
         return None
 
     token = secrets.token_urlsafe(32)

@@ -172,6 +172,54 @@ def get_property_id_by_address(address: str) -> str | None:
     return str(pid) if pid else None
 
 
+def _property_exists_in_db(property_id: str) -> bool:
+    """True when the UUID exists in the shared properties table."""
+    if not property_id or not is_valid_uuid(property_id):
+        return False
+    supabase = get_client()
+    try:
+        response = (
+            supabase.table("properties")
+            .select("id")
+            .eq("id", property_id)
+            .limit(1)
+            .execute()
+        )
+    except APIError as exc:
+        report_error(log, "kb_property_exists_check_failed", exc, property_id=property_id)
+        return False
+    return bool(response.data)
+
+
+def resolve_canonical_property_id(
+    address: str,
+    property_id: str | None = None,
+) -> str | None:
+    """
+    Return a properties.id that currently exists in the database.
+
+    Validates the supplied id against Postgres, then falls back to a fresh
+    address lookup after clearing stale Streamlit KB cache when needed.
+    """
+    candidate = str(property_id).strip() if property_id else None
+    if candidate and is_valid_uuid(candidate) and _property_exists_in_db(candidate):
+        return candidate
+
+    addr = str(address or "").strip()
+    if not addr:
+        return None
+
+    pid = get_property_id_by_address(addr)
+    if pid and _property_exists_in_db(pid):
+        return pid
+
+    invalidate_kb_cache()
+    pid = get_property_id_by_address(addr)
+    if pid and _property_exists_in_db(pid):
+        return pid
+    return None
+
+
 def _kb_cache_scope_key(user_id: str | None) -> str:
     """Stable Streamlit cache key for scoped KB reads."""
     if in_streamlit_app():
@@ -588,6 +636,7 @@ def delete_canonical_property_by_id(property_id: str) -> bool:
         )
         return False
 
+    invalidate_kb_cache()
     log.info("kb_canonical_delete_success", property_id=property_id)
     return True
 
@@ -869,6 +918,7 @@ def save_canonical_property(
         response = (
             supabase.table("properties")
             .upsert(filtered_payload, on_conflict="address")
+            .select("id")
             .execute()
         )
     except APIError as exc:
@@ -883,6 +933,7 @@ def save_canonical_property(
             st.error(f"Failed to save property to Supabase: {exc}")
         return None
 
+    invalidate_kb_cache()
     log.info(
         "kb_canonical_save_success",
         user_id=user_id,
@@ -956,6 +1007,7 @@ def save_user_property_override(
     property_id: str,
     override_data: dict[str, Any],
     *,
+    address: str | None = None,
     show_errors: bool = True,
 ) -> Any:
     """Upsert per-user underwriting assumptions for a canonical property."""
@@ -971,6 +1023,26 @@ def save_user_property_override(
         raise ValueError(f"user_id must be a valid UUID, got: {user_id!r}")
     if not property_id or not is_valid_uuid(property_id):
         raise ValueError(f"property_id must be a valid UUID, got: {property_id!r}")
+
+    resolved_id = resolve_canonical_property_id(
+        str(address or override_data.get("address") or ""),
+        property_id=property_id,
+    )
+    if not resolved_id:
+        log.warning(
+            "kb_override_skipped",
+            reason="missing_canonical_property",
+            user_id=user_id,
+            property_id=property_id,
+            address=address,
+        )
+        if show_errors and st is not None:
+            st.error(
+                "This property is no longer in the shared catalog. "
+                "Re-analyze it and save again."
+            )
+        return None
+    property_id = resolved_id
 
     payload: dict[str, Any] = {
         "user_id": user_id,
@@ -1051,11 +1123,13 @@ def save_knowledge_base(
         return canonical_response
 
     address = property_data.get("address")
-    property_id = get_property_id_by_address(str(address or ""))
-    if not property_id and canonical_response.data:
+    property_id = None
+    if canonical_response.data:
         row = canonical_response.data[0]
         if row.get("id"):
             property_id = str(row["id"])
+    if not property_id:
+        property_id = resolve_canonical_property_id(str(address or ""))
 
     if not property_id:
         log.warning("kb_override_skipped", reason="missing_property_id", address=address)
@@ -1065,6 +1139,7 @@ def save_knowledge_base(
         user_id,
         property_id,
         property_data,
+        address=str(address or ""),
         show_errors=show_errors,
     )
     return override_response or canonical_response
@@ -1167,22 +1242,28 @@ def save_property_to_user_account(
         if kb_result is None:
             return None
         address = payload.get("address")
-        resolved_id = get_property_id_by_address(str(address or ""))
-        if not resolved_id and getattr(kb_result, "data", None):
+        resolved_id = None
+        if getattr(kb_result, "data", None):
             row = kb_result.data[0]
             if row.get("id"):
                 resolved_id = str(row["id"])
+        if not resolved_id:
+            resolved_id = resolve_canonical_property_id(str(address or ""))
     elif resolved_id and override_payload:
+        override_address = str(property_data.get("address") or "") if property_data else ""
         if save_user_property_override(
             user_id,
             resolved_id,
             override_payload,
+            address=override_address,
             show_errors=show_errors,
         ) is None:
             return None
 
     if not resolved_id and property_data:
-        resolved_id = get_property_id_by_address(str(property_data.get("address") or ""))
+        resolved_id = resolve_canonical_property_id(
+            str(property_data.get("address") or "")
+        )
 
     if not resolved_id:
         if show_errors and st is not None:
@@ -1598,6 +1679,7 @@ __all__ = [
     "get_effective_display_management_fee",
     "user_has_override_changes",
     "get_property_id_by_address",
+    "resolve_canonical_property_id",
     "get_client",
     "get_admin_uid",
     "invalidate_kb_cache",

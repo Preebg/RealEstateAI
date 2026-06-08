@@ -1318,6 +1318,80 @@ class TestScannedAddressDetection(unittest.TestCase):
         self.assertEqual(matches, ["28 Grant Ave, Rochester, NY"])
 
 
+class TestResolveCanonicalPropertyId(unittest.TestCase):
+    def test_prefers_valid_property_id_over_stale_cache(self):
+        from unittest.mock import MagicMock, patch
+
+        from knowledge_base import resolve_canonical_property_id
+
+        stale_id = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        fresh_id = "b2c3d4e5-f6a7-8901-bcde-f12345678901"
+        address = "10 Park Ave, Rochester, NY 14609"
+
+        with patch(
+            "knowledge_base._property_exists_in_db",
+            side_effect=lambda pid: pid == fresh_id,
+        ):
+            with patch(
+                "knowledge_base.get_property_id_by_address",
+                return_value=stale_id,
+            ) as mock_lookup:
+                resolved = resolve_canonical_property_id(address, property_id=fresh_id)
+
+        self.assertEqual(resolved, fresh_id)
+        mock_lookup.assert_not_called()
+
+    def test_refreshes_cache_when_cached_id_is_missing(self):
+        from unittest.mock import patch
+
+        from knowledge_base import resolve_canonical_property_id
+
+        stale_id = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        fresh_id = "b2c3d4e5-f6a7-8901-bcde-f12345678901"
+        address = "10 Park Ave, Rochester, NY 14609"
+
+        with patch(
+            "knowledge_base._property_exists_in_db",
+            side_effect=lambda pid: pid == fresh_id,
+        ):
+            with patch(
+                "knowledge_base.get_property_id_by_address",
+                side_effect=[stale_id, fresh_id],
+            ):
+                with patch("knowledge_base.invalidate_kb_cache") as mock_invalidate:
+                    resolved = resolve_canonical_property_id(address)
+
+        self.assertEqual(resolved, fresh_id)
+        mock_invalidate.assert_called_once()
+
+    def test_save_knowledge_base_uses_fresh_upsert_id(self):
+        from unittest.mock import MagicMock, patch
+
+        from knowledge_base import save_knowledge_base
+
+        user_id = "7f35bc1e-9de5-484d-8f73-27fd3da733eb"
+        fresh_id = "b2c3d4e5-f6a7-8901-bcde-f12345678901"
+        stale_id = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        property_data = {
+            "address": "10 Park Ave, Rochester, NY 14609",
+            "price": 200000,
+            "rent": 1500,
+        }
+
+        with patch(
+            "knowledge_base.save_canonical_property",
+            return_value=MagicMock(data=[{"id": fresh_id}]),
+        ):
+            with patch(
+                "knowledge_base.save_user_property_override",
+                return_value=MagicMock(),
+            ) as mock_override:
+                save_knowledge_base(property_data, user_id=user_id)
+
+        mock_override.assert_called_once()
+        self.assertEqual(mock_override.call_args.args[1], fresh_id)
+
+
 class TestMaintPercentNormalization(unittest.TestCase):
     def test_sanitize_synthesis_maint_percent(self):
         from engine import _sanitize_synthesis_numerics
@@ -2289,6 +2363,25 @@ class TestPdfGenerator(unittest.TestCase):
         )
         self.assertTrue(pdf_bytes.startswith(b"%PDF"))
         self.assertGreater(len(pdf_bytes), 5000)
+
+
+class TestShareAccess(unittest.TestCase):
+    def test_ensure_property_saved_for_share_uses_existing_catalog_id(self):
+        from share_access import ensure_property_saved_for_share
+
+        property_data = {"address": "123 Main St, Rochester, NY", "price": 200000}
+        with (
+            patch("authenticate.get_logged_in_user", return_value={"id": "u1", "email": "a@b.c"}),
+            patch("share_access._property_exists", return_value=True),
+            patch(
+                "knowledge_base.get_property_id_by_address",
+                return_value="11111111-1111-1111-1111-111111111111",
+            ),
+            patch("knowledge_base.save_canonical_property") as mock_save,
+        ):
+            resolved = ensure_property_saved_for_share(property_data, "123 Main St, Rochester, NY")
+        self.assertEqual(resolved, "11111111-1111-1111-1111-111111111111")
+        mock_save.assert_not_called()
 
 
 if __name__ == "__main__":
