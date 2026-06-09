@@ -537,7 +537,10 @@ class TestSearchGrounding(unittest.TestCase):
 class TestGeospatialEnrichment(unittest.TestCase):
     def test_geocoding_and_synthesis_model_chains(self):
         from engine import (
+            COORDINATE_CATCH_MODEL,
             GEOCODING_MODEL_CHAIN,
+            PROPERTY_VALUE_MODEL,
+            PROPERTY_VALUE_TRIGGERED_MODEL,
             SYNTHESIS_MODEL,
             SYNTHESIS_MODEL_CHAIN,
         )
@@ -547,6 +550,9 @@ class TestGeospatialEnrichment(unittest.TestCase):
             ("gemini-2.5-flash", "gemini-2.5-flash-lite"),
         )
         self.assertEqual(SYNTHESIS_MODEL, "gemini-3.1-flash-lite-preview")
+        self.assertEqual(COORDINATE_CATCH_MODEL, SYNTHESIS_MODEL)
+        self.assertEqual(PROPERTY_VALUE_MODEL, "gemma-4-26b-a4b-it")
+        self.assertEqual(PROPERTY_VALUE_TRIGGERED_MODEL, "gemma-4-31b-it")
         self.assertEqual(
             SYNTHESIS_MODEL_CHAIN,
             (
@@ -554,6 +560,37 @@ class TestGeospatialEnrichment(unittest.TestCase):
                 "gemini-3.5-flash",
                 "gemma-4-26b-a4b-it",
             ),
+        )
+
+    def test_property_value_trigger_keywords(self):
+        from engine import matches_property_value_trigger
+
+        self.assertTrue(matches_property_value_trigger("Turnkey Rental"))
+        self.assertTrue(matches_property_value_trigger("cash-flower"))
+        self.assertTrue(matches_property_value_trigger("Suburban Core Rental"))
+        self.assertTrue(matches_property_value_trigger("buy and hold"))
+        self.assertTrue(matches_property_value_trigger("Strong Cash Flowing Asset"))
+        self.assertFalse(matches_property_value_trigger("Value-Add Play"))
+        self.assertFalse(matches_property_value_trigger(""))
+
+    def test_coordinate_catch_only_when_discovery_lacked_maps(self):
+        from engine import (
+            DISCOVERY_MODEL,
+            DISCOVERY_FALLBACK_MODEL,
+            _needs_coordinate_catch,
+        )
+
+        self.assertFalse(
+            _needs_coordinate_catch(DISCOVERY_MODEL, 43.1, -77.6),
+        )
+        self.assertFalse(
+            _needs_coordinate_catch(DISCOVERY_MODEL, None, None),
+        )
+        self.assertTrue(
+            _needs_coordinate_catch(DISCOVERY_FALLBACK_MODEL, None, None),
+        )
+        self.assertTrue(
+            _needs_coordinate_catch(DISCOVERY_FALLBACK_MODEL, 0.0, 0.0),
         )
 
     def test_run_geospatial_enrichment_uses_search_then_maps(self):
@@ -2194,6 +2231,53 @@ class TestPersistCompsToCanonical(unittest.TestCase):
         self.assertEqual(rpc_params["p_property_id"], property_id)
         self.assertEqual(rpc_params["p_comps_analysis"], comps)
         self.assertEqual(rpc_params["p_predicted_value"], 190000)
+
+    def test_save_harvest_property_persists_comps_with_service_client(self):
+        from unittest.mock import MagicMock, patch
+
+        from knowledge_base import save_harvest_property
+
+        property_id = "7f35bc1e-9de5-484d-8f73-27fd3da733eb"
+        comps = {
+            "comparable_properties": [{"address": "2 Oak", "sale_price": 200000}],
+            "comp_count": 1,
+        }
+        listing = {
+            "address": "1 Main St, Rochester, NY 14607",
+            "price": 180000,
+            "predicted_value": 190000,
+            "rent": 1500,
+            "tax_rate": 3.0,
+            "insurance": 120,
+            "hoa": 0,
+            "maint_percent": 4,
+            "location_score": 6,
+            "forecast_rate": 4.0,
+            "comps_analysis": comps,
+        }
+
+        mock_service = MagicMock()
+        mock_service.rpc.return_value.execute.return_value = MagicMock(data=True)
+        mock_client = MagicMock()
+        mock_table = mock_client.table.return_value
+        mock_table.upsert.return_value.select.return_value.execute.return_value = (
+            MagicMock(data=[{"id": property_id}])
+        )
+
+        with (
+            patch("knowledge_base.get_client", return_value=mock_client),
+            patch("knowledge_base.get_admin_uid", return_value="7f35bc1e-9de5-484d-8f73-27fd3da733eb"),
+            patch("authenticate.get_service_client", return_value=mock_service),
+            patch("knowledge_base.invalidate_kb_cache"),
+        ):
+            result = save_harvest_property(listing)
+
+        self.assertIsNotNone(result)
+        mock_service.rpc.assert_called_once()
+        rpc_name, rpc_params = mock_service.rpc.call_args.args
+        self.assertEqual(rpc_name, "save_property_comps")
+        self.assertEqual(rpc_params["p_property_id"], property_id)
+        self.assertEqual(rpc_params["p_comps_analysis"], comps)
 
 
 class TestPersistRentCompsToCanonical(unittest.TestCase):

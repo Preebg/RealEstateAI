@@ -293,19 +293,59 @@ def _validate_listing(listing: dict[str, Any]) -> tuple[str, str]:
 async def _research_listing_with_fallback(
     address: str,
     listing: dict[str, Any],
+    market_city: str,
     model_state: _HarvesterModelState,
     rate_limiter: engine.ModelRateLimiter,
     session: engine.GenaiSession,
 ) -> dict[str, Any]:
-    """Stage 2 research — always gemma-4-31b-it with search grounding."""
+    """Stage 2 research — gemma-4-31b-it with search grounding."""
     _ = model_state  # research model is fixed; state kept for pipeline symmetry
-    return await engine.research_property_async(
+    research = await engine.research_property_async(
         address,
         discovery=listing,
         model=engine.RESEARCH_MODEL,
         rate_limiter=rate_limiter,
         session=session,
     )
+    return await _run_property_value_stage(
+        address,
+        research,
+        market_city,
+        rate_limiter=rate_limiter,
+        session=session,
+    )
+
+
+async def _run_property_value_stage(
+    address: str,
+    research: dict[str, Any],
+    market_city: str,
+    *,
+    rate_limiter: engine.ModelRateLimiter,
+    session: engine.GenaiSession,
+) -> dict[str, Any]:
+    """Stage 2.5 — classify strategy and fetch comps when income-hold keywords match."""
+    print(f"  [property_value] START {address} ({engine.PROPERTY_VALUE_MODEL})")
+    enriched = await engine.run_property_value_agent_async(
+        address,
+        research,
+        market_city,
+        session=session,
+        rate_limiter=rate_limiter,
+    )
+    comps = enriched.get("comps_analysis")
+    comp_count = 0
+    if isinstance(comps, dict):
+        comp_count = int(comps.get("comp_count") or len(comps.get("comparable_properties") or []))
+    if comp_count > 0:
+        print(
+            f"  [property_value] DONE {address} — "
+            f"{comp_count} comps via {engine.PROPERTY_VALUE_TRIGGERED_MODEL}"
+        )
+    else:
+        strategy = enriched.get("predicted_strategy_label") or "unknown"
+        print(f"  [property_value] SKIP {address} — no comps ({strategy})")
+    return enriched
 
 
 async def _research_listing(
@@ -337,12 +377,17 @@ async def _research_listing(
     research = await _research_listing_with_fallback(
         address,
         listing,
+        market_city,
         model_state,
         rate_limiter,
         session,
     )
     async with report_lock:
         report["researched"] += 1
+        if isinstance(research.get("comps_analysis"), dict) and research["comps_analysis"].get(
+            "comparable_properties"
+        ):
+            report["property_valued"] = int(report.get("property_valued", 0)) + 1
 
     skip_reason = engine.synthesis_skip_reason(research)
     if skip_reason:
@@ -466,6 +511,12 @@ async def _synthesize_listing(
     if save_result is None:
         raise RuntimeError("Failed to save property to Supabase")
 
+    comps_saved = isinstance(final_data.get("comps_analysis"), dict) and bool(
+        final_data["comps_analysis"].get("comparable_properties")
+    )
+    if comps_saved:
+        print(f"  [property_value] SAVED comps for {address}")
+
     async with report_lock:
         report["saved"].append(address)
         bucket = market_city.lower()
@@ -573,15 +624,17 @@ async def _research_and_schedule_synthesis(
 
 async def run_harvester_pipeline_async(admin_user_id: str) -> dict[str, Any]:
     """
-    Execute the full 3-stage harvester once per run.
+    Execute the full accuracy workflow harvester once per run.
 
-    Stage 1 overlaps with stages 2–3: each discovered listing is researched as soon as
-    it is verified (critical for slow Gemma per-market discovery). Per-market discovery
-    agents run in parallel; research -> synthesis stays pipelined per property
-    (≤13 RPM per model, under the 15 RPM account cap).
+    Stage 1 (Discovery): gemini-2.5-flash -> flash-lite (Maps) -> gemma-4-26b-a4b-it
+    Stage 2 (Research): gemma-4-31b-it + search grounding
+    Stage 2.5 (Property Value): gemma-4-26b-a4b-it classifier; gemma-4-31b-it comps when
+        strategy matches turnkey rental, cash flow, suburban core rental, buy and hold, etc.
+    Stage 3 (Geocode): gemini-2.5-flash/lite Maps + search scout
+    Stage 4 (Synthesis): gemini-3.1-flash-lite-preview -> gemini-3.5-flash -> gemma-4-26b-a4b-it
 
-    On daily quota exhaustion, discovery and synthesis switch to their
-    configured fallback models for the remainder of the run.
+    Discovery overlaps with downstream stages: each verified listing is researched as soon
+    as it is found. Per-market discovery agents run in parallel (≤13 RPM per model).
     """
     global _active_discovery_model, _active_research_model, _active_synthesis_model
     _active_discovery_model = engine.DISCOVERY_MODEL
@@ -591,6 +644,7 @@ async def run_harvester_pipeline_async(admin_user_id: str) -> dict[str, Any]:
     report: dict[str, Any] = {
         "discovered": 0,
         "researched": 0,
+        "property_valued": 0,
         "synthesized": 0,
         "skipped": [],
         "already_scanned": [],
@@ -669,7 +723,7 @@ async def run_harvester_pipeline_async(admin_user_id: str) -> dict[str, Any]:
         )
 
     print("=" * 60)
-    print("STAGES 1–3 - Overlapped discovery -> research -> synthesis")
+    print("ACCURACY WORKFLOW - discovery -> research -> property value -> synthesis")
     print("=" * 60)
 
     def _run_discovery() -> list[dict[str, Any]]:
@@ -709,6 +763,7 @@ async def run_harvester_pipeline_async(admin_user_id: str) -> dict[str, Any]:
     print(
         f"Discovered: {report['discovered']} | "
         f"Researched: {report['researched']} | "
+        f"Property valued: {report.get('property_valued', 0)} | "
         f"Synthesized: {report['synthesized']} | "
         f"Skipped: {len(report['skipped'])} | "
         f"Already scanned: {len(report['already_scanned'])} | "

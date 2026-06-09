@@ -59,6 +59,7 @@ DISCOVERY_MODEL_CHAIN: tuple[str, ...] = (
 # Legacy label → hosted API slug.
 _MODEL_API_SLUGS: dict[str, str] = {
     "gemma-4-21b-it": "gemma-4-26b-a4b-it",
+    "gemma-4-a4b-26b": "gemma-4-26b-a4b-it",
 }
 # Backward-compatible alias for tests and harvester UI.
 DISCOVERY_FALLBACK_MODEL = DISCOVERY_FALLBACK_MODELS[-1]
@@ -74,6 +75,22 @@ SYNTHESIS_MODEL_CHAIN: tuple[str, ...] = (
 )
 # Backward-compatible alias for harvester RPD fallback.
 SYNTHESIS_FALLBACK_MODEL = SYNTHESIS_FALLBACK_MODELS[-1]
+
+# Accuracy workflow: discovery Maps tiers, property value, coordinate catch.
+MAPS_GROUNDED_DISCOVERY_MODELS: tuple[str, ...] = (
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+)
+PROPERTY_VALUE_MODEL = "gemma-4-26b-a4b-it"
+PROPERTY_VALUE_TRIGGERED_MODEL = "gemma-4-31b-it"
+COORDINATE_CATCH_MODEL = SYNTHESIS_MODEL
+ACCURACY_WORKFLOW_MODEL_CHAIN: tuple[str, ...] = (
+    *DISCOVERY_MODEL_CHAIN,
+    RESEARCH_MODEL,
+    PROPERTY_VALUE_MODEL,
+    PROPERTY_VALUE_TRIGGERED_MODEL,
+    *SYNTHESIS_MODEL_CHAIN,
+)
 
 # Geospatial agent chain — same Gemini tiers as discovery (Maps grounding).
 GEOCODING_MODEL_CHAIN: tuple[str, ...] = (
@@ -445,6 +462,8 @@ def _model_supports_grounding(model: str) -> bool:
 
 def _model_supports_map_grounding(model: str) -> bool:
     """Google Maps grounding is available on Gemini flash-tier models."""
+    if "gemma" in model.lower():
+        return False
     return model.startswith("gemini")
 
 
@@ -1818,6 +1837,7 @@ def _extend_discovery_listings(
     *,
     max_price: float,
     on_listing_found: Callable[[dict[str, Any]], None] | None = None,
+    discovery_model: str | None = None,
 ) -> list[dict[str, Any]]:
     """Merge new discovery rows, dedupe, and optionally notify per new listing."""
     before_keys = {item["address"].lower() for item in existing}
@@ -1827,6 +1847,8 @@ def _extend_discovery_listings(
         for item in deduped:
             key = item["address"].lower()
             if key not in before_keys:
+                if discovery_model:
+                    item["discovery_model"] = discovery_model
                 on_listing_found(item)
                 before_keys.add(key)
     return deduped
@@ -2450,6 +2472,7 @@ def _merge_discovery_region_results(
     max_price: float,
     on_listing_found: Callable[[dict[str, Any]], None] | None,
     exhausted_markets: set[str],
+    discovery_model: str | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     """Merge regional discovery results; mark per-metro exhaustion when a metro adds nothing."""
     round_added = 0
@@ -2461,6 +2484,7 @@ def _merge_discovery_region_results(
             region_listings,
             max_price=max_price,
             on_listing_found=on_listing_found,
+            discovery_model=discovery_model,
         )
         added = len(split_listings) - before
         round_added += added
@@ -2537,6 +2561,7 @@ def _discover_listings_per_market(
             max_price=max_price,
             on_listing_found=on_listing_found,
             exhausted_markets=exhausted_markets,
+            discovery_model=model,
         )
 
         if round_added == 0:
@@ -2573,6 +2598,7 @@ def _discover_listings_per_market(
                 max_price=max_price,
                 on_listing_found=on_listing_found,
                 exhausted_markets=exhausted_markets,
+                discovery_model=model,
             )
 
     if len(split_listings) < MAX_DISCOVERY_LISTINGS:
@@ -2597,6 +2623,7 @@ def _discover_listings_per_market(
             topup_listings,
             max_price=max_price,
             on_listing_found=on_listing_found,
+            discovery_model=model,
         )
         _discovery_log(
             f"[discovery] Global top-up: +{len(split_listings) - before} new "
@@ -2642,6 +2669,7 @@ def _discover_listings_for_model(
         listings,
         max_price=max_price,
         on_listing_found=on_listing_found,
+        discovery_model=model,
     )
     if len(deduped) >= MAX_DISCOVERY_LISTINGS:
         return deduped, last_raw
@@ -2731,6 +2759,8 @@ def discover_hot_market_listings(
             raise
 
         if listings:
+            for item in listings:
+                item.setdefault("discovery_model", active_model)
             _log.info(
                 "discovery_success",
                 model=active_model,
@@ -2852,11 +2882,84 @@ def _normalize_research_payload(address: str, data: Any) -> dict[str, Any]:
     return data
 
 
+def _discovery_model_provides_map_coords(model: str | None) -> bool:
+    """True when discovery used a Gemini tier with Maps grounding."""
+    if not model:
+        return False
+    return _resolve_discovery_model(model) in MAPS_GROUNDED_DISCOVERY_MODELS
+
+
+def _has_precise_coordinates(lat: Any, lon: Any) -> bool:
+    if lat is None or lon is None:
+        return False
+    lat_f = safe_float(lat)
+    lon_f = safe_float(lon)
+    if lat_f == 0.0 and lon_f == 0.0:
+        return False
+    return -90.0 <= lat_f <= 90.0 and -180.0 <= lon_f <= 180.0
+
+
+def _needs_coordinate_catch(
+    discovery_model: str | None,
+    lat: Any,
+    lon: Any,
+) -> bool:
+    """
+    Run synthesis coordinate catch when Maps-grounded discovery was not used
+    and coordinates are still missing.
+    """
+    if _has_precise_coordinates(lat, lon):
+        return False
+    return not _discovery_model_provides_map_coords(discovery_model)
+
+
+def _normalize_strategy_label(label: str) -> str:
+    return re.sub(r"[\s_-]+", " ", str(label).strip().lower())
+
+
+_PROPERTY_VALUE_TRIGGER_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bturnkey\b.*\brental\b", re.IGNORECASE),
+    re.compile(r"\brental\b.*\bturnkey\b", re.IGNORECASE),
+    re.compile(r"\bcash\s*flow(?:er|ing)?\b", re.IGNORECASE),
+    re.compile(r"\bsuburban\b.*\brental\b", re.IGNORECASE),
+    re.compile(r"\bsuburban\s+core\b", re.IGNORECASE),
+    re.compile(r"\bbuy[\s-]+and[\s-]+hold\b", re.IGNORECASE),
+    re.compile(r"\bincome\s+property\b", re.IGNORECASE),
+    re.compile(r"\bcash[\s-]+flowing\b", re.IGNORECASE),
+)
+
+
+def matches_property_value_trigger(label: str) -> bool:
+    """True when a strategy label should trigger the property value comps agent."""
+    normalized = _normalize_strategy_label(label)
+    if not normalized:
+        return False
+    exact_labels = {
+        "turnkey rental",
+        "cash flower",
+        "cash flow",
+        "cash flowing",
+        "suburban core rental",
+        "buy and hold",
+        "income property",
+    }
+    if normalized in exact_labels:
+        return True
+    return any(pattern.search(normalized) for pattern in _PROPERTY_VALUE_TRIGGER_PATTERNS)
+
+
 def _apply_discovery_research_fallback(
     research: dict[str, Any],
     discovery: dict[str, Any] | None,
 ) -> dict[str, Any]:
     """Use verified discovery price when research could not resolve the listing."""
+    if discovery:
+        discovery_model = discovery.get("discovery_model")
+        if discovery_model:
+            research["discovery_model"] = discovery_model
+        for coord_key in ("latitude", "longitude"):
+            if discovery.get(coord_key) is not None:
+                research[coord_key] = discovery[coord_key]
     if safe_float(research.get("price")) > 0 or not discovery:
         return research
     hint_price = safe_float(discovery.get("list_price"))
@@ -2914,6 +3017,188 @@ async def research_property_async(
     )
     research = _normalize_research_payload(address, _extract_json(raw))
     return _apply_discovery_research_fallback(research, discovery)
+
+
+def _classify_strategy_prompt(research: dict[str, Any], market_city: str) -> str:
+    return f"""Classify this {market_city} investment property into ONE strategy label.
+
+RESEARCH:
+{json.dumps(research, indent=2)}
+
+Choose the best label from:
+- Turnkey Rental (move-in ready with tenant or rent-ready)
+- Cash Flower (strong monthly cash flow relative to price)
+- Suburban Core Rental (suburban single-family or small multi rental)
+- Buy and Hold (stable long-term hold, moderate cash flow)
+- Value-Add Play
+- Appreciation Machine
+- High-Risk Speculation
+- Needs Review
+
+Return ONLY JSON: {{"property_label": "exact label from list above"}}"""
+
+
+def classify_investment_strategy(
+    research: dict[str, Any],
+    market_city: str,
+    *,
+    model: str | None = None,
+    session: GenaiSession | None = None,
+    rate_limiter: ModelRateLimiter | None = None,
+) -> str:
+    """Lightweight strategy classification using the property value model (Gemma 26B)."""
+    active_model = _resolve_model_slug(model or PROPERTY_VALUE_MODEL)
+    raw = generate_with_retry(
+        active_model,
+        _classify_strategy_prompt(research, market_city),
+        use_search=_model_supports_grounding(active_model),
+        session=session,
+    )
+    parsed = _extract_json(raw)
+    if isinstance(parsed, dict):
+        label = str(parsed.get("property_label", "")).strip()
+        if label:
+            return label
+    return "Needs Review"
+
+
+async def classify_investment_strategy_async(
+    research: dict[str, Any],
+    market_city: str,
+    *,
+    model: str | None = None,
+    session: GenaiSession | None = None,
+    rate_limiter: ModelRateLimiter | None = None,
+) -> str:
+    """Async strategy classification for harvester property value stage."""
+    active_model = _resolve_model_slug(model or PROPERTY_VALUE_MODEL)
+    raw = await generate_with_retry_async(
+        active_model,
+        _classify_strategy_prompt(research, market_city),
+        use_search=_model_supports_grounding(active_model),
+        session=session,
+        rate_limiter=rate_limiter,
+    )
+    parsed = _extract_json(raw)
+    if isinstance(parsed, dict):
+        label = str(parsed.get("property_label", "")).strip()
+        if label:
+            return label
+    return "Needs Review"
+
+
+def _research_to_property_value_context(
+    research: dict[str, Any],
+    market_city: str,
+) -> dict[str, Any]:
+    """Build minimal property context for comps from research-stage fields."""
+    price = safe_float(research.get("price"))
+    return {
+        "price": price,
+        "predicted_value": price,
+        "square_footage": research.get("square_footage", 0),
+        "property_type": research.get("property_type", "Unknown"),
+        "property_condition": research.get("property_condition", "Unknown"),
+        "market_city": market_city,
+        "rent": safe_float(research.get("stated_gross_monthly_rent")),
+        "summary": research.get("listing_rent_notes", ""),
+    }
+
+
+def run_property_value_agent(
+    address: str,
+    research: dict[str, Any],
+    market_city: str,
+    *,
+    session: GenaiSession | None = None,
+) -> dict[str, Any]:
+    """
+    Stage 2.5 (Property Value): Classify strategy with Gemma 26B; when the label
+    matches income-hold keywords, fetch 4-6 recent comps with Gemma 31B + search.
+    """
+    enriched = dict(research)
+    strategy_label = classify_investment_strategy(
+        research,
+        market_city,
+        session=session,
+    )
+    enriched["predicted_strategy_label"] = strategy_label
+    if not matches_property_value_trigger(strategy_label):
+        return enriched
+
+    _log.info(
+        "triggering_property_value_agent",
+        address=address,
+        label=_normalize_strategy_label(strategy_label),
+    )
+    property_context = _research_to_property_value_context(research, market_city)
+    try:
+        comp_result = fetch_comparable_properties(
+            address,
+            property_context,
+            model=PROPERTY_VALUE_TRIGGERED_MODEL,
+            num_comps="4 to 6",
+        )
+        comps_analysis = comp_result.get("comps_analysis")
+        if comps_analysis:
+            enriched["comps_analysis"] = comps_analysis
+        if comp_result.get("predicted_value"):
+            enriched["comps_implied_value"] = comp_result["predicted_value"]
+        if comp_result.get("prediction_reasoning"):
+            enriched["comps_value_reasoning"] = comp_result["prediction_reasoning"]
+    except Exception as exc:
+        _log.warning("property_value_agent_failed", address=address, error=str(exc))
+    return enriched
+
+
+async def run_property_value_agent_async(
+    address: str,
+    research: dict[str, Any],
+    market_city: str,
+    *,
+    session: GenaiSession | None = None,
+    rate_limiter: ModelRateLimiter | None = None,
+) -> dict[str, Any]:
+    """Async property value stage for parallel harvester workers."""
+    enriched = dict(research)
+    strategy_label = await classify_investment_strategy_async(
+        research,
+        market_city,
+        session=session,
+        rate_limiter=rate_limiter,
+    )
+    enriched["predicted_strategy_label"] = strategy_label
+    if not matches_property_value_trigger(strategy_label):
+        return enriched
+
+    _log.info(
+        "triggering_property_value_agent_async",
+        address=address,
+        label=_normalize_strategy_label(strategy_label),
+    )
+    property_context = _research_to_property_value_context(research, market_city)
+    try:
+        comp_result = await asyncio.to_thread(
+            fetch_comparable_properties,
+            address,
+            property_context,
+            model=PROPERTY_VALUE_TRIGGERED_MODEL,
+            num_comps="4 to 6",
+        )
+        comps_analysis = comp_result.get("comps_analysis")
+        if comps_analysis:
+            enriched["comps_analysis"] = comps_analysis
+        if comp_result.get("predicted_value"):
+            enriched["comps_implied_value"] = comp_result["predicted_value"]
+        if comp_result.get("prediction_reasoning"):
+            enriched["comps_value_reasoning"] = comp_result["prediction_reasoning"]
+    except Exception as exc:
+        _log.warning(
+            "property_value_agent_failed_async",
+            address=address,
+            error=str(exc),
+        )
+    return enriched
 
 
 _DISALLOWED_PROPERTY_TYPE_RE = re.compile(
@@ -2983,10 +3268,18 @@ CONTEXT FROM DATABASE:
 RESEARCH DATA (verified extraction):
 {json.dumps(research, indent=2)}
 
+PROPERTY VALUE / COMPS (when present — from property value agent):
+{json.dumps(research.get("comps_analysis") or {}, indent=2)}
+
+PREDICTED STRATEGY (from property value classifier):
+{research.get("predicted_strategy_label") or "unknown"}
+
 GEOSPATIAL / ENVIRONMENTAL (when present — from Maps grounding):
 {json.dumps(research.get("environmental_risk") or {}, indent=2)}
 
 Produce a complete investment underwriting. Use research price/taxes/hoa/sqft/year_built as anchors.
+When comps_analysis is present, anchor predicted_value to recent comparable sales and cite comps
+in prediction_reasoning.
 If environmental_risk is present, reflect flood/industrial/noise factors in summary and location_score.
 
 YEAR BUILT (critical):
@@ -3116,7 +3409,29 @@ def _finalize_synthesis_payload(
                 "environmental_risk": research.get("environmental_risk"),
             },
         )
-    return attach_data_provenance(enriched, research, pipeline="harvester")
+    return _merge_property_value_into_synthesis(
+        attach_data_provenance(enriched, research, pipeline="harvester"),
+        research,
+    )
+
+
+def _merge_property_value_into_synthesis(
+    enriched: dict[str, Any],
+    research: dict[str, Any],
+) -> dict[str, Any]:
+    """Attach harvest comps/value signals from the property value agent stage."""
+    comps = research.get("comps_analysis")
+    if isinstance(comps, dict) and comps.get("comparable_properties"):
+        enriched["comps_analysis"] = comps
+        if apply_comp_implied_market_value(enriched, comps):
+            enriched = enrich_with_forecast(enriched)
+        reasoning = str(research.get("comps_value_reasoning") or "").strip()
+        if reasoning and not str(enriched.get("prediction_reasoning") or "").strip():
+            enriched["prediction_reasoning"] = reasoning
+    strategy = str(research.get("predicted_strategy_label") or "").strip()
+    if strategy and strategy.lower() != "needs review":
+        enriched.setdefault("property_label", strategy)
+    return enriched
 
 
 def _synthesis_models_to_try(explicit_model: str | None = None) -> list[str]:
@@ -3161,6 +3476,64 @@ def _generate_synthesis_with_model_chain(
     ) from last_error
 
 
+def _resolve_missing_coordinates_with_grounding_sync(
+    address: str,
+    session: GenaiSession | None = None,
+) -> tuple[float | None, float | None]:
+    """Runs a dedicated search-grounding coordinate catch using COORDINATE_CATCH_MODEL."""
+    prompt = f"""Search for the exact geographic coordinates (latitude and longitude) of the property at: {address}.
+    Return the coordinates in this exact format:
+    COORDINATES: LAT: <latitude>, LON: <longitude>
+    Do not return any other text."""
+    try:
+        raw = generate_with_retry(
+            COORDINATE_CATCH_MODEL,
+            prompt,
+            use_search=True,
+            session=session,
+        )
+        lat_match = re.search(r"(?:lat|latitude)[:\s=-]*([-\d.]+)", raw, re.IGNORECASE)
+        lon_match = re.search(r"(?:lon|lng|longitude)[:\s=-]*([-\d.]+)", raw, re.IGNORECASE)
+        if lat_match and lon_match:
+            lat = safe_float(lat_match.group(1))
+            lon = safe_float(lon_match.group(2))
+            if -90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0 and (lat != 0.0 or lon != 0.0):
+                return lat, lon
+    except Exception as exc:
+        _log.warning("grounding_string_catch_failed_sync", address=address, error=str(exc))
+    return None, None
+
+
+async def _resolve_missing_coordinates_with_grounding_async(
+    address: str,
+    session: GenaiSession | None = None,
+    rate_limiter: ModelRateLimiter | None = None,
+) -> tuple[float | None, float | None]:
+    """Runs a dedicated search-grounding coordinate catch asynchronously."""
+    prompt = f"""Search for the exact geographic coordinates (latitude and longitude) of the property at: {address}.
+    Return the coordinates in this exact format:
+    COORDINATES: LAT: <latitude>, LON: <longitude>
+    Do not return any other text."""
+    try:
+        raw = await generate_with_retry_async(
+            COORDINATE_CATCH_MODEL,
+            prompt,
+            use_search=True,
+            session=session,
+            rate_limiter=rate_limiter,
+        )
+        lat_match = re.search(r"(?:lat|latitude)[:\s=-]*([-\d.]+)", raw, re.IGNORECASE)
+        lon_match = re.search(r"(?:lon|lng|longitude)[:\s=-]*([-\d.]+)", raw, re.IGNORECASE)
+        if lat_match and lon_match:
+            lat = safe_float(lat_match.group(1))
+            lon = safe_float(lon_match.group(2))
+            if -90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0 and (lat != 0.0 or lon != 0.0):
+                return lat, lon
+    except Exception as exc:
+        _log.warning("grounding_string_catch_failed_async", address=address, error=str(exc))
+    return None, None
+
+
 def synthesize_harvest_property(
     address: str,
     research: dict[str, Any],
@@ -3171,7 +3544,8 @@ def synthesize_harvest_property(
     geospatial: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
-    Stage 3 (Synthesis): Investment summary from research data only.
+    Stage 4 (Synthesis): Investment summary from research + property value data.
+    Model chain: gemini-3.1-flash-lite-preview -> gemini-3.5-flash -> gemma-4-26b-a4b-it.
     """
     raw, _active_model = _generate_synthesis_with_model_chain(
         research,
@@ -3179,6 +3553,21 @@ def synthesize_harvest_property(
         model=model,
         user_id=user_id,
     )
+
+    lat = geospatial.get("latitude") if geospatial else research.get("latitude")
+    lon = geospatial.get("longitude") if geospatial else research.get("longitude")
+    discovery_model = research.get("discovery_model")
+    if _needs_coordinate_catch(discovery_model, lat, lon):
+        catch_lat, catch_lon = _resolve_missing_coordinates_with_grounding_sync(address)
+        if catch_lat is not None and catch_lon is not None:
+            if not geospatial:
+                geospatial = {}
+            geospatial["latitude"] = catch_lat
+            geospatial["longitude"] = catch_lon
+            geospatial["geocode_confidence"] = "medium"
+            geospatial["geocode_source"] = "synthesis_grounding_catch"
+            geospatial["geocode_model"] = COORDINATE_CATCH_MODEL
+
     return _finalize_synthesis_payload(
         address,
         research,
@@ -3227,6 +3616,22 @@ async def synthesize_harvest_property_async(
         raise RuntimeError(
             f"Synthesis failed for all models in {SYNTHESIS_MODEL_CHAIN}"
         ) from last_error
+
+    lat = geospatial.get("latitude") if geospatial else research.get("latitude")
+    lon = geospatial.get("longitude") if geospatial else research.get("longitude")
+    discovery_model = research.get("discovery_model")
+    if _needs_coordinate_catch(discovery_model, lat, lon):
+        catch_lat, catch_lon = await _resolve_missing_coordinates_with_grounding_async(
+            address, session=session, rate_limiter=rate_limiter
+        )
+        if catch_lat is not None and catch_lon is not None:
+            if not geospatial:
+                geospatial = {}
+            geospatial["latitude"] = catch_lat
+            geospatial["longitude"] = catch_lon
+            geospatial["geocode_confidence"] = "medium"
+            geospatial["geocode_source"] = "synthesis_grounding_catch"
+            geospatial["geocode_model"] = COORDINATE_CATCH_MODEL
 
     return _finalize_synthesis_payload(
         address,
@@ -3308,7 +3713,7 @@ def _comps_context_block(property_data: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def comps_agent(address: str, property_data: dict[str, Any], model: str) -> str:
+def comps_agent(address: str, property_data: dict[str, Any], model: str, num_comps: str = "3 to 5") -> str:
     """Grounded search for structured comparable sales near the subject property."""
     context = _comps_context_block(property_data)
     prompt = f"""Find recent comparable SALES (closed transactions, not active listings) near:
@@ -3318,7 +3723,7 @@ SUBJECT PROPERTY CONTEXT:
 {context}
 
 Requirements:
-- Return 3 to 5 comps sold within the last 18 months when possible.
+- Return {num_comps} comps sold within the last 18 months when possible.
 - Match property type, beds/baths, square footage (+/- 20%), and neighborhood.
 - Prefer sales within 1 mile of the subject.
 - Use Zillow sold history, Redfin sold data, Realtor.com, county recorder, or MLS.
@@ -3352,6 +3757,7 @@ def fetch_comparable_properties(
     property_data: dict[str, Any],
     *,
     model: str | None = None,
+    num_comps: str = "3 to 5",
 ) -> dict[str, Any]:
     """
     Research area comps and attach comps_analysis to a copy of property_data.
@@ -3359,7 +3765,7 @@ def fetch_comparable_properties(
     May adjust predicted_value upward when comps show material undervaluation.
     """
     active_model = model or PRIMARY_SEARCH_MODEL
-    raw = comps_agent(address, property_data, active_model)
+    raw = comps_agent(address, property_data, active_model, num_comps=num_comps)
     extracted = _extract_json(raw)
     comps_payload = normalize_comps_payload(extracted if isinstance(extracted, dict) else {})
     comps_analysis = evaluate_comps_against_subject(comps_payload, property_data)

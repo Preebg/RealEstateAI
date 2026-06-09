@@ -950,10 +950,34 @@ def save_canonical_property(
     return response
 
 
+def _rpc_save_property_comps(
+    client: Any,
+    property_id: str,
+    property_data: dict[str, Any],
+) -> bool:
+    """Call save_property_comps RPC when comps_analysis has comparable_properties."""
+    comps = property_data.get("comps_analysis")
+    if not isinstance(comps, dict) or not comps.get("comparable_properties"):
+        return False
+
+    params: dict[str, Any] = {
+        "p_property_id": str(property_id),
+        "p_comps_analysis": comps,
+    }
+    if property_data.get("predicted_value") is not None:
+        params["p_predicted_value"] = float(property_data["predicted_value"])
+    if property_data.get("prediction_reasoning"):
+        params["p_prediction_reasoning"] = str(property_data["prediction_reasoning"])
+
+    response = client.rpc("save_property_comps", params).execute()
+    return bool(response.data)
+
+
 def persist_comps_to_canonical(
     property_data: dict[str, Any],
     *,
     show_errors: bool = False,
+    use_service_client: bool = False,
 ) -> bool:
     """
     Persist comps to Supabase via save_property_comps RPC.
@@ -972,25 +996,21 @@ def persist_comps_to_canonical(
     if not property_id or not is_valid_uuid(str(property_id)):
         return False
 
-    from authenticate import get_authenticated_client
+    if use_service_client:
+        from authenticate import get_service_client
 
-    client = get_authenticated_client()
+        client = get_service_client()
+    else:
+        from authenticate import get_authenticated_client
+
+        client = get_authenticated_client()
     if client is None:
         if show_errors and st is not None:
             st.error("Sign in to save comparable sales.")
         return False
 
-    params: dict[str, Any] = {
-        "p_property_id": str(property_id),
-        "p_comps_analysis": comps,
-    }
-    if property_data.get("predicted_value") is not None:
-        params["p_predicted_value"] = float(property_data["predicted_value"])
-    if property_data.get("prediction_reasoning"):
-        params["p_prediction_reasoning"] = str(property_data["prediction_reasoning"])
-
     try:
-        response = client.rpc("save_property_comps", params).execute()
+        saved = _rpc_save_property_comps(client, str(property_id), property_data)
     except APIError as exc:
         report_error(
             log,
@@ -1003,7 +1023,6 @@ def persist_comps_to_canonical(
             st.error(f"Could not save comparable sales: {exc}")
         return False
 
-    saved = bool(response.data)
     if saved:
         invalidate_kb_cache()
         log.info("comps_persist_success", property_id=str(property_id), address=address)
@@ -1571,7 +1590,19 @@ def save_harvest_property(
     if ai_maint is not None:
         payload["original_ai_maint"] = ai_maint
 
-    return save_canonical_property(payload, user_id=uid, show_errors=False)
+    response = save_canonical_property(payload, user_id=uid, show_errors=False)
+    if response and getattr(response, "data", None):
+        rows = response.data
+        if isinstance(rows, list) and rows:
+            property_id = rows[0].get("id")
+            if property_id:
+                persist_payload = dict(property_data)
+                persist_payload["id"] = property_id
+                persist_comps_to_canonical(
+                    persist_payload,
+                    use_service_client=True,
+                )
+    return response
 
 
 def get_kb_context(user_id: str | None = None) -> str:
