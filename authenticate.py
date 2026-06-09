@@ -15,7 +15,7 @@ from postgrest.exceptions import APIError
 from supabase import Client, create_client
 
 from app_logging import configure_logging, report_error
-from legal import get_privacy_policy_text, get_terms_of_service_text
+from legal import APP_NAME, get_privacy_policy_text, get_terms_of_service_text
 
 log = configure_logging("authenticate")
 
@@ -335,11 +335,40 @@ def _is_localhost_url(url: str) -> bool:
     return host in {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
 
 
+def _origin_from_request_headers() -> str:
+    """Best-effort app origin when ``st.context.url`` is unavailable."""
+    try:
+        headers = st.context.headers
+        host = headers.get("Host") or headers.get("host")
+        if not host:
+            return ""
+        proto = (
+            headers.get("X-Forwarded-Proto")
+            or headers.get("x-forwarded-proto")
+            or "https"
+        )
+        return _normalize_app_url(f"{proto}://{host}")
+    except Exception:
+        return ""
+
+
 def _current_app_url() -> str:
     """Origin of the page the user is actually visiting."""
     if _headless_mode():
         return ""
-    return _normalize_app_url(str(st.context.url))
+
+    try:
+        app_url = st.context.url
+        if app_url:
+            return _normalize_app_url(str(app_url))
+    except KeyError as exc:
+        # Streamlit 1.58+ can raise when page metadata lacks url_pathname
+        # (common on the login screen with hidden st.navigation).
+        log.warning("context_url_key_error", key=str(exc))
+    except Exception as exc:
+        log.warning("context_url_failed", error=str(exc))
+
+    return _origin_from_request_headers()
 
 
 def _configured_redirect_url() -> str | None:
@@ -354,7 +383,7 @@ def _configured_redirect_url() -> str | None:
 
 
 def _get_redirect_url() -> str:
-    """OAuth redirect URL — must match Supabase Auth redirect allow-list."""
+    """OAuth redirect URI — must match Google Web OAuth authorized redirect URIs."""
     context_url = _current_app_url()
     configured = _configured_redirect_url()
 
@@ -776,7 +805,7 @@ def render_login_page() -> bool:
 
     left, center, right = st.columns([1, 1.2, 1])
     with center:
-        st.markdown("## 🏠 AI Property Analyzer")
+        st.markdown(f"## 🏠 {APP_NAME}")
         st.caption("Sign in to access your private knowledge base and run analyses.")
 
         login_tab, signup_tab = st.tabs(["Log in", "Sign up"])
@@ -795,8 +824,11 @@ def render_login_page() -> bool:
                     )
                 elif not _get_google_web_client_secret():
                     st.error(
-                        "Add `GOOGLE_WEB_CLIENT_SECRET` to secrets (Web OAuth client secret "
-                        "from Google Cloud Console, not the Desktop Gmail client secret)."
+                        "Google sign-in needs `GOOGLE_WEB_CLIENT_SECRET` in Streamlit secrets. "
+                        "In Google Cloud Console → Credentials → your **Web** OAuth client "
+                        f"(`{_get_google_web_client_id()}`), copy **Client secret** into "
+                        "`.streamlit/secrets.toml` and Streamlit Cloud secrets. "
+                        "Do not use `GOOGLE_CLIENT_SECRET` (that is the Desktop Gmail client)."
                     )
                 else:
                     redirect_to = _get_redirect_url()

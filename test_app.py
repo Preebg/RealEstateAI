@@ -1786,6 +1786,23 @@ class TestHeadlessDbClient(unittest.TestCase):
 
 
 class TestOAuthRedirectUrl(unittest.TestCase):
+    def test_current_app_url_survives_context_url_key_error(self):
+        from unittest.mock import patch
+
+        with patch("authenticate._headless_mode", return_value=False):
+            with patch.object(
+                type(__import__("streamlit").context),
+                "url",
+                property(lambda self: (_ for _ in ()).throw(KeyError("url_pathname"))),
+            ):
+                with patch(
+                    "authenticate._origin_from_request_headers",
+                    return_value="https://q-scout.streamlit.app",
+                ):
+                    from authenticate import _current_app_url
+
+                    self.assertEqual(_current_app_url(), "https://q-scout.streamlit.app")
+
     def test_prefers_live_app_url_over_localhost_secret(self):
         from unittest.mock import patch
 

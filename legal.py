@@ -1,10 +1,10 @@
-"""Terms of Service and Privacy Policy content for AI Property Scout."""
+"""Terms of Service and Privacy Policy content for Q-Scout."""
 
 from __future__ import annotations
 
 import streamlit as st
 
-APP_NAME = "AI Property Scout"
+APP_NAME = "Q-Scout"
 EFFECTIVE_DATE = "2025-06-09"
 
 LEGAL_QUERY_PARAM = "legal"
@@ -144,7 +144,15 @@ def render_legal_page(path: str) -> None:
         return
 
     st.caption(f"Last updated {EFFECTIVE_DATE}.")
-    st.page_link("AIUnderwriterv2.py", label="Back to sign in")
+    _render_back_to_sign_in()
+
+
+def _render_back_to_sign_in() -> None:
+    """Return to the sign-in screen without st.page_link (avoids url_pathname KeyError)."""
+    if st.button("Back to sign in", key="legal_back_signin", type="secondary"):
+        if LEGAL_QUERY_PARAM in st.query_params:
+            del st.query_params[LEGAL_QUERY_PARAM]
+        st.rerun()
 
 
 def render_legal_footer_links(*, prefix: str = "") -> None:

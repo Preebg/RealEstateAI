@@ -6,7 +6,7 @@ import streamlit as st
 
 from authenticate import render_auth_page
 from app_nav import INDIVIDUAL_SEARCH_PAGE, MAP_OPEN_ADDRESS_KEY, consume_nav_target
-from legal import render_legal_page, requested_legal_path
+from legal import APP_NAME, render_legal_page, requested_legal_path
 from ui_theme import inject_app_css, render_app_footer_glossary
 
 
@@ -16,7 +16,7 @@ def _render_model_validation_page() -> None:
     render_backtest_page()
 
 st.set_page_config(
-    page_title="AI Property Scout",
+    page_title=APP_NAME,
     page_icon="🏠",
     layout="wide",
     initial_sidebar_state="expanded",
