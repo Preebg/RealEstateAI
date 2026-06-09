@@ -89,14 +89,12 @@ def ensure_deferred_task_queue(
 
 
 def restore_individual_search_address_input() -> None:
-    """Keep the address picker populated when returning to Individual Search."""
-    if not st.session_state.get("property_data"):
-        return
+    """Populate the address picker before its widget is rendered."""
     active = get_active_analysis_address()
     if not active:
         return
     raw = st.session_state.get("address_input")
-    if isinstance(raw, list) and raw:
+    if isinstance(raw, list) and raw and str(raw[0]).strip():
         return
     if isinstance(raw, str) and raw.strip():
         return

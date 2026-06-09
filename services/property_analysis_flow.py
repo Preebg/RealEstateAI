@@ -55,7 +55,6 @@ def run_initial_property_analysis(address: str, *, guest_mode: bool = False) -> 
         st.session_state.property_data = final_result
         st.session_state.deferred_tasks = queue
         st.session_state.deferred_tasks_total = len(queue)
-        st.session_state["address_input"] = [address]
 
         done_label = (
             "✅ Loaded from Knowledge Base — opening analysis..."

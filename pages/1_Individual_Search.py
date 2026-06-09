@@ -44,7 +44,6 @@ _guest_mode = is_guest_viewer()
 
 _map_address = consume_map_property_selection()
 if _map_address:
-    st.session_state["address_input"] = [_map_address]
     set_active_analysis_address(_map_address)
     _map_loaded = load_property_from_kb(_map_address)
     if _map_loaded:
