@@ -1,9 +1,10 @@
-"""Supabase authentication (Google OAuth PKCE + email/password)."""
+"""Supabase authentication (Google GIS / OAuth PKCE + email/password)."""
 
 from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import os
 import secrets
 import datetime
@@ -12,6 +13,7 @@ from typing import Any
 from urllib.parse import urlencode
 
 import streamlit as st
+import streamlit.components.v1 as components
 from postgrest.exceptions import APIError
 from supabase import Client, create_client
 
@@ -146,6 +148,108 @@ def _get_optional_secret(name: str) -> str | None:
         except Exception:
             pass
     return None
+
+
+def _get_google_web_client_id() -> str | None:
+    """
+    Google **Web application** OAuth client ID for Sign in with Google (GIS).
+
+    Use the same Web client configured in Supabase → Authentication → Google.
+    The Desktop client (Gmail pipeline) is a different credential type.
+    """
+    return _get_optional_secret("GOOGLE_WEB_CLIENT_ID") or _get_optional_secret(
+        "GOOGLE_CLIENT_ID"
+    )
+
+
+def _gis_nonce_pair() -> tuple[str, str]:
+    """Return (raw_nonce, sha256_hex_nonce) for Google Identity Services."""
+    cached = st.session_state.get("gis_nonce")
+    if isinstance(cached, tuple) and len(cached) == 2:
+        return str(cached[0]), str(cached[1])
+
+    raw = secrets.token_urlsafe(32)
+    hashed = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    pair = (raw, hashed)
+    st.session_state["gis_nonce"] = pair
+    return pair
+
+
+def _render_google_gis_signin(client_id: str) -> None:
+    """
+    Google Identity Services popup sign-in.
+
+    Unlike the Supabase redirect flow, Google's consent screen shows your OAuth
+    app branding (name/logo) instead of ``*.supabase.co``.
+    """
+    _, hashed_nonce = _gis_nonce_pair()
+    client_json = json.dumps(client_id)
+    nonce_json = json.dumps(hashed_nonce)
+
+    components.html(
+        f"""
+        <script src="https://accounts.google.com/gsi/client" async></script>
+        <div id="g_id_onload"
+          data-client_id={client_json}
+          data-context="signin"
+          data-ux_mode="popup"
+          data-callback="handleGisSignIn"
+          data-nonce={nonce_json}
+          data-use_fedcm_for_prompt="true"
+          data-auto_select="false">
+        </div>
+        <div class="g_id_signin"
+          data-type="standard"
+          data-shape="rectangular"
+          data-theme="outline"
+          data-text="continue_with"
+          data-size="large"
+          data-logo_alignment="left"
+          data-width="320">
+        </div>
+        <script>
+        function handleGisSignIn(response) {{
+          try {{
+            const parentUrl = new URL(window.parent.location.href);
+            parentUrl.searchParams.set("gis_credential", response.credential);
+            window.parent.location.href = parentUrl.toString();
+          }} catch (err) {{
+            console.error("GIS sign-in redirect failed", err);
+          }}
+        }}
+        </script>
+        """,
+        height=56,
+    )
+
+
+def process_gis_callback() -> bool:
+    """Exchange a Google Identity Services credential for a Supabase session."""
+    credential = _query_param("gis_credential")
+    if not credential:
+        return False
+
+    with st.spinner("Completing Google sign-in..."):
+        supabase = get_supabase()
+        nonce_pair = st.session_state.get("gis_nonce")
+        payload: dict[str, str] = {"provider": "google", "token": credential}
+        if isinstance(nonce_pair, tuple) and nonce_pair:
+            payload["nonce"] = str(nonce_pair[0])
+
+        try:
+            response = supabase.auth.sign_in_with_id_token(payload)
+            if response.session:
+                _persist_session(response.session)
+            else:
+                st.error("Google sign-in did not return a session. Please try again.")
+        except (APIError, ValueError, TypeError) as exc:
+            report_error(log, "gis_exchange_failed", exc)
+            st.error(f"Sign-in failed: {exc}")
+        finally:
+            _clear_query_param("gis_credential")
+            st.session_state.pop("gis_nonce", None)
+
+    return True
 
 
 def get_supabase() -> Client:
@@ -378,6 +482,7 @@ def _clear_oauth_query_params(*, keep_handoff: bool = False) -> None:
         "error_description",
         "pkce_verifier",
         "pkce_sid",
+        "gis_credential",
     ):
         _clear_query_param(key)
     if not keep_handoff:
@@ -868,6 +973,7 @@ def render_login_page() -> bool:
     Full login / sign-up screen.
     Returns True when the user is authenticated.
     """
+    process_gis_callback()
     process_auth_callback()
     _restore_auth_handoff()
     restore_session_from_tokens()
@@ -896,27 +1002,61 @@ def render_login_page() -> bool:
             if redirect_warning:
                 st.warning(redirect_warning)
 
+            google_web_client_id = _get_google_web_client_id()
             try:
-                redirect_to = _redirect_url_with_pkce_sid()
-                cached_redirect = st.session_state.get("google_oauth_redirect")
-                if (
-                    not st.session_state.get("google_oauth_url")
-                    or cached_redirect != redirect_to
-                ):
-                    st.session_state["google_oauth_redirect"] = redirect_to
-                    st.session_state["google_oauth_url"] = login_with_google()
-                oauth_url = st.session_state["google_oauth_url"]
-                _render_google_signin_button(oauth_url)
-                if st.button("Refresh Google sign-in link", use_container_width=True):
-                    st.session_state.pop("google_oauth_url", None)
-                    st.session_state.pop("google_oauth_redirect", None)
-                    st.session_state.pop("pkce_code_verifier", None)
-                    st.session_state.pop("pkce_session_id", None)
-                    _clear_pending_pkce()
-                    st.rerun()
-                st.caption(
-                    "You will return here automatically after Google approves access."
-                )
+                if google_web_client_id:
+                    _render_google_gis_signin(google_web_client_id)
+                    st.caption(
+                        "Google shows your app name on the sign-in prompt. "
+                        "If the button does not appear, use the redirect option below."
+                    )
+                    with st.expander("Use redirect sign-in instead"):
+                        redirect_to = _redirect_url_with_pkce_sid()
+                        cached_redirect = st.session_state.get("google_oauth_redirect")
+                        if (
+                            not st.session_state.get("google_oauth_url")
+                            or cached_redirect != redirect_to
+                        ):
+                            st.session_state["google_oauth_redirect"] = redirect_to
+                            st.session_state["google_oauth_url"] = login_with_google()
+                        oauth_url = st.session_state["google_oauth_url"]
+                        _render_google_signin_button(oauth_url)
+                        if st.button(
+                            "Refresh Google sign-in link",
+                            use_container_width=True,
+                            key="refresh_google_oauth_redirect",
+                        ):
+                            st.session_state.pop("google_oauth_url", None)
+                            st.session_state.pop("google_oauth_redirect", None)
+                            st.session_state.pop("pkce_code_verifier", None)
+                            st.session_state.pop("pkce_session_id", None)
+                            _clear_pending_pkce()
+                            st.rerun()
+                else:
+                    redirect_to = _redirect_url_with_pkce_sid()
+                    cached_redirect = st.session_state.get("google_oauth_redirect")
+                    if (
+                        not st.session_state.get("google_oauth_url")
+                        or cached_redirect != redirect_to
+                    ):
+                        st.session_state["google_oauth_redirect"] = redirect_to
+                        st.session_state["google_oauth_url"] = login_with_google()
+                    oauth_url = st.session_state["google_oauth_url"]
+                    _render_google_signin_button(oauth_url)
+                    if st.button(
+                        "Refresh Google sign-in link",
+                        use_container_width=True,
+                        key="refresh_google_oauth_redirect",
+                    ):
+                        st.session_state.pop("google_oauth_url", None)
+                        st.session_state.pop("google_oauth_redirect", None)
+                        st.session_state.pop("pkce_code_verifier", None)
+                        st.session_state.pop("pkce_session_id", None)
+                        _clear_pending_pkce()
+                        st.rerun()
+                    st.caption(
+                        "Set `GOOGLE_WEB_CLIENT_ID` in secrets for branded Google sign-in."
+                    )
             except Exception as exc:
                 st.error(f"Google sign-in is unavailable: {exc}")
 
