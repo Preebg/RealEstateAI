@@ -1,7 +1,9 @@
-"""Supabase authentication (Google OAuth + email/password)."""
+"""Supabase authentication (Google OAuth PKCE + email/password)."""
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import os
 import secrets
 import datetime
@@ -9,7 +11,6 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
 
-import httpx
 import streamlit as st
 from postgrest.exceptions import APIError
 from supabase import Client, create_client
@@ -147,186 +148,6 @@ def _get_optional_secret(name: str) -> str | None:
     return None
 
 
-def _get_google_web_client_id() -> str | None:
-    """
-    Google **Web application** OAuth client ID for app sign-in.
-
-    Use the same Web client configured in Supabase → Authentication → Google.
-    The Desktop client (Gmail pipeline) is a different credential type.
-    """
-    return _get_optional_secret("GOOGLE_WEB_CLIENT_ID")
-
-
-def _get_google_web_client_secret() -> str | None:
-    """Secret for the Web OAuth client (not the Desktop Gmail client)."""
-    return _get_optional_secret("GOOGLE_WEB_CLIENT_SECRET")
-
-
-def _store_google_signin_state(state: str, nonce: str, redirect_uri: str) -> None:
-    """Persist OAuth state in Supabase so callbacks survive Streamlit session resets."""
-    supabase = get_supabase()
-    try:
-        supabase.rpc(
-            "store_oauth_pkce",
-            {
-                "p_session_id": state,
-                "p_code_verifier": nonce,
-                # Reused column: must match authorize + token exchange redirect_uri.
-                "p_code_challenge": redirect_uri,
-            },
-        ).execute()
-    except APIError as exc:
-        report_error(log, "google_signin_state_store_failed", exc, level="warning")
-        raise
-
-
-def _consume_google_signin_state(state: str) -> tuple[str, str] | None:
-    """Load nonce + redirect_uri saved for a Google OAuth state value."""
-    supabase = get_supabase()
-    response = supabase.rpc("consume_oauth_pkce", {"p_session_id": state}).execute()
-    rows = response.data or []
-    if not rows:
-        return None
-    row = rows[0]
-    nonce = str(row.get("code_verifier") or "")
-    redirect_uri = str(row.get("code_challenge") or "")
-    if not nonce or not redirect_uri:
-        return None
-    return nonce, redirect_uri
-
-
-def _google_redirect_uri_setup_hint(redirect_uri: str) -> str:
-    client_id = _get_google_web_client_id() or "your-web-client-id"
-    return (
-        f"Add this **Authorized redirect URI** on your Google **Web** OAuth client "
-        f"(`{client_id}`): `{redirect_uri}`\n\n"
-        "Google Cloud Console → APIs & Services → Credentials → Web client → "
-        "Authorized redirect URIs. It must match exactly (no trailing slash)."
-    )
-
-
-def build_google_signin_url(redirect_uri: str) -> str:
-    """
-    Full-page Google OAuth URL (not Supabase /authorize).
-
-    Redirect URI is the Streamlit app origin so Google shows your app domain on
-    the consent screen instead of ``*.supabase.co``.
-    """
-    client_id = _get_google_web_client_id()
-    if not client_id:
-        raise EnvironmentError(
-            "GOOGLE_WEB_CLIENT_ID not set. Add your Web OAuth client ID to secrets."
-        )
-
-    state = secrets.token_urlsafe(32)
-    nonce = secrets.token_urlsafe(32)
-    _store_google_signin_state(state, nonce, redirect_uri)
-
-    query = urlencode(
-        {
-            "client_id": client_id,
-            "redirect_uri": redirect_uri,
-            "response_type": "code",
-            "scope": "openid email profile",
-            "state": state,
-            "nonce": nonce,
-            "access_type": "online",
-            "prompt": "select_account",
-        }
-    )
-    return f"https://accounts.google.com/o/oauth2/v2/auth?{query}"
-
-
-def _exchange_google_auth_code(code: str, redirect_uri: str) -> dict[str, Any]:
-    client_id = _get_google_web_client_id()
-    client_secret = _get_google_web_client_secret()
-    if not client_id or not client_secret:
-        raise EnvironmentError(
-            "Google Web OAuth credentials missing. Set GOOGLE_WEB_CLIENT_ID and "
-            "GOOGLE_WEB_CLIENT_SECRET in secrets."
-        )
-
-    response = httpx.post(
-        "https://oauth2.googleapis.com/token",
-        data={
-            "code": code,
-            "client_id": client_id,
-            "client_secret": client_secret,
-            "redirect_uri": redirect_uri,
-            "grant_type": "authorization_code",
-        },
-        timeout=20.0,
-    )
-    if response.status_code >= 400:
-        raise ValueError(response.text)
-    payload = response.json()
-    if not isinstance(payload, dict):
-        raise ValueError("Google token endpoint returned an unexpected response.")
-    return payload
-
-
-def process_google_signin_callback() -> bool:
-    """Handle Google redirect callback and open a Supabase session."""
-    oauth_error = _query_param("error")
-    if oauth_error:
-        description = _query_param("error_description") or oauth_error
-        redirect_uri = _get_redirect_url()
-        if oauth_error == "redirect_uri_mismatch" or "redirect_uri" in description.lower():
-            st.error(
-                "Google rejected the redirect URI for this app. "
-                + _google_redirect_uri_setup_hint(redirect_uri)
-            )
-        else:
-            st.error(f"Google sign-in was cancelled or failed: {description}")
-        _clear_oauth_query_params()
-        return True
-
-    code = _query_param("code")
-    state = _query_param("state")
-    if not code or not state:
-        return False
-
-    signin_state = _consume_google_signin_state(state)
-    if not signin_state:
-        st.warning(
-            "Sign-in session expired or was already used. "
-            "Click **Continue with Google** to try again."
-        )
-        _clear_oauth_query_params()
-        return True
-
-    nonce, redirect_uri = signin_state
-    with st.spinner("Completing Google sign-in..."):
-        supabase = get_supabase()
-        try:
-            tokens = _exchange_google_auth_code(code, redirect_uri)
-            id_token = tokens.get("id_token")
-            if not id_token:
-                raise ValueError("Google did not return an ID token.")
-
-            response = supabase.auth.sign_in_with_id_token(
-                {"provider": "google", "token": str(id_token), "nonce": nonce}
-            )
-            if response.session:
-                _persist_session(response.session)
-            else:
-                st.error("Google sign-in did not return a session. Please try again.")
-        except (APIError, ValueError, TypeError) as exc:
-            report_error(log, "google_signin_exchange_failed", exc)
-            message = str(exc)
-            if "redirect_uri_mismatch" in message.lower():
-                st.error(
-                    "Google token exchange failed: redirect URI mismatch. "
-                    + _google_redirect_uri_setup_hint(redirect_uri)
-                )
-            else:
-                st.error(f"Sign-in failed: {exc}")
-        finally:
-            _clear_oauth_query_params()
-
-    return True
-
-
 def get_supabase() -> Client:
     """Return a Supabase client with Streamlit-backed auth storage."""
     url = _get_secret("SUPABASE_URL")
@@ -414,7 +235,7 @@ def _configured_redirect_url() -> str | None:
 
 
 def _get_redirect_url() -> str:
-    """OAuth redirect URI — must match Google Web OAuth authorized redirect URIs."""
+    """App URL Google returns to after Supabase completes OAuth (redirect allow-list)."""
     context_url = _current_app_url()
     configured = _configured_redirect_url()
 
@@ -454,22 +275,97 @@ def _oauth_redirect_config_warning() -> str | None:
                 f"`{configured}`, but this app runs at `{context_url}`. After Google "
                 f"approves access, the browser is sent to localhost instead of back here. "
                 f"Update Streamlit Cloud secrets to "
-                f"`OAUTH_REDIRECT_URL = \"{context_url}\"` and add `{context_url}` as an "
-                f"Authorized redirect URI on your Google Web OAuth client."
+                f"`OAUTH_REDIRECT_URL = \"{context_url}\"` and add `{context_url}` under "
+                f"Supabase → Authentication → URL Configuration → Redirect URLs."
             )
         return (
             f"**Google sign-in is misconfigured.** `OAUTH_REDIRECT_URL` (`{configured}`) "
-            f"does not match this app (`{context_url}`). Update Streamlit secrets and your "
-            f"Google Web OAuth redirect URIs."
+            f"does not match this app (`{context_url}`). Update Streamlit secrets and the "
+            f"Supabase redirect allow-list."
         )
 
     if not configured and not _is_localhost_url(context_url):
         return (
             f"For Google sign-in on Streamlit Cloud, set "
             f"`OAUTH_REDIRECT_URL = \"{context_url}\"` in app secrets and add `{context_url}` "
-            f"as an Authorized redirect URI on your Google Web OAuth client."
+            f"to Supabase → Authentication → URL Configuration → Redirect URLs."
         )
     return None
+
+
+def _get_pkce_session_id() -> str:
+    """Stable id for this OAuth attempt; echoed in redirect_to as pkce_sid."""
+    sid = st.session_state.get("pkce_session_id")
+    if not sid:
+        sid = secrets.token_urlsafe(32)
+        st.session_state["pkce_session_id"] = sid
+    return sid
+
+
+def _redirect_url_with_pkce_sid() -> str:
+    """Redirect URL including pkce_sid so callback can load verifier from Supabase."""
+    base = _get_redirect_url()
+    sid = _get_pkce_session_id()
+    separator = "&" if "?" in base else "?"
+    return f"{base}{separator}pkce_sid={sid}"
+
+
+def _generate_pkce_pair() -> tuple[str, str]:
+    """Return (code_verifier, code_challenge) for OAuth PKCE."""
+    code_verifier = secrets.token_urlsafe(64)[:128]
+    digest = hashlib.sha256(code_verifier.encode("utf-8")).digest()
+    code_challenge = base64.urlsafe_b64encode(digest).decode("utf-8").rstrip("=")
+    return code_verifier, code_challenge
+
+
+def _save_pending_pkce(code_verifier: str, code_challenge: str = "") -> None:
+    """Persist PKCE verifier in Supabase (survives Streamlit session reset on redirect)."""
+    sid = _get_pkce_session_id()
+    supabase = get_supabase()
+    try:
+        supabase.rpc(
+            "store_oauth_pkce",
+            {
+                "p_session_id": sid,
+                "p_code_verifier": code_verifier,
+                "p_code_challenge": code_challenge or "",
+            },
+        ).execute()
+    except APIError as exc:
+        report_error(log, "pkce_store_failed", exc, pkce_session_id=sid[:8] + "…")
+        raise
+    st.session_state["pkce_code_verifier"] = code_verifier
+    log.info("pkce_stored", pkce_session_id=sid[:8] + "…")
+
+
+def _load_pending_pkce() -> dict[str, Any] | None:
+    """Load and consume PKCE material from Supabase using pkce_sid."""
+    sid = _query_param("pkce_sid") or st.session_state.get("pkce_session_id")
+    if not sid:
+        return None
+
+    supabase = get_supabase()
+    response = supabase.rpc("consume_oauth_pkce", {"p_session_id": sid}).execute()
+    rows = response.data or []
+    if not rows:
+        log.warning("pkce_not_found", pkce_session_id=str(sid)[:8] + "…")
+        return None
+
+    row = rows[0]
+    return {
+        "code_verifier": row.get("code_verifier"),
+        "code_challenge": row.get("code_challenge") or "",
+    }
+
+
+def _clear_pending_pkce() -> None:
+    """Remove pending PKCE row if still present."""
+    sid = st.session_state.get("pkce_session_id") or _query_param("pkce_sid")
+    if not sid:
+        return
+    supabase = get_supabase()
+    supabase.rpc("consume_oauth_pkce", {"p_session_id": sid}).execute()
+    st.session_state.pop("pkce_session_id", None)
 
 
 def _query_param(name: str) -> str | None:
@@ -486,7 +382,15 @@ def _clear_query_param(name: str) -> None:
 
 def _clear_oauth_query_params(*, keep_handoff: bool = False) -> None:
     """Remove OAuth callback params so the user can retry cleanly."""
-    for key in ("code", "state", "error", "error_description", "scope"):
+    for key in (
+        "code",
+        "state",
+        "error",
+        "error_description",
+        "pkce_verifier",
+        "pkce_sid",
+        "scope",
+    ):
         _clear_query_param(key)
     if not keep_handoff:
         _clear_query_param("auth_handoff")
@@ -576,9 +480,59 @@ def _restore_auth_handoff() -> bool:
         "id": str(row.get("user_id")),
         "email": row.get("user_email") or "",
     }
+    st.session_state.pop("google_oauth_url", None)
     st.session_state.pop("google_signin_url", None)
     log.info("oauth_handoff_restored", handoff_id=handoff_id[:8] + "…")
     return True
+
+
+def _extract_verifier_from_auth_client(supabase: Client) -> str | None:
+    """Read PKCE verifier the Supabase SDK stored when starting OAuth."""
+    storage = getattr(supabase.auth, "_storage", None)
+    if storage is None:
+        return None
+
+    candidates = ["code_verifier", "pkce_code_verifier"]
+    storage_key = getattr(supabase.auth, "_storage_key", "")
+    if storage_key:
+        candidates.insert(0, f"{storage_key}-code-verifier")
+
+    for key in candidates:
+        try:
+            value = storage.get_item(key)
+            if value:
+                return str(value)
+        except Exception:
+            continue
+
+    for key, value in st.session_state.items():
+        if "code-verifier" in str(key).lower():
+            return str(value)
+    return None
+
+
+def _read_pkce_verifier(supabase: Client | None = None) -> str | None:
+    """Read PKCE verifier — Supabase first (survives redirect), then session/SDK."""
+    pending = _load_pending_pkce()
+    if pending and pending.get("code_verifier"):
+        verifier = str(pending["code_verifier"])
+        st.session_state["pkce_code_verifier"] = verifier
+        return verifier
+
+    if st.session_state.get("pkce_code_verifier"):
+        return str(st.session_state["pkce_code_verifier"])
+
+    pkce_param = _query_param("pkce_verifier")
+    if pkce_param:
+        st.session_state["pkce_code_verifier"] = pkce_param
+        return pkce_param
+
+    if supabase is not None:
+        sdk_verifier = _extract_verifier_from_auth_client(supabase)
+        if sdk_verifier:
+            return sdk_verifier
+
+    return None
 
 
 def _persist_session(session: Any) -> None:
@@ -588,7 +542,10 @@ def _persist_session(session: Any) -> None:
         "id": str(session.user.id),
         "email": session.user.email or "",
     }
+    st.session_state.pop("pkce_code_verifier", None)
+    st.session_state.pop("google_oauth_url", None)
     st.session_state.pop("google_signin_url", None)
+    _clear_pending_pkce()
 
 
 def _clear_auth_state() -> None:
@@ -599,12 +556,108 @@ def _clear_auth_state() -> None:
                 "user",
                 "sb_access_token",
                 "sb_refresh_token",
+                "pkce_code_verifier",
+                "google_oauth_url",
                 "google_signin_url",
                 "google_signin_redirect",
             )
             or str(key).startswith(StreamlitAuthStorage.PREFIX)
         ):
             st.session_state.pop(key, None)
+    _clear_pending_pkce()
+
+
+def _oauth_handoff_id() -> str:
+    """Stable id echoed in redirect_to and reused for post-login handoff."""
+    return _query_param("pkce_sid") or _get_pkce_session_id()
+
+
+def process_auth_callback() -> bool:
+    """
+    Handle Supabase Google OAuth callback query params.
+    Returns True when callback was processed (success or error shown).
+    """
+    oauth_error = _query_param("error")
+    if oauth_error:
+        description = _query_param("error_description") or oauth_error
+        st.error(f"Google sign-in was cancelled or failed: {description}")
+        _clear_oauth_query_params()
+        _clear_pending_pkce()
+        return True
+
+    code = _query_param("code")
+    if not code:
+        return False
+
+    with st.spinner("Completing Google sign-in..."):
+        supabase = get_supabase()
+        code_verifier = _read_pkce_verifier(supabase)
+        if not code_verifier:
+            st.warning(
+                "Could not verify sign-in session. Click **Refresh Google sign-in link**, "
+                "then **Continue with Google** again."
+            )
+            return True
+
+        try:
+            response = supabase.auth.exchange_code_for_session(
+                {"auth_code": code, "code_verifier": code_verifier}
+            )
+            handoff_id = _oauth_handoff_id()
+            _save_auth_handoff(handoff_id, response.session)
+            _persist_session(response.session)
+            st.query_params["auth_handoff"] = handoff_id
+            _clear_oauth_query_params(keep_handoff=True)
+        except (APIError, ValueError, TypeError) as exc:
+            report_error(log, "oauth_exchange_failed", exc)
+            st.error(f"Sign-in failed: {exc}")
+            _clear_oauth_query_params()
+            _clear_pending_pkce()
+
+    return True
+
+
+def login_with_google() -> str:
+    """
+    Build Google OAuth URL via Supabase Auth (PKCE).
+
+    Google redirect goes to Supabase's callback URL (already registered when you
+    configured Google in Supabase). The user is then sent back to this app.
+    """
+    redirect_to = _redirect_url_with_pkce_sid()
+    supabase = get_supabase()
+
+    try:
+        response = supabase.auth.sign_in_with_oauth(
+            {
+                "provider": "google",
+                "options": {"redirect_to": redirect_to},
+            }
+        )
+        if response.url:
+            verifier = _extract_verifier_from_auth_client(supabase)
+            if verifier:
+                _save_pending_pkce(verifier)
+                return response.url
+            log.warning("oauth_verifier_not_extracted")
+    except (APIError, ValueError, TypeError) as exc:
+        report_error(log, "oauth_sign_in_sdk_failed", exc, level="warning")
+
+    code_verifier, code_challenge = _generate_pkce_pair()
+    _save_pending_pkce(code_verifier, code_challenge)
+
+    supabase_url = _get_secret("SUPABASE_URL").rstrip("/")
+    api_key = _get_secret("SUPABASE_KEY")
+    query = urlencode(
+        {
+            "provider": "google",
+            "redirect_to": redirect_to,
+            "code_challenge": code_challenge,
+            "code_challenge_method": "S256",
+            "apikey": api_key,
+        }
+    )
+    return f"{supabase_url}/auth/v1/authorize?{query}"
 
 
 def sign_in_with_email(email: str, password: str) -> None:
@@ -827,7 +880,7 @@ def render_login_page() -> bool:
     Full login / sign-up screen.
     Returns True when the user is authenticated.
     """
-    process_google_signin_callback()
+    process_auth_callback()
     _restore_auth_handoff()
     restore_session_from_tokens()
 
@@ -849,36 +902,25 @@ def render_login_page() -> bool:
                 st.warning(redirect_warning)
 
             try:
-                if not _get_google_web_client_id():
-                    st.error(
-                        "Google sign-in is not configured. Add `GOOGLE_WEB_CLIENT_ID` to secrets."
-                    )
-                elif not _get_google_web_client_secret():
-                    st.error(
-                        "Google sign-in needs `GOOGLE_WEB_CLIENT_SECRET` in Streamlit secrets. "
-                        "In Google Cloud Console → Credentials → your **Web** OAuth client "
-                        f"(`{_get_google_web_client_id()}`), copy **Client secret** into "
-                        "`.streamlit/secrets.toml` and Streamlit Cloud secrets. "
-                        "Do not use `GOOGLE_CLIENT_SECRET` (that is the Desktop Gmail client)."
-                    )
-                else:
-                    redirect_to = _get_redirect_url()
-                    cached_redirect = st.session_state.get("google_signin_redirect")
-                    if (
-                        not st.session_state.get("google_signin_url")
-                        or cached_redirect != redirect_to
-                    ):
-                        st.session_state["google_signin_redirect"] = redirect_to
-                        st.session_state["google_signin_url"] = build_google_signin_url(
-                            redirect_to
-                        )
-                    _render_google_signin_button(st.session_state["google_signin_url"])
-                    st.caption(
-                        "You will return here automatically after Google approves access."
-                    )
-                    if not _is_localhost_url(redirect_to):
-                        with st.expander("Google OAuth setup (admin)", expanded=False):
-                            st.markdown(_google_redirect_uri_setup_hint(redirect_to))
+                redirect_to = _redirect_url_with_pkce_sid()
+                cached_redirect = st.session_state.get("google_oauth_redirect")
+                if (
+                    not st.session_state.get("google_oauth_url")
+                    or cached_redirect != redirect_to
+                ):
+                    st.session_state["google_oauth_redirect"] = redirect_to
+                    st.session_state["google_oauth_url"] = login_with_google()
+                _render_google_signin_button(st.session_state["google_oauth_url"])
+                if st.button("Refresh Google sign-in link", use_container_width=True):
+                    st.session_state.pop("google_oauth_url", None)
+                    st.session_state.pop("google_oauth_redirect", None)
+                    st.session_state.pop("pkce_code_verifier", None)
+                    st.session_state.pop("pkce_session_id", None)
+                    _clear_pending_pkce()
+                    st.rerun()
+                st.caption(
+                    "You will return here automatically after Google approves access."
+                )
             except Exception as exc:
                 st.error(f"Google sign-in is unavailable: {exc}")
 
