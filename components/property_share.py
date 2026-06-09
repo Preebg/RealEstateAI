@@ -119,11 +119,17 @@ def render_share_popover(
                     resolved_id,
                     active_property,
                 )
-                sales_comps = active_property.get("comps_analysis", {}).get(
-                    "comparable_properties"
+                comps = active_property.get("comps_analysis")
+                rent_comps_data = active_property.get("rent_comps_analysis")
+                sales_comps = (
+                    comps.get("comparable_properties")
+                    if isinstance(comps, dict)
+                    else None
                 )
-                rent_comps = active_property.get("rent_comps_analysis", {}).get(
-                    "comparable_rentals"
+                rent_comps = (
+                    rent_comps_data.get("comparable_rentals")
+                    if isinstance(rent_comps_data, dict)
+                    else None
                 )
                 if sales_comps and not snapshot_saved:
                     st.warning(

@@ -6,6 +6,7 @@ import streamlit as st
 
 from authenticate import render_auth_page
 from app_nav import INDIVIDUAL_SEARCH_PAGE, MAP_OPEN_ADDRESS_KEY, consume_nav_target
+from legal import render_legal_page, requested_legal_path
 from ui_theme import inject_app_css, render_app_footer_glossary
 
 
@@ -22,6 +23,12 @@ st.set_page_config(
 )
 
 inject_app_css()
+
+legal_path = requested_legal_path()
+if legal_path:
+    render_legal_page(legal_path)
+    render_app_footer_glossary()
+    st.stop()
 
 authenticated = render_auth_page()
 

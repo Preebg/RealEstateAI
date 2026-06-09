@@ -105,6 +105,21 @@ def inject_app_css() -> None:
             color: var(--text-color);
             opacity: 0.68;
         }
+        .app-footer-legal {
+            margin-top: 0.55rem;
+            font-size: 0.78rem;
+            line-height: 1.45;
+            color: var(--text-color);
+            opacity: 0.68;
+            text-align: center;
+        }
+        .app-footer-legal a {
+            color: var(--primary-color);
+            text-decoration: none;
+        }
+        .app-footer-legal a:hover {
+            text-decoration: underline;
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -112,7 +127,9 @@ def inject_app_css() -> None:
 
 
 def render_app_footer_glossary() -> None:
-    """One-line glossary clarifying alignment scores vs financial risk."""
+    """Footer glossary plus Terms of Service and Privacy Policy links."""
+    from legal import render_legal_footer_links
+
     st.markdown(
         '<p class="app-footer-glossary">'
         "<strong>Quantum Alignment Score</strong> measures how well the QAOA optimizer "
@@ -120,6 +137,7 @@ def render_app_footer_glossary() -> None:
         "</p>",
         unsafe_allow_html=True,
     )
+    render_legal_footer_links()
 
 
 def render_confidence_badge(score: float, *, show_pct: bool = True) -> str:
