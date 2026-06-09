@@ -911,8 +911,13 @@ def render_login_page() -> bool:
 
     left, center, right = st.columns([1, 1.2, 1])
     with center:
-        st.markdown(f"## 🏠 {APP_NAME}")
-        st.caption("Sign in to access your private knowledge base and run analyses.")
+        st.markdown('<span class="login-card-marker"></span>', unsafe_allow_html=True)
+        st.markdown(
+            f'<div class="login-brand"><h2>🏠 {APP_NAME}</h2>'
+            '<p>Sign in to access your private knowledge base and run analyses.</p>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
 
         login_tab, signup_tab = st.tabs(["Log in", "Sign up"])
 

@@ -305,70 +305,75 @@ def render_analysis_results(
     loan_term = loan_params["loan_term"]
 
     st.divider()
-    header_col1, header_col2, header_col3 = st.columns([2, 1, 1])
-    with header_col1:
-        st.subheader("📊 Analysis Overview")
-        share_property_id = property_id
-        render_share_popover(
-            guest_mode=guest_mode,
-            share_property_id=share_property_id,
-            from_kb=from_kb,
-            property_info=property_info,
-            address=address,
-        )
+    st.subheader("📊 Analysis Overview")
+    share_property_id = property_id
+    render_share_popover(
+        guest_mode=guest_mode,
+        share_property_id=share_property_id,
+        from_kb=from_kb,
+        property_info=property_info,
+        address=address,
+    )
     render_pending_share_clipboard_copy()
 
     quantum_ready = isinstance(quantum_risk, dict) and bool(quantum_risk)
-    with header_col2:
-        if quantum_ready:
-            st.metric(
-                label="⚛️ Cash Flow Success",
-                value=f"{quantum_risk['cashflow_success_pct']:.1f}%",
-                help="QAOA alignment with positive cash-flow targets (0–100%).",
-            )
-        else:
-            _pending_metric(
-                "⚛️ Cash Flow Success",
-                help_text="QAOA alignment with positive cash-flow targets (0–100%).",
-            )
-    with header_col3:
-        if quantum_ready:
-            st.metric(
-                label="📈 Appreciation Success",
-                value=f"{quantum_risk['appreciation_success_pct']:.1f}%",
-                help="QAOA alignment with appreciation forecast targets (0–100%).",
-            )
-        else:
-            _pending_metric(
-                "📈 Appreciation Success",
-                help_text="QAOA alignment with appreciation forecast targets (0–100%).",
-            )
+    with st.container():
+        st.markdown('<span class="quantum-scores-marker"></span>', unsafe_allow_html=True)
+        st.markdown(
+            '<div class="quantum-scores-title">⚛️ Quantum Alignment Scores</div>',
+            unsafe_allow_html=True,
+        )
+        qrow1_col1, qrow1_col2 = st.columns(2)
+        with qrow1_col1:
+            if quantum_ready:
+                st.metric(
+                    label="Cash Flow Success",
+                    value=f"{quantum_risk['cashflow_success_pct']:.1f}%",
+                    help="QAOA alignment with positive cash-flow targets (0–100%).",
+                )
+            else:
+                _pending_metric(
+                    "Cash Flow Success",
+                    help_text="QAOA alignment with positive cash-flow targets (0–100%).",
+                )
+        with qrow1_col2:
+            if quantum_ready:
+                st.metric(
+                    label="Appreciation Success",
+                    value=f"{quantum_risk['appreciation_success_pct']:.1f}%",
+                    help="QAOA alignment with appreciation forecast targets (0–100%).",
+                )
+            else:
+                _pending_metric(
+                    "Appreciation Success",
+                    help_text="QAOA alignment with appreciation forecast targets (0–100%).",
+                )
 
-    qcol1, qcol2 = st.columns(2)
-    with qcol1:
-        if quantum_ready:
-            st.metric(
-                label="💰 Combined Wealth Success",
-                value=f"{quantum_risk['combined_wealth_success_pct']:.1f}%",
-                help="Joint cash-flow and appreciation alignment from QAOA (0–100%).",
-            )
-        else:
-            _pending_metric(
-                "💰 Combined Wealth Success",
-                help_text="Joint cash-flow and appreciation alignment from QAOA (0–100%).",
-            )
-    with qcol2:
-        if quantum_ready:
-            st.metric(
-                label="⚛️ Quantum Alignment Score",
-                value=f"{quantum_risk['overall_success_pct']:.1f}%",
-                help="Weighted overall QAOA alignment across cash flow, appreciation, and location.",
-            )
-        else:
-            _pending_metric(
-                "⚛️ Quantum Alignment Score",
-                help_text="Weighted overall QAOA alignment across cash flow, appreciation, and location.",
-            )
+        qrow2_col1, qrow2_col2 = st.columns(2)
+        with qrow2_col1:
+            if quantum_ready:
+                st.metric(
+                    label="Combined Wealth Success",
+                    value=f"{quantum_risk['combined_wealth_success_pct']:.1f}%",
+                    help="Joint cash-flow and appreciation alignment from QAOA (0–100%).",
+                )
+            else:
+                _pending_metric(
+                    "Combined Wealth Success",
+                    help_text="Joint cash-flow and appreciation alignment from QAOA (0–100%).",
+                )
+        with qrow2_col2:
+            if quantum_ready:
+                st.metric(
+                    label="Overall Alignment Score",
+                    value=f"{quantum_risk['overall_success_pct']:.1f}%",
+                    help="Weighted overall QAOA alignment across cash flow, appreciation, and location.",
+                )
+            else:
+                _pending_metric(
+                    "Overall Alignment Score",
+                    help_text="Weighted overall QAOA alignment across cash flow, appreciation, and location.",
+                )
 
     tab1 = st.tabs(["📋 Detailed Metrics"])[0]
 

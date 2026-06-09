@@ -8,27 +8,27 @@ enableStaticServing = true
 base = "light"
 
 [theme.light]
-primaryColor = "#2563eb"
-backgroundColor = "#ffffff"
-secondaryBackgroundColor = "#f4f7fb"
-textColor = "#1f2937"
-linkColor = "#2563eb"
-borderColor = "#e3e8ef"
+primaryColor = "#4f46e5"
+backgroundColor = "#fafbfe"
+secondaryBackgroundColor = "#f0f2f8"
+textColor = "#1a1a2e"
+linkColor = "#4f46e5"
+borderColor = "#e0e4ef"
 
 [theme.light.sidebar]
-backgroundColor = "#f8fafc"
+backgroundColor = "#f4f5fb"
 secondaryBackgroundColor = "#ffffff"
-textColor = "#1f2937"
+textColor = "#1a1a2e"
 
 [theme.dark]
-primaryColor = "#60a5fa"
-backgroundColor = "#0e1117"
-secondaryBackgroundColor = "#1a1f2e"
-textColor = "#f3f4f6"
-linkColor = "#60a5fa"
-borderColor = "#374151"
+primaryColor = "#818cf8"
+backgroundColor = "#0b0f1a"
+secondaryBackgroundColor = "#131927"
+textColor = "#e8eaf0"
+linkColor = "#818cf8"
+borderColor = "#1e2640"
 
 [theme.dark.sidebar]
-backgroundColor = "#161b22"
-secondaryBackgroundColor = "#1f2937"
-textColor = "#f3f4f6"
+backgroundColor = "#0e1320"
+secondaryBackgroundColor = "#161d2e"
+textColor = "#e8eaf0"
