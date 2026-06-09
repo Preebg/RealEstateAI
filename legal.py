@@ -144,7 +144,7 @@ def render_legal_page(path: str) -> None:
         return
 
     st.caption(f"Last updated {EFFECTIVE_DATE}.")
-    st.page_link("AIUnderwriterv2.py", label="Back to sign in", icon="←")
+    st.page_link("AIUnderwriterv2.py", label="Back to sign in")
 
 
 def render_legal_footer_links(*, prefix: str = "") -> None:
