@@ -561,6 +561,20 @@ def resolve_coordinates_local(
 MAP_MARKER_CLUSTER_THRESHOLD = 75
 
 
+def _has_stored_coordinates(lat: Any, lon: Any) -> bool:
+    """True only for finite DB-grounded coordinates (pandas NaN counts as missing)."""
+    if lat is None or lon is None:
+        return False
+    try:
+        if pd.isna(lat) or pd.isna(lon):
+            return False
+        lat_f = float(lat)
+        lon_f = float(lon)
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(lat_f) and math.isfinite(lon_f)
+
+
 def attach_coordinates(df: pd.DataFrame) -> pd.DataFrame:
     """Prefer Maps-grounded lat/lon; fall back to ZIP centroids and market centers."""
     if df.empty:
@@ -572,7 +586,7 @@ def attach_coordinates(df: pd.DataFrame) -> pd.DataFrame:
     for row in enriched.itertuples(index=False):
         stored_lat = getattr(row, "lat", None)
         stored_lon = getattr(row, "lon", None)
-        if stored_lat is not None and stored_lon is not None:
+        if _has_stored_coordinates(stored_lat, stored_lon):
             latitudes.append(float(stored_lat))
             longitudes.append(float(stored_lon))
             continue

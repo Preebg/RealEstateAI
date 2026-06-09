@@ -668,6 +668,26 @@ class TestGeospatialEnrichment(unittest.TestCase):
         self.assertAlmostEqual(float(enriched.iloc[0]["lat"]), 43.15612, places=4)
         self.assertAlmostEqual(float(enriched.iloc[0]["lon"]), -77.60845, places=4)
 
+    def test_attach_coordinates_falls_back_when_lat_lon_are_nan(self):
+        """Missing DB coords become NaN in float columns; must still geocode locally."""
+        from portfolio_map_page import attach_coordinates
+        import pandas as pd
+
+        df = pd.DataFrame(
+            [
+                {
+                    "address": "210 Everclay Dr, Rochester, NY 14618",
+                    "zip_code": "14618",
+                    "market_city": "Rochester",
+                    "lat": None,
+                    "lon": None,
+                }
+            ]
+        )
+        enriched = attach_coordinates(df)
+        self.assertTrue(enriched["lat"].notna().iloc[0])
+        self.assertTrue(enriched["lon"].notna().iloc[0])
+
 
 class TestHarvestSkipLogic(unittest.TestCase):
     def test_skip_synthesis_on_zero_price(self):

@@ -433,19 +433,36 @@ def get_supabase_client() -> Client:
 
 
 def fetch_outreach_candidates(supabase: Client, *, limit: int | None = None) -> list[dict[str, Any]]:
-    query = (
-        supabase.table("properties")
-        .select("*")
-        .eq("email_drafted", False)
-        .order("timestamp", desc=False)
-    )
-    if limit is not None:
-        query = query.limit(max(limit * 4, limit))
-    rows = query.execute().data or []
-    eligible = [row for row in rows if passes_all_filters(row)]
-    if limit is not None:
-        eligible = eligible[:limit]
-    return eligible
+    """Scan undrafted properties in timestamp order until enough pass all filters."""
+    eligible: list[dict[str, Any]] = []
+    page_size = 200
+    offset = 0
+    target = limit if limit is not None else None
+
+    while target is None or len(eligible) < target:
+        end = offset + page_size - 1
+        rows = (
+            supabase.table("properties")
+            .select("*")
+            .eq("email_drafted", False)
+            .order("timestamp", desc=False)
+            .range(offset, end)
+            .execute()
+            .data
+            or []
+        )
+        if not rows:
+            break
+        for row in rows:
+            if passes_all_filters(row):
+                eligible.append(row)
+                if target is not None and len(eligible) >= target:
+                    return eligible[:target]
+        if len(rows) < page_size:
+            break
+        offset += page_size
+
+    return eligible if target is None else eligible[:target]
 
 
 def mark_email_drafted(supabase: Client, property_id: str) -> None:
@@ -475,11 +492,19 @@ def get_gmail_service():
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
         else:
+            print(
+                "\nGmail sign-in required — a browser will open on http://localhost:8080\n"
+                "Sign in with the Gmail account where you want DRAFTS saved.\n"
+                "(Drafts appear under Gmail → Drafts, not the Inbox.)\n"
+            )
             flow = InstalledAppFlow.from_client_config(build_google_client_config(), GMAIL_SCOPES)
             creds = flow.run_local_server(port=8080, open_browser=True)
         TOKEN_PATH.write_text(creds.to_json(), encoding="utf-8")
 
-    return build("gmail", "v1", credentials=creds)
+    service = build("gmail", "v1", credentials=creds)
+    profile = service.users().getProfile(userId="me").execute()
+    print(f"Gmail authenticated as: {profile.get('emailAddress')} (drafts → Drafts folder)\n")
+    return service
 
 
 def create_gmail_draft_with_attachment(
@@ -577,10 +602,24 @@ def process_property(
     return result
 
 
+def list_eligible_properties(supabase: Client, *, limit: int = 20) -> None:
+    candidates = fetch_outreach_candidates(supabase, limit=limit)
+    print(f"Eligible properties (showing up to {limit}): {len(candidates)}")
+    for row in candidates:
+        tag = row.get("strategy_tag") or row.get("property_label")
+        print(
+            f"  - {row.get('address')} | {tag} | "
+            f"price ${safe_float(row.get('price')):,.0f} | "
+            f"est ${resolve_predicted_value(row):,.0f} | "
+            f"CF ${resolve_monthly_cash_flow(row):,.0f}/mo"
+        )
+
+
 def run_pipeline(
     *,
     dry_run: bool = False,
     agents_only: bool = False,
+    list_only: bool = False,
     limit: int | None = None,
     delay_sec: float = DEFAULT_INTER_PROPERTY_DELAY_SEC,
     agent1_model: str = AGENT1_MODEL,
@@ -594,13 +633,23 @@ def run_pipeline(
 
     report: dict[str, Any] = {
         "candidates": len(candidates),
-        "drafted": [],
+        "gmail_drafts": [],
+        "dry_run": [],
         "skipped": [],
         "errors": [],
     }
     if not candidates:
         print("No properties match outreach filters (strategy + undervalued + positive cash flow).")
         return report
+
+    if list_only:
+        list_eligible_properties(supabase, limit=limit or 20)
+        return report
+
+    if dry_run:
+        print("DRY-RUN mode — no Gmail drafts will be created and email_drafted will NOT be updated.\n")
+    elif agents_only:
+        print("AGENTS-ONLY mode — agents + PDFs only; no Gmail or Supabase updates.\n")
 
     gmail_service = None
     if not dry_run and not agents_only:
@@ -617,8 +666,12 @@ def run_pipeline(
                 dry_run=dry_run,
                 agents_only=agents_only,
             )
-            bucket = report["drafted"] if outcome["status"] in {"drafted", "dry_run", "agents_only"} else report["skipped"]
-            bucket.append(outcome)
+            if outcome["status"] == "drafted":
+                report["gmail_drafts"].append(outcome)
+            elif outcome["status"] in {"dry_run", "agents_only"}:
+                report["dry_run"].append(outcome)
+            else:
+                report["skipped"].append(outcome)
         except Exception as exc:
             msg = f"{row.get('address')}: {exc}"
             print(f"  ERROR: {msg}", file=sys.stderr)
@@ -640,6 +693,11 @@ def main() -> int:
         action="store_true",
         help="Run both agents and build PDFs; skip Gmail and Supabase updates.",
     )
+    parser.add_argument(
+        "--list",
+        action="store_true",
+        help="List eligible properties only (no Gemini, no Gmail).",
+    )
     parser.add_argument("--limit", type=int, default=None, help="Max eligible properties to process.")
     parser.add_argument(
         "--delay",
@@ -654,15 +712,35 @@ def main() -> int:
     report = run_pipeline(
         dry_run=args.dry_run,
         agents_only=args.agents_only,
+        list_only=args.list,
         limit=args.limit,
         delay_sec=args.delay,
         agent1_model=args.model_agent1,
         agent2_model=args.model_agent2,
     )
-    drafted = len(report["drafted"])
+    if args.list:
+        return 0
+
+    gmail_count = len(report["gmail_drafts"])
     skipped = len(report["skipped"])
     errors = len(report["errors"])
-    print(f"\nDone — eligible: {report['candidates']}, processed: {drafted}, skipped: {skipped}, errors: {errors}")
+    print(
+        f"\nDone — eligible: {report['candidates']}, "
+        f"gmail_drafts_created: {gmail_count}, "
+        f"skipped_no_agent_email: {skipped}, "
+        f"errors: {errors}"
+    )
+    if args.dry_run and report.get("dry_run"):
+        print("Reminder: --dry-run never writes to Gmail. Re-run without --dry-run to create drafts.")
+    elif gmail_count == 0 and not args.dry_run and not args.agents_only:
+        print(
+            "No Gmail drafts were created. Common causes:\n"
+            "  1) Agent could not find a listing-agent email (check skipped count above)\n"
+            "  2) Gmail OAuth was cancelled or used a different account\n"
+            "  3) Look in Gmail → Drafts (left sidebar), not Inbox"
+        )
+    elif gmail_count > 0:
+        print(f"Open Gmail → Drafts to review {gmail_count} draft(s).")
     return 1 if errors else 0
 
 

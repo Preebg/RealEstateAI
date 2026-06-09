@@ -91,12 +91,28 @@ def _fetch_canonical_properties() -> list[dict[str, Any]]:
             return fetch_guest_portfolio()
 
     supabase = get_client()
+    page_size = 500
+    offset = 0
+    rows: list[dict[str, Any]] = []
     try:
-        response = supabase.table("properties").select("*").execute()
+        while True:
+            end = offset + page_size - 1
+            response = (
+                supabase.table("properties")
+                .select("*")
+                .order("timestamp", desc=False)
+                .range(offset, end)
+                .execute()
+            )
+            batch = response.data or []
+            rows.extend(batch)
+            if len(batch) < page_size:
+                break
+            offset += page_size
     except APIError as exc:
         report_error(log, "kb_canonical_fetch_failed", exc)
-        return []
-    return response.data or []
+        return rows
+    return rows
 
 
 def _fetch_user_overrides_map(user_id: str) -> dict[str, dict[str, Any]]:
