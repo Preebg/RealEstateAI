@@ -254,25 +254,9 @@ def save_share_comps_snapshot(
     if client is None:
         return False
 
-    params: dict[str, Any] = {
-        "p_share_token": str(share_token).strip(),
-        "p_property_id": str(property_id),
-    }
-    if has_sales:
-        params["p_comps_analysis"] = comps
-        if property_data.get("predicted_value") is not None:
-            params["p_predicted_value"] = float(property_data["predicted_value"])
-        if property_data.get("prediction_reasoning"):
-            params["p_prediction_reasoning"] = str(property_data["prediction_reasoning"])
-    if has_rent:
-        params["p_rent_comps_analysis"] = rent_comps
-
-    try:
-        response = client.rpc("save_share_comps_snapshot", params).execute()
-    except APIError as exc:
-        report_error(log, "share_comps_snapshot_failed", exc, property_id=property_id)
-        return False
-    return bool(response.data)
+    return _save_share_comps_snapshot_with_client(
+        client, share_token, property_id, property_data
+    )
 
 
 def create_property_share_link(
@@ -328,15 +312,131 @@ def create_property_share_link(
     return token
 
 
+def build_share_url_with_base(share_token: str, base_url: str) -> str:
+    """Full guest URL using an explicit app origin (production or local dev)."""
+    cleaned = base_url.strip().rstrip("/")
+    parts = urlsplit(cleaned)
+    origin = (
+        f"{parts.scheme}://{parts.netloc}"
+        if parts.scheme and parts.netloc
+        else cleaned
+    )
+    return f"{origin}?{urlencode({'share': share_token})}"
+
+
 def build_share_url(share_token: str) -> str:
     """Full URL a friend can open without signing in."""
     from authenticate import _current_app_url, _get_redirect_url
 
     base = _current_app_url() or _get_redirect_url()
-    parts = urlsplit(base)
-    origin = f"{parts.scheme}://{parts.netloc}" if parts.scheme and parts.netloc else base
-    query = urlencode({"share": share_token})
-    return f"{origin}?{query}"
+    return build_share_url_with_base(share_token, base)
+
+
+def _save_share_comps_snapshot_with_client(
+    client: Any,
+    share_token: str,
+    property_id: str,
+    property_data: dict[str, Any],
+) -> bool:
+    """Freeze comps on a share row using the provided Supabase client."""
+    comps = property_data.get("comps_analysis")
+    rent_comps = property_data.get("rent_comps_analysis")
+    has_sales = isinstance(comps, dict) and bool(comps.get("comparable_properties"))
+    has_rent = isinstance(rent_comps, dict) and bool(rent_comps.get("comparable_rentals"))
+    if not has_sales and not has_rent:
+        return False
+
+    params: dict[str, Any] = {
+        "p_share_token": str(share_token).strip(),
+        "p_property_id": str(property_id),
+    }
+    if has_sales:
+        params["p_comps_analysis"] = comps
+        if property_data.get("predicted_value") is not None:
+            params["p_predicted_value"] = float(property_data["predicted_value"])
+        if property_data.get("prediction_reasoning"):
+            params["p_prediction_reasoning"] = str(property_data["prediction_reasoning"])
+    if has_rent:
+        params["p_rent_comps_analysis"] = rent_comps
+
+    try:
+        response = client.rpc("save_share_comps_snapshot", params).execute()
+    except APIError as exc:
+        report_error(log, "share_comps_snapshot_failed", exc, property_id=property_id)
+        return False
+    return bool(response.data)
+
+
+def create_headless_property_share_url(
+    property_id: str,
+    property_data: dict[str, Any] | None = None,
+    *,
+    app_base_url: str,
+    created_by_user_id: str | None = None,
+    include_assumptions: bool = False,
+    expires_days: int = 90,
+) -> str | None:
+    """
+    Create a guest share link from CLI jobs (outreach, harvester).
+
+    Requires SUPABASE_SERVICE_ROLE_KEY and ADMIN_USER_ID in Streamlit secrets.
+    """
+    from authenticate import get_service_client
+    from knowledge_base import get_admin_uid, is_valid_uuid
+
+    if not is_valid_uuid(property_id):
+        return None
+
+    client = get_service_client()
+    if client is None:
+        log.warning("headless_share_service_role_missing", property_id=property_id)
+        return None
+
+    creator = created_by_user_id or get_admin_uid()
+    if not creator or not is_valid_uuid(creator):
+        log.warning("headless_share_admin_uid_missing", property_id=property_id)
+        return None
+
+    try:
+        exists = (
+            client.table("properties")
+            .select("id")
+            .eq("id", property_id)
+            .limit(1)
+            .execute()
+        )
+    except APIError as exc:
+        report_error(log, "headless_share_property_lookup_failed", exc, property_id=property_id)
+        return None
+    if not exists.data:
+        return None
+
+    token = secrets.token_urlsafe(32)
+    expires_at: str | None = None
+    if expires_days > 0:
+        expires_at = (
+            datetime.datetime.now(datetime.timezone.utc)
+            + datetime.timedelta(days=expires_days)
+        ).isoformat()
+
+    row = {
+        "share_token": token,
+        "property_id": property_id,
+        "created_by": creator,
+        "include_assumptions": include_assumptions,
+        "expires_at": expires_at,
+    }
+    try:
+        client.table("property_shares").insert(row).execute()
+    except APIError as exc:
+        report_error(log, "headless_share_create_failed", exc, property_id=property_id)
+        return None
+
+    if property_data:
+        _save_share_comps_snapshot_with_client(client, token, property_id, property_data)
+
+    log.info("headless_share_created", property_id=property_id, created_by=creator)
+    return build_share_url_with_base(token, app_base_url)
 
 
 def render_guest_sidebar() -> None:

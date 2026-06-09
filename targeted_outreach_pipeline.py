@@ -9,7 +9,8 @@ Run on your harvester machine (long-running; needs local Gmail OAuth once):
     python targeted_outreach_pipeline.py --dry-run --limit 5
     python targeted_outreach_pipeline.py --limit 10
 
-Credentials: st.secrets / .streamlit/secrets.toml (GEMINI_API_KEY, Supabase, Google OAuth).
+Credentials: st.secrets / .streamlit/secrets.toml
+(GEMINI_API_KEY, Supabase, Google OAuth, SUPABASE_SERVICE_ROLE_KEY for property share links).
 """
 
 from __future__ import annotations
@@ -47,6 +48,7 @@ from engine import (
 from finance import analyze_investment, calculate_10yr_appreciation
 from knowledge_base import get_ai_baseline_maint, get_ai_baseline_rent
 from pdf_generator import generate_property_pdf
+from share_access import create_headless_property_share_url
 
 GMAIL_SCOPES = ("https://www.googleapis.com/auth/gmail.compose",)
 TOKEN_PATH = Path(__file__).resolve().parent / ".gmail_oauth_token.json"
@@ -89,6 +91,12 @@ def _bootstrap_streamlit_secrets() -> None:
             f"Missing {SECRETS_PATH}. Add Supabase, Gemini, and Google OAuth keys first."
         )
     _ = st.secrets  # force load
+    # authenticate.get_service_client() reads os.environ in headless CLI mode
+    for key, value in st.secrets.items():
+        if os.getenv(key) or value is None:
+            continue
+        if isinstance(value, (str, int, float, bool)):
+            os.environ[key] = str(value)
 
 
 def _require_secret(*names: str) -> str:
@@ -228,11 +236,26 @@ Rules:
 """
 
 
+def resolve_property_share_url(row: dict[str, Any]) -> str | None:
+    """Guest share link for this listing (read-only analysis in the app)."""
+    property_id = str(row.get("id") or "").strip()
+    if not property_id:
+        return None
+    return create_headless_property_share_url(
+        property_id,
+        row,
+        app_base_url=APP_URL,
+        include_assumptions=False,
+        expires_days=90,
+    )
+
+
 def _agent2_draft_email_prompt(
     row: dict[str, Any],
     agent: dict[str, Any],
     *,
     closing: str,
+    share_url: str | None,
 ) -> str:
     address = str(row.get("address") or "").strip()
     tag = str(row.get("strategy_tag") or row.get("property_label") or "").strip()
@@ -263,7 +286,9 @@ Voice rules:
 - 120–180 words in the body (excluding sign-off).
 - Reference their specific listing naturally (you saw it online / came across their listing).
 - Mention you built a small analysis tool and are attaching a PDF report you prepared.
-- Include the app link once in the body: {APP_URL}
+- Include this property-specific share link once in the body (so they can open the live analysis):
+  {share_url or APP_URL}
+- You may also mention the main app: {APP_URL}
 - Do NOT use bullet points or markdown.
 - Do NOT say "I hope this email finds you well" or other cliché openers.
 
@@ -313,10 +338,11 @@ def run_agent2_draft_email(
     *,
     model: str,
     closing: str,
+    share_url: str | None,
 ) -> dict[str, str]:
     raw = generate_with_retry(
         model,
-        _agent2_draft_email_prompt(row, agent, closing=closing),
+        _agent2_draft_email_prompt(row, agent, closing=closing, share_url=share_url),
         use_search=False,
     )
     parsed = _extract_json(raw)
@@ -329,15 +355,25 @@ def run_agent2_draft_email(
     return {"subject": subject, "body": body}
 
 
-def _ensure_signature(body: str, closing: str) -> str:
-    """Ensure app link and Shaker HS line appear even if the model omitted them."""
+def _ensure_signature(
+    body: str,
+    closing: str,
+    *,
+    share_url: str | None = None,
+) -> str:
+    """Ensure share link, app link, and Shaker HS line appear even if the model omitted them."""
     text = body.rstrip()
+    if share_url and share_url not in text:
+        text += f"\n\nFull analysis for this listing: {share_url}"
     if APP_URL not in text:
-        text += f"\n\n{APP_URL}"
+        text += f"\n{APP_URL}"
     if SIGNATURE_LINE not in text:
         text += f"\n{SIGNATURE_LINE}"
     if not any(text.endswith(closer) or f"\n{closer}," in text for closer in CLOSING_LINES):
-        text += f"\n\n{closing},\n{SIGNATURE_LINE}\n{APP_URL}"
+        text += f"\n\n{closing},\n{SIGNATURE_LINE}"
+        if share_url:
+            text += f"\n{share_url}"
+        text += f"\n{APP_URL}"
     return text
 
 
@@ -629,9 +665,25 @@ def process_property(
             )
         return result
 
+    share_url = resolve_property_share_url(row)
+    if share_url:
+        print(f"  Share link: {share_url}")
+        result["share_url"] = share_url
+    else:
+        print(
+            "  Warning: could not create property share link "
+            "(need SUPABASE_SERVICE_ROLE_KEY + ADMIN_USER_ID). Using app URL only."
+        )
+
     print(f"  Agent 2 ({agent2_model}): drafting email...")
-    draft = run_agent2_draft_email(row, agent, model=agent2_model, closing=closing)
-    body = _ensure_signature(draft["body"], closing)
+    draft = run_agent2_draft_email(
+        row,
+        agent,
+        model=agent2_model,
+        closing=closing,
+        share_url=share_url,
+    )
+    body = _ensure_signature(draft["body"], closing, share_url=share_url)
     result["subject"] = draft["subject"]
     result["body_preview"] = body[:200] + ("..." if len(body) > 200 else "")
 
