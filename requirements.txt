@@ -13,4 +13,6 @@ fpdf2
 geopy>=2.4.0
 folium>=0.15.0
 streamlit-folium>=0.18.0
+google-api-python-client>=2.100.0
+google-auth-oauthlib>=1.2.0
 tomli>=2.0.0; python_version < "3.11"
