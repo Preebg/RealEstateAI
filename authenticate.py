@@ -572,6 +572,25 @@ def _oauth_handoff_id() -> str:
     return _query_param("pkce_sid") or _get_pkce_session_id()
 
 
+def _format_oauth_callback_error(description: str) -> str:
+    """Turn Supabase/Google OAuth errors into actionable setup guidance."""
+    lowered = description.lower()
+    if "unable to exchange external code" in lowered or "invalid_client" in lowered:
+        web_client = _get_optional_secret("GOOGLE_WEB_CLIENT_ID") or "your-web-client-id"
+        return (
+            "Supabase could not complete Google sign-in because the **Google client secret "
+            "in Supabase is wrong or outdated**.\n\n"
+            "Fix in [Supabase Dashboard](https://supabase.com/dashboard) → **Authentication** "
+            "→ **Providers** → **Google**:\n"
+            f"1. **Client ID** must be your Web client: `{web_client}`\n"
+            "2. **Client secret** must be copied fresh from Google Cloud Console → "
+            "Credentials → that same **Web application** client (not the Desktop Gmail client).\n"
+            "3. Save, wait ~1 minute, then click **Refresh Google sign-in link** and try again.\n\n"
+            f"Technical detail: {description}"
+        )
+    return description
+
+
 def process_auth_callback() -> bool:
     """
     Handle Supabase Google OAuth callback query params.
@@ -580,7 +599,10 @@ def process_auth_callback() -> bool:
     oauth_error = _query_param("error")
     if oauth_error:
         description = _query_param("error_description") or oauth_error
-        st.error(f"Google sign-in was cancelled or failed: {description}")
+        st.error(
+            "Google sign-in was cancelled or failed: "
+            + _format_oauth_callback_error(description)
+        )
         _clear_oauth_query_params()
         _clear_pending_pkce()
         return True
