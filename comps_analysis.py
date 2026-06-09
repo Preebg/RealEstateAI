@@ -22,6 +22,35 @@ MIN_COMPS_FOR_SUMMARY = 2
 UNDERVALUATION_THRESHOLD_PCT = 8.0
 
 
+def empty_comps_analysis(subject: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Placeholder comps payload before deferred comps research completes."""
+    subject = subject or {}
+    return {
+        "comparable_properties": [],
+        "comp_count": 0,
+        "median_sale_price": 0.0,
+        "median_price_per_sqft": None,
+        "comp_suggested_value": 0.0,
+        "list_price": safe_float(subject.get("price")),
+        "predicted_value": safe_float(subject.get("predicted_value"))
+        or safe_float(subject.get("price")),
+        "list_vs_comps_pct": None,
+        "predicted_vs_comps_pct": None,
+        "is_undervalued": False,
+        "undervaluation_threshold_pct": UNDERVALUATION_THRESHOLD_PCT,
+        "market_summary": "",
+        "summary": "",
+        "fetched_at": None,
+    }
+
+
+def ensure_comps_analysis_field(property_data: dict[str, Any]) -> dict[str, Any]:
+    """Ensure *property_data* always has a dict ``comps_analysis`` key."""
+    if not isinstance(property_data.get("comps_analysis"), dict):
+        property_data["comps_analysis"] = empty_comps_analysis(property_data)
+    return property_data
+
+
 def normalize_comp_record(raw: Any) -> dict[str, Any] | None:
     """Normalize one comparable sale record from LLM JSON."""
     if not isinstance(raw, dict):

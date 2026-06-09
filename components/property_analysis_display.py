@@ -10,7 +10,7 @@ import pandas as pd
 import streamlit as st
 import tldextract
 
-from comps_analysis import resolve_market_value
+from comps_analysis import MIN_COMPS_FOR_SUMMARY, resolve_market_value
 from components.property_comps import (
     _markdown_safe_text,
     ensure_comps_analysis,
@@ -274,10 +274,11 @@ def render_analysis_results(
 
     predicted_value = safe_float(property_info.get("predicted_value"))
     market_value = resolve_market_value(property_info)
+    comps_analysis = property_info.get("comps_analysis") or {}
     has_comp_market_value = (
-        isinstance(property_info.get("comps_analysis"), dict)
-        and int(property_info["comps_analysis"].get("comp_count") or 0) >= 2
-        and safe_float(property_info["comps_analysis"].get("comp_suggested_value")) > 0
+        isinstance(comps_analysis, dict)
+        and int(comps_analysis.get("comp_count") or 0) >= MIN_COMPS_FOR_SUMMARY
+        and safe_float(comps_analysis.get("comp_suggested_value")) > 0
     )
     prediction_reasoning = property_info.get("prediction_reasoning", "No reasoning provided.")
     location_score = safe_float(property_info.get("location_score"))

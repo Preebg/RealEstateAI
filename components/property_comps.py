@@ -9,6 +9,7 @@ import streamlit as st
 
 from comps_analysis import (
     apply_comp_implied_market_value,
+    ensure_comps_analysis_field,
     evaluate_comps_against_subject,
     evaluate_offer_success,
     resolve_market_value,
@@ -322,9 +323,10 @@ def render_property_comps_section(
 
 
 def ensure_comps_analysis(property_info: dict[str, Any]) -> dict[str, Any]:
-    """Recompute summary fields when comps exist but summary is missing."""
-    comps = property_info.get("comps_analysis")
-    if not isinstance(comps, dict) or not comps.get("comparable_properties"):
+    """Ensure comps payload exists; recompute summary when comps are loaded."""
+    ensure_comps_analysis_field(property_info)
+    comps = property_info["comps_analysis"]
+    if not comps.get("comparable_properties"):
         return property_info
 
     if comps.get("median_sale_price") is not None and comps.get("summary"):

@@ -27,6 +27,7 @@ from finance import (
 )
 from comps_analysis import (
     apply_comp_implied_market_value,
+    ensure_comps_analysis_field,
     evaluate_comps_against_subject,
     normalize_comps_payload,
 )
@@ -3571,7 +3572,10 @@ def get_final_analysis(
             _log.warning("geospatial_enrichment_failed", address=address, error=str(exc))
 
     enriched = enrich_with_forecast(property_data)
-    return attach_data_provenance(enriched, pipeline="underwriter_ui")
+    return attach_data_provenance(
+        ensure_comps_analysis_field(enriched),
+        pipeline="underwriter_ui",
+    )
 
 
 def _portfolio_inputs_from_legacy(

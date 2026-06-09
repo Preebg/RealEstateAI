@@ -172,6 +172,9 @@ def sync_quantum_recompute_queue(
 
 
 def _run_comps_task(address: str, property_info: dict[str, Any]) -> None:
+    from comps_analysis import ensure_comps_analysis_field
+
+    ensure_comps_analysis_field(property_info)
     updated = fetch_comparable_properties(address, property_info)
     property_info.update(updated)
     property_info["address"] = address
