@@ -918,6 +918,27 @@ class TestOneYearROI(unittest.TestCase):
             0.0,
         )
 
+    def test_market_value_purchase_lowers_roi_when_list_below_market(self):
+        from finance import calculate_one_year_roi_for_purchase
+
+        list_roi = calculate_one_year_roi_for_purchase(
+            purchase_price=180_000,
+            predicted_value=200_000,
+            forecast_rate_pct=4.0,
+            monthly_rent=1_800,
+            tax_rate=1.2,
+            maint_percent=5.0,
+        )
+        market_roi = calculate_one_year_roi_for_purchase(
+            purchase_price=200_000,
+            predicted_value=200_000,
+            forecast_rate_pct=4.0,
+            monthly_rent=1_800,
+            tax_rate=1.2,
+            maint_percent=5.0,
+        )
+        self.assertLess(market_roi, list_roi)
+
 
 class TestMarketCrashScenario(unittest.TestCase):
     _BASE_KWARGS = {
@@ -2175,6 +2196,47 @@ class TestPersistCompsToCanonical(unittest.TestCase):
         self.assertEqual(rpc_params["p_predicted_value"], 190000)
 
 
+class TestPersistRentCompsToCanonical(unittest.TestCase):
+    def test_persist_skips_without_rent_comps(self):
+        from knowledge_base import persist_rent_comps_to_canonical
+
+        self.assertFalse(persist_rent_comps_to_canonical({"address": "1 Main St"}))
+
+    def test_persist_upserts_rent_comps_for_catalog_property(self):
+        from unittest.mock import MagicMock, patch
+
+        from knowledge_base import persist_rent_comps_to_canonical
+
+        mock_client = MagicMock()
+        mock_client.rpc.return_value.execute.return_value = MagicMock(data=True)
+        property_id = "7f35bc1e-9de5-484d-8f73-27fd3da733eb"
+        rent_comps = {
+            "comparable_rentals": [{"address": "2 Oak", "monthly_rent": 1800}],
+            "comp_count": 1,
+        }
+
+        with (
+            patch("authenticate.get_authenticated_client", return_value=mock_client),
+            patch("knowledge_base.get_property_id_by_address", return_value=property_id),
+            patch("knowledge_base.invalidate_kb_cache"),
+        ):
+            saved = persist_rent_comps_to_canonical(
+                {
+                    "address": "1 Main St, Rochester, NY 14607",
+                    "rent": 1650,
+                    "rent_comps_analysis": rent_comps,
+                }
+            )
+
+        self.assertTrue(saved)
+        mock_client.rpc.assert_called_once()
+        rpc_name, rpc_params = mock_client.rpc.call_args.args
+        self.assertEqual(rpc_name, "save_property_rent_comps")
+        self.assertEqual(rpc_params["p_property_id"], property_id)
+        self.assertEqual(rpc_params["p_rent_comps_analysis"], rent_comps)
+        self.assertEqual(rpc_params["p_rent"], 1650)
+
+
 class TestCompsAnalysis(unittest.TestCase):
     def test_evaluate_flags_undervaluation(self):
         from comps_analysis import evaluate_comps_against_subject, normalize_comps_payload
@@ -2255,6 +2317,61 @@ class TestCompsAnalysis(unittest.TestCase):
             },
         }
         self.assertEqual(resolve_market_value(data), 215000)
+
+    def test_comps_analysis_needs_recompute_detects_stale_metrics(self):
+        from comps_analysis import comps_analysis_needs_recompute
+
+        stale = {
+            "comparable_properties": [
+                {"sale_price": 220000},
+                {"sale_price": 210000},
+            ],
+            "median_sale_price": 0.0,
+            "summary": "Stale summary.",
+            "comp_count": 2,
+        }
+        fresh = {
+            "comparable_properties": stale["comparable_properties"],
+            "median_sale_price": 215000.0,
+            "comp_suggested_value": 216000.0,
+            "summary": "Median comp sale: $215,000.",
+            "comp_count": 2,
+        }
+        self.assertTrue(comps_analysis_needs_recompute(stale))
+        self.assertFalse(comps_analysis_needs_recompute(fresh))
+
+    def test_ensure_comps_analysis_recomputes_stale_summary(self):
+        from components.property_comps import ensure_comps_analysis
+        from engine import safe_float
+
+        property_info = {
+            "price": 175000,
+            "predicted_value": 180000,
+            "square_footage": 1500,
+            "comps_analysis": {
+                "comparable_properties": [
+                    {
+                        "address": "1 Maple St",
+                        "sale_price": 220000,
+                        "square_footage": 1500,
+                    },
+                    {
+                        "address": "2 Maple St",
+                        "sale_price": 210000,
+                        "square_footage": 1480,
+                    },
+                ],
+                "median_sale_price": 0.0,
+                "summary": "Stale summary from incomplete persistence.",
+                "comp_count": 2,
+            },
+        }
+        updated = ensure_comps_analysis(property_info)
+        comps = updated["comps_analysis"]
+        self.assertGreater(safe_float(comps.get("median_sale_price")), 200000)
+        self.assertGreater(safe_float(comps.get("comp_suggested_value")), 200000)
+        self.assertNotEqual(comps.get("summary"), "Stale summary from incomplete persistence.")
+        self.assertEqual(updated.get("predicted_value"), int(comps["comp_suggested_value"]))
 
     def test_rent_comps_flags_underrented(self):
         from rent_comps_analysis import evaluate_rent_comps_against_subject, normalize_rent_comps_payload
@@ -2384,6 +2501,31 @@ class TestPdfGenerator(unittest.TestCase):
 
 
 class TestShareAccess(unittest.TestCase):
+    def test_save_share_comps_snapshot_includes_rent_comps(self):
+        from unittest.mock import MagicMock, patch
+
+        from share_access import save_share_comps_snapshot
+
+        mock_client = MagicMock()
+        mock_client.rpc.return_value.execute.return_value = MagicMock(data=True)
+        rent_comps = {
+            "comparable_rentals": [{"address": "5 Elm", "monthly_rent": 2000}],
+            "comp_count": 1,
+        }
+
+        with patch("authenticate.get_authenticated_client", return_value=mock_client):
+            saved = save_share_comps_snapshot(
+                "tok123",
+                "11111111-1111-1111-1111-111111111111",
+                {"rent_comps_analysis": rent_comps},
+            )
+
+        self.assertTrue(saved)
+        rpc_name, rpc_params = mock_client.rpc.call_args.args
+        self.assertEqual(rpc_name, "save_share_comps_snapshot")
+        self.assertEqual(rpc_params["p_rent_comps_analysis"], rent_comps)
+        self.assertNotIn("p_comps_analysis", rpc_params)
+
     def test_ensure_property_saved_for_share_uses_existing_catalog_id(self):
         from share_access import ensure_property_saved_for_share
 

@@ -240,9 +240,12 @@ def save_share_comps_snapshot(
     property_id: str,
     property_data: dict[str, Any],
 ) -> bool:
-    """Freeze comps on a share link so guests see the same table the sharer had."""
+    """Freeze sales and rental comps on a share link for guest viewers."""
     comps = property_data.get("comps_analysis")
-    if not isinstance(comps, dict) or not comps.get("comparable_properties"):
+    rent_comps = property_data.get("rent_comps_analysis")
+    has_sales = isinstance(comps, dict) and bool(comps.get("comparable_properties"))
+    has_rent = isinstance(rent_comps, dict) and bool(rent_comps.get("comparable_rentals"))
+    if not has_sales and not has_rent:
         return False
 
     from authenticate import get_authenticated_client
@@ -254,12 +257,15 @@ def save_share_comps_snapshot(
     params: dict[str, Any] = {
         "p_share_token": str(share_token).strip(),
         "p_property_id": str(property_id),
-        "p_comps_analysis": comps,
     }
-    if property_data.get("predicted_value") is not None:
-        params["p_predicted_value"] = float(property_data["predicted_value"])
-    if property_data.get("prediction_reasoning"):
-        params["p_prediction_reasoning"] = str(property_data["prediction_reasoning"])
+    if has_sales:
+        params["p_comps_analysis"] = comps
+        if property_data.get("predicted_value") is not None:
+            params["p_predicted_value"] = float(property_data["predicted_value"])
+        if property_data.get("prediction_reasoning"):
+            params["p_prediction_reasoning"] = str(property_data["prediction_reasoning"])
+    if has_rent:
+        params["p_rent_comps_analysis"] = rent_comps
 
     try:
         response = client.rpc("save_share_comps_snapshot", params).execute()

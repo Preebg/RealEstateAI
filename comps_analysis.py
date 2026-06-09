@@ -29,26 +29,52 @@ def empty_comps_analysis(subject: dict[str, Any] | None = None) -> dict[str, Any
         "comparable_properties": [],
         "comp_count": 0,
         "median_sale_price": 0.0,
-        "median_price_per_sqft": None,
+        "median_price_per_sqft": 0.0,
         "comp_suggested_value": 0.0,
         "list_price": safe_float(subject.get("price")),
         "predicted_value": safe_float(subject.get("predicted_value"))
         or safe_float(subject.get("price")),
-        "list_vs_comps_pct": None,
-        "predicted_vs_comps_pct": None,
+        "list_vs_comps_pct": 0.0,
+        "predicted_vs_comps_pct": 0.0,
         "is_undervalued": False,
         "undervaluation_threshold_pct": UNDERVALUATION_THRESHOLD_PCT,
         "market_summary": "",
         "summary": "",
-        "fetched_at": None,
+        "fetched_at": "",
     }
 
 
-def ensure_comps_analysis_field(property_data: dict[str, Any]) -> dict[str, Any]:
+def ensure_comps_analysis_field(property_data: dict[str, Any] | None) -> dict[str, Any]:
     """Ensure *property_data* always has a dict ``comps_analysis`` key."""
+    if not isinstance(property_data, dict):
+        return {}
     if not isinstance(property_data.get("comps_analysis"), dict):
         property_data["comps_analysis"] = empty_comps_analysis(property_data)
     return property_data
+
+
+def has_loaded_comps(property_data: dict[str, Any]) -> bool:
+    """True when comparable sales have been fetched and stored."""
+    comps = property_data.get("comps_analysis")
+    return isinstance(comps, dict) and bool(comps.get("comparable_properties"))
+
+
+def comps_analysis_needs_recompute(comps: dict[str, Any]) -> bool:
+    """Return True when comparable_properties exist but summary metrics look stale."""
+    raw = comps.get("comparable_properties") or []
+    if not raw:
+        return False
+
+    priced_count = sum(
+        1 for c in raw if safe_float(c.get("sale_price")) > 0
+    )
+    if not comps.get("summary") or "comp_suggested_value" not in comps:
+        return True
+    if priced_count != int(comps.get("comp_count") or 0):
+        return True
+    if priced_count >= MIN_COMPS_FOR_SUMMARY and safe_float(comps.get("median_sale_price")) <= 0:
+        return True
+    return False
 
 
 def normalize_comp_record(raw: Any) -> dict[str, Any] | None:

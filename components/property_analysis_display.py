@@ -25,7 +25,12 @@ from engine import (
     parse_year_built,
     safe_float,
 )
-from finance import simulate_market_crash
+from finance import (
+    calculate_10yr_appreciation,
+    calculate_one_year_roi,
+    calculate_one_year_roi_for_purchase,
+    simulate_market_crash,
+)
 from pdf_generator import generate_property_pdf
 from ui_theme import style_matplotlib_chart
 
@@ -264,7 +269,6 @@ def render_analysis_results(
     total_confidence_pct: int | None,
 ) -> None:
     """Render the full analysis overview: metrics, tabs, charts, and expanders."""
-    render_pending_share_clipboard_copy()
     property_info = backfill_year_built_if_needed(property_info, address)
     property_info = ensure_comps_analysis(property_info)
     final_monthly_rent = assumptions["final_monthly_rent"]
@@ -312,6 +316,7 @@ def render_analysis_results(
             property_info=property_info,
             address=address,
         )
+    render_pending_share_clipboard_copy()
 
     quantum_ready = isinstance(quantum_risk, dict) and bool(quantum_risk)
     with header_col2:
@@ -372,6 +377,65 @@ def render_analysis_results(
         col1.metric("Monthly Take-Home", f"${monthly_net_cash_flow:,.2f}")
         col2.metric("Risk-Adjusted Cap Rate", f"{cap_rate:.2f}%")
         col3.metric("Cash On Cash", f"{cash_on_cash:.2f}%")
+
+        purchase_price = safe_float(assumptions.get("offer_amount")) or price
+        forecast_rate = safe_float(property_info.get("forecast_rate"))
+        if forecast_rate <= 0:
+            live_forecast = property_info.get("_forecast_display_cache")
+            if isinstance(live_forecast, dict):
+                forecast_rate = safe_float(live_forecast.get("annual_rate"))
+        if forecast_rate <= 0:
+            forecast_rate = calculate_10yr_appreciation(
+                predicted_value or purchase_price,
+                location_score,
+                market_city,
+            )["annual_rate"]
+
+        roi_base_value = predicted_value if predicted_value > 0 else purchase_price
+        offer_one_year_roi = calculate_one_year_roi(
+            current_price=purchase_price,
+            predicted_value=roi_base_value,
+            forecast_rate_pct=forecast_rate,
+            monthly_net_cash_flow=monthly_net_cash_flow,
+            down_payment_pct=down_payment,
+            closing_costs_pct=assumptions.get("user_closing_costs_pct", 3.0),
+        )
+        market_one_year_roi = calculate_one_year_roi_for_purchase(
+            purchase_price=market_value,
+            predicted_value=roi_base_value,
+            forecast_rate_pct=forecast_rate,
+            down_payment_pct=down_payment,
+            interest_rate=interest_rate,
+            loan_term=int(loan_term),
+            closing_costs_pct=assumptions.get("user_closing_costs_pct", 3.0),
+            tax_rate=safe_float(property_info.get("tax_rate")),
+            monthly_insurance=monthly_insurance,
+            monthly_hoa=monthly_HOA,
+            maint_percent=assumptions.get("final_maint_percent", 0.0),
+            monthly_rent=final_monthly_rent,
+            vacancy_reserve_pct=assumptions.get("user_vacancy_reserve", 5.0),
+            management_fee_pct=assumptions.get("user_management_fee", 10.0),
+        )
+
+        roi_col1, roi_col2 = st.columns(2)
+        roi_col1.metric(
+            "1-Year ROI (Your Offer)",
+            f"{offer_one_year_roi:.2f}%",
+            help=(
+                "Return on cash invested over one year at your offer price: "
+                "appreciation gain plus annual cash flow, divided by down payment and closing costs."
+            ),
+        )
+        roi_delta = market_one_year_roi - offer_one_year_roi
+        roi_col2.metric(
+            "1-Year ROI at Market Value",
+            f"{market_one_year_roi:.2f}%",
+            delta=f"{roi_delta:+.2f}%" if abs(market_value - purchase_price) >= 1 else None,
+            help=(
+                "Same calculation assuming you pay comp-implied market value instead of your offer. "
+                "Delta shows the impact vs your offer price."
+            ),
+        )
 
         st.markdown(f"**Strategy Status:** :blue[{branding_label}]")
         st.subheader("🎯 AI Valuation")

@@ -9,6 +9,7 @@ import streamlit as st
 
 from comps_analysis import (
     apply_comp_implied_market_value,
+    comps_analysis_needs_recompute,
     ensure_comps_analysis_field,
     evaluate_comps_against_subject,
     evaluate_offer_success,
@@ -237,6 +238,9 @@ def _render_rent_comps_section(
             updated = fetch_rental_comparables(address, property_info)
             property_info.update(updated)
             property_info["address"] = address
+            from knowledge_base import persist_rent_comps_to_canonical
+
+            persist_rent_comps_to_canonical(property_info, show_errors=True)
             st.session_state.property_data = property_info
             st.session_state.quantum_finance_sig = None
             queue = list(st.session_state.get("deferred_tasks") or [])
@@ -329,7 +333,42 @@ def ensure_comps_analysis(property_info: dict[str, Any]) -> dict[str, Any]:
     if not comps.get("comparable_properties"):
         return property_info
 
-    if comps.get("median_sale_price") is not None and comps.get("summary"):
+    needs_recompute = comps_analysis_needs_recompute(comps)
+    # #region agent log
+    try:
+        import json
+        import time
+
+        with open("debug-8a19ea.log", "a", encoding="utf-8") as _df:
+            _df.write(
+                json.dumps(
+                    {
+                        "sessionId": "8a19ea",
+                        "runId": "pre-fix",
+                        "hypothesisId": "A",
+                        "location": "property_comps.py:ensure_comps_analysis",
+                        "message": "comps recompute decision",
+                        "data": {
+                            "needs_recompute": needs_recompute,
+                            "priced_count": sum(
+                                1
+                                for c in (comps.get("comparable_properties") or [])
+                                if safe_float(c.get("sale_price")) > 0
+                            ),
+                            "comp_count": comps.get("comp_count"),
+                            "median_sale_price": comps.get("median_sale_price"),
+                            "has_comp_suggested_value": "comp_suggested_value" in comps,
+                        },
+                        "timestamp": int(time.time() * 1000),
+                    }
+                )
+                + "\n"
+            )
+    except OSError:
+        pass
+    # #endregion
+
+    if not needs_recompute:
         apply_comp_implied_market_value(property_info, comps)
         return property_info
 

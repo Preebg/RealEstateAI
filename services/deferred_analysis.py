@@ -344,12 +344,12 @@ def render_global_deferred_status() -> None:
 
 def render_background_deferred_worker() -> None:
     """Keep deferred tasks advancing while the user is on any app tab."""
-
-    @st.fragment(run_every=timedelta(seconds=2))
-    def _background_worker() -> None:
-        if not pending_tasks():
-            return
-        tick_deferred_analysis(rerun=True)
-
     if pending_tasks():
-        _background_worker()
+        _background_deferred_worker_fragment()
+
+
+@st.fragment(run_every=timedelta(seconds=2))
+def _background_deferred_worker_fragment() -> None:
+    if not pending_tasks():
+        return
+    tick_deferred_analysis(rerun=True)

@@ -66,7 +66,7 @@ def render_share_popover(
     address: str = "",
 ) -> None:
     """Render the share-link popover in the analysis header column."""
-    from knowledge_base import persist_comps_to_canonical
+    from knowledge_base import persist_comps_to_canonical, persist_rent_comps_to_canonical
     from share_access import (
         build_share_url,
         create_property_share_link,
@@ -106,6 +106,7 @@ def render_share_popover(
 
             active_property["id"] = resolved_id
             persist_comps_to_canonical(active_property, show_errors=True)
+            persist_rent_comps_to_canonical(active_property, show_errors=True)
             token = create_property_share_link(
                 resolved_id,
                 include_assumptions=include_assumptions,
@@ -118,17 +119,24 @@ def render_share_popover(
                     resolved_id,
                     active_property,
                 )
-                if (
-                    active_property.get("comps_analysis", {}).get(
-                        "comparable_properties"
-                    )
-                    and not snapshot_saved
-                ):
+                sales_comps = active_property.get("comps_analysis", {}).get(
+                    "comparable_properties"
+                )
+                rent_comps = active_property.get("rent_comps_analysis", {}).get(
+                    "comparable_rentals"
+                )
+                if sales_comps and not snapshot_saved:
                     st.warning(
                         "Link created, but comparable sales could not be attached. "
                         "Run **Check Area Comps** again, then regenerate the link."
                     )
+                elif rent_comps and not snapshot_saved:
+                    st.warning(
+                        "Link created, but comparable rentals could not be attached. "
+                        "Run **Check Rental Comps** again, then regenerate the link."
+                    )
                 st.session_state[COPY_PENDING_SHARE_URL_KEY] = share_url
+                copy_text_to_clipboard(share_url)
                 st.session_state["property_data"] = active_property
                 st.toast("Share link copied to clipboard", icon="🔗")
             else:

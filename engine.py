@@ -871,6 +871,8 @@ async def generate_with_retry_async(
 
 def _extract_response_text(response: Any) -> str:
     """Read model text safely; grounded responses sometimes omit response.text."""
+    if response is None:
+        return ""
     try:
         text = response.text
         if text:

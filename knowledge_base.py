@@ -341,6 +341,7 @@ CANONICAL_PROPERTY_COLUMNS = (
     "original_ai_rent",
     "original_ai_maint",
     "comps_analysis",
+    "rent_comps_analysis",
     "latitude",
     "longitude",
     "geocode_confidence",
@@ -789,6 +790,9 @@ def _normalize_record_numerics(record: dict[str, Any]) -> dict[str, Any]:
             )
         except (TypeError, ValueError):
             pass
+    from comps_analysis import ensure_comps_analysis_field
+
+    ensure_comps_analysis_field(normalized)
     return normalized
 
 
@@ -875,6 +879,11 @@ def _prepare_canonical_payload(property_data: dict[str, Any], user_id: str) -> d
 
     _apply_zipcode_from_address(payload)
     _apply_state_code_from_address(payload)
+
+    comps = payload.get("comps_analysis")
+    if isinstance(comps, dict) and not comps.get("comparable_properties"):
+        payload.pop("comps_analysis", None)
+
     return {k: v for k, v in payload.items() if k in CANONICAL_PROPERTY_COLUMNS}
 
 
@@ -998,6 +1007,67 @@ def persist_comps_to_canonical(
     if saved:
         invalidate_kb_cache()
         log.info("comps_persist_success", property_id=str(property_id), address=address)
+    return saved
+
+
+def persist_rent_comps_to_canonical(
+    property_data: dict[str, Any],
+    *,
+    show_errors: bool = False,
+) -> bool:
+    """
+    Persist rental comps to Supabase via save_property_rent_comps RPC.
+
+    Writes properties.rent_comps_analysis (and adjusted rent when present).
+    """
+    rent_comps = property_data.get("rent_comps_analysis")
+    if not isinstance(rent_comps, dict) or not rent_comps.get("comparable_rentals"):
+        return False
+
+    address = str(property_data.get("address") or "").strip()
+    property_id = property_data.get("id") or (
+        get_property_id_by_address(address) if address else None
+    )
+    if not property_id or not is_valid_uuid(str(property_id)):
+        return False
+
+    from authenticate import get_authenticated_client
+
+    client = get_authenticated_client()
+    if client is None:
+        if show_errors and st is not None:
+            st.error("Sign in to save comparable rentals.")
+        return False
+
+    params: dict[str, Any] = {
+        "p_property_id": str(property_id),
+        "p_rent_comps_analysis": rent_comps,
+    }
+    if property_data.get("rent") is not None:
+        params["p_rent"] = float(property_data["rent"])
+
+    try:
+        response = client.rpc("save_property_rent_comps", params).execute()
+    except APIError as exc:
+        report_error(
+            log,
+            "rent_comps_persist_failed",
+            exc,
+            property_id=str(property_id),
+            address=address,
+        )
+        if show_errors and st is not None:
+            st.error(f"Could not save comparable rentals: {exc}")
+        return False
+
+    saved = bool(response.data)
+    if saved:
+        invalidate_kb_cache()
+        log.info(
+            "rent_comps_persist_success",
+            property_id=str(property_id),
+            address=address,
+        )
     return saved
 
 

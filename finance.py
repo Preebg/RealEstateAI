@@ -432,6 +432,50 @@ def calculate_one_year_roi(
     return ((appreciation_gain + annual_cash_flow) / total_investment) * 100.0
 
 
+def calculate_one_year_roi_for_purchase(
+    *,
+    purchase_price: float,
+    predicted_value: float,
+    forecast_rate_pct: float,
+    down_payment_pct: float = 25.0,
+    interest_rate: float = 6.0,
+    loan_term: int = 30,
+    closing_costs_pct: float = 3.0,
+    tax_rate: float = 0.0,
+    monthly_insurance: float = 0.0,
+    monthly_hoa: float = 0.0,
+    maint_percent: float = 0.0,
+    monthly_rent: float = 0.0,
+    vacancy_reserve_pct: float = 5.0,
+    management_fee_pct: float = 10.0,
+) -> float:
+    """One-year ROI when acquiring at *purchase_price* (recalculates mortgage and cash flow)."""
+    if purchase_price <= 0:
+        return 0.0
+    analysis = analyze_investment(
+        price=purchase_price,
+        down_payment_pct=down_payment_pct,
+        interest_rate=interest_rate,
+        loan_term=loan_term,
+        closing_costs_pct=closing_costs_pct,
+        tax_rate=tax_rate,
+        monthly_insurance=monthly_insurance,
+        monthly_hoa=monthly_hoa,
+        maint_percent=maint_percent,
+        monthly_rent=monthly_rent,
+        vacancy_reserve_pct=vacancy_reserve_pct,
+        management_fee_pct=management_fee_pct,
+    )
+    return calculate_one_year_roi(
+        current_price=purchase_price,
+        predicted_value=predicted_value,
+        forecast_rate_pct=forecast_rate_pct,
+        monthly_net_cash_flow=analysis["monthly_net_cash_flow"],
+        down_payment_pct=down_payment_pct,
+        closing_costs_pct=closing_costs_pct,
+    )
+
+
 class MarketCrashScenario(TypedDict):
     baseline_value_schedule: list[float]
     crash_value_schedule: list[float]
