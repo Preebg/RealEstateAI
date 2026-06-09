@@ -162,7 +162,7 @@ def _get_google_web_client_secret() -> str | None:
     return _get_optional_secret("GOOGLE_WEB_CLIENT_SECRET")
 
 
-def _store_google_signin_state(state: str, nonce: str) -> None:
+def _store_google_signin_state(state: str, nonce: str, redirect_uri: str) -> None:
     """Persist OAuth state in Supabase so callbacks survive Streamlit session resets."""
     supabase = get_supabase()
     try:
@@ -171,7 +171,8 @@ def _store_google_signin_state(state: str, nonce: str) -> None:
             {
                 "p_session_id": state,
                 "p_code_verifier": nonce,
-                "p_code_challenge": "",
+                # Reused column: must match authorize + token exchange redirect_uri.
+                "p_code_challenge": redirect_uri,
             },
         ).execute()
     except APIError as exc:
@@ -179,14 +180,29 @@ def _store_google_signin_state(state: str, nonce: str) -> None:
         raise
 
 
-def _consume_google_signin_state(state: str) -> str | None:
-    """Load and delete the nonce saved for a Google OAuth state value."""
+def _consume_google_signin_state(state: str) -> tuple[str, str] | None:
+    """Load nonce + redirect_uri saved for a Google OAuth state value."""
     supabase = get_supabase()
     response = supabase.rpc("consume_oauth_pkce", {"p_session_id": state}).execute()
     rows = response.data or []
     if not rows:
         return None
-    return str(rows[0].get("code_verifier") or "") or None
+    row = rows[0]
+    nonce = str(row.get("code_verifier") or "")
+    redirect_uri = str(row.get("code_challenge") or "")
+    if not nonce or not redirect_uri:
+        return None
+    return nonce, redirect_uri
+
+
+def _google_redirect_uri_setup_hint(redirect_uri: str) -> str:
+    client_id = _get_google_web_client_id() or "your-web-client-id"
+    return (
+        f"Add this **Authorized redirect URI** on your Google **Web** OAuth client "
+        f"(`{client_id}`): `{redirect_uri}`\n\n"
+        "Google Cloud Console → APIs & Services → Credentials → Web client → "
+        "Authorized redirect URIs. It must match exactly (no trailing slash)."
+    )
 
 
 def build_google_signin_url(redirect_uri: str) -> str:
@@ -204,7 +220,7 @@ def build_google_signin_url(redirect_uri: str) -> str:
 
     state = secrets.token_urlsafe(32)
     nonce = secrets.token_urlsafe(32)
-    _store_google_signin_state(state, nonce)
+    _store_google_signin_state(state, nonce, redirect_uri)
 
     query = urlencode(
         {
@@ -254,7 +270,14 @@ def process_google_signin_callback() -> bool:
     oauth_error = _query_param("error")
     if oauth_error:
         description = _query_param("error_description") or oauth_error
-        st.error(f"Google sign-in was cancelled or failed: {description}")
+        redirect_uri = _get_redirect_url()
+        if oauth_error == "redirect_uri_mismatch" or "redirect_uri" in description.lower():
+            st.error(
+                "Google rejected the redirect URI for this app. "
+                + _google_redirect_uri_setup_hint(redirect_uri)
+            )
+        else:
+            st.error(f"Google sign-in was cancelled or failed: {description}")
         _clear_oauth_query_params()
         return True
 
@@ -263,8 +286,8 @@ def process_google_signin_callback() -> bool:
     if not code or not state:
         return False
 
-    nonce = _consume_google_signin_state(state)
-    if not nonce:
+    signin_state = _consume_google_signin_state(state)
+    if not signin_state:
         st.warning(
             "Sign-in session expired or was already used. "
             "Click **Continue with Google** to try again."
@@ -272,7 +295,7 @@ def process_google_signin_callback() -> bool:
         _clear_oauth_query_params()
         return True
 
-    redirect_uri = _get_redirect_url()
+    nonce, redirect_uri = signin_state
     with st.spinner("Completing Google sign-in..."):
         supabase = get_supabase()
         try:
@@ -290,7 +313,14 @@ def process_google_signin_callback() -> bool:
                 st.error("Google sign-in did not return a session. Please try again.")
         except (APIError, ValueError, TypeError) as exc:
             report_error(log, "google_signin_exchange_failed", exc)
-            st.error(f"Sign-in failed: {exc}")
+            message = str(exc)
+            if "redirect_uri_mismatch" in message.lower():
+                st.error(
+                    "Google token exchange failed: redirect URI mismatch. "
+                    + _google_redirect_uri_setup_hint(redirect_uri)
+                )
+            else:
+                st.error(f"Sign-in failed: {exc}")
         finally:
             _clear_oauth_query_params()
 
@@ -372,13 +402,14 @@ def _current_app_url() -> str:
 
 
 def _configured_redirect_url() -> str | None:
-    explicit = os.getenv("OAUTH_REDIRECT_URL")
-    if explicit and str(explicit).strip():
-        return _normalize_app_url(explicit)
-    if not _headless_mode() and "OAUTH_REDIRECT_URL" in st.secrets:
-        value = str(st.secrets["OAUTH_REDIRECT_URL"]).strip()
-        if value:
-            return _normalize_app_url(value)
+    for key in ("OAUTH_REDIRECT_URL", "APP_URL"):
+        explicit = os.getenv(key)
+        if explicit and str(explicit).strip():
+            return _normalize_app_url(explicit)
+        if not _headless_mode():
+            value = _get_optional_secret(key)
+            if value:
+                return _normalize_app_url(value)
     return None
 
 
@@ -845,6 +876,9 @@ def render_login_page() -> bool:
                     st.caption(
                         "You will return here automatically after Google approves access."
                     )
+                    if not _is_localhost_url(redirect_to):
+                        with st.expander("Google OAuth setup (admin)", expanded=False):
+                            st.markdown(_google_redirect_uri_setup_hint(redirect_to))
             except Exception as exc:
                 st.error(f"Google sign-in is unavailable: {exc}")
 
