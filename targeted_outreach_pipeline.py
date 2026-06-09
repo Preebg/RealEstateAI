@@ -465,10 +465,6 @@ def fetch_outreach_candidates(supabase: Client, *, limit: int | None = None) -> 
     return eligible if target is None else eligible[:target]
 
 
-def mark_email_drafted(supabase: Client, property_id: str) -> None:
-    supabase.table("properties").update({"email_drafted": True}).eq("id", property_id).execute()
-
-
 def build_google_client_config() -> dict[str, Any]:
     return {
         "installed": {
@@ -537,6 +533,56 @@ def _valid_agent_email(email: str) -> bool:
     return bool(email and _EMAIL_PATTERN.match(email))
 
 
+def _normalize_agent_email(email: str | None) -> str:
+    return str(email or "").strip().lower()
+
+
+def load_contacted_agent_emails(supabase: Client) -> set[str]:
+    """Emails that already received an outreach draft in a prior run."""
+    contacted: set[str] = set()
+    page_size = 500
+    offset = 0
+    while True:
+        end = offset + page_size - 1
+        rows = (
+            supabase.table("properties")
+            .select("outreach_agent_email")
+            .eq("email_drafted", True)
+            .not_.is_("outreach_agent_email", "null")
+            .range(offset, end)
+            .execute()
+            .data
+            or []
+        )
+        if not rows:
+            break
+        for row in rows:
+            normalized = _normalize_agent_email(row.get("outreach_agent_email"))
+            if normalized:
+                contacted.add(normalized)
+        if len(rows) < page_size:
+            break
+        offset += page_size
+    return contacted
+
+
+def mark_property_outreach_handled(
+    supabase: Client,
+    property_id: str,
+    agent_email: str,
+    *,
+    drafted: bool,
+) -> None:
+    """Record outreach state so we do not re-contact the same agent."""
+    payload: dict[str, Any] = {
+        "email_drafted": True,
+        "outreach_agent_email": _normalize_agent_email(agent_email),
+    }
+    supabase.table("properties").update(payload).eq("id", property_id).execute()
+    if not drafted:
+        return
+
+
 def process_property(
     row: dict[str, Any],
     *,
@@ -544,6 +590,7 @@ def process_property(
     agent2_model: str,
     gmail_service: Any | None,
     supabase: Client,
+    contacted_emails: set[str],
     dry_run: bool,
     agents_only: bool,
 ) -> dict[str, Any]:
@@ -566,9 +613,20 @@ def process_property(
     print(f"  Found: {agent.get('agent_name') or '?'} <{agent.get('agent_email') or 'no email'}> "
           f"[{agent.get('confidence')}]")
 
-    if not _valid_agent_email(agent.get("agent_email", "")):
+    agent_email = str(agent.get("agent_email") or "").strip()
+    if not _valid_agent_email(agent_email):
         result["status"] = "skipped_no_email"
         print("  Skipped — no verified listing agent email.")
+        return result
+
+    normalized_email = _normalize_agent_email(agent_email)
+    if normalized_email in contacted_emails:
+        result["status"] = "skipped_already_contacted"
+        print(f"  Skipped — already drafted to {agent_email} on another listing.")
+        if not dry_run and not agents_only:
+            mark_property_outreach_handled(
+                supabase, property_id, agent_email, drafted=False
+            )
         return result
 
     print(f"  Agent 2 ({agent2_model}): drafting email...")
@@ -583,6 +641,7 @@ def process_property(
 
     if dry_run or agents_only:
         result["status"] = "dry_run" if dry_run else "agents_only"
+        contacted_emails.add(normalized_email)
         print(f"  Subject: {draft['subject']}")
         print(f"  PDF: {pdf_name} ({len(pdf_bytes):,} bytes)")
         return result
@@ -591,14 +650,15 @@ def process_property(
         gmail_service,
         subject=draft["subject"],
         body=body,
-        to_email=agent["agent_email"],
+        to_email=agent_email,
         pdf_bytes=pdf_bytes,
         pdf_filename=pdf_name,
     )
-    mark_email_drafted(supabase, property_id)
+    mark_property_outreach_handled(supabase, property_id, agent_email, drafted=True)
+    contacted_emails.add(normalized_email)
     result["status"] = "drafted"
     result["draft_id"] = draft_id
-    print(f"  Gmail draft created (id={draft_id}) → {agent['agent_email']}")
+    print(f"  Gmail draft created (id={draft_id}) → {agent_email}")
     return result
 
 
@@ -631,11 +691,16 @@ def run_pipeline(
     supabase = get_supabase_client()
     candidates = fetch_outreach_candidates(supabase, limit=limit)
 
+    contacted_emails = load_contacted_agent_emails(supabase)
+    if contacted_emails:
+        print(f"Already contacted {len(contacted_emails)} agent email(s) — duplicates will be skipped.\n")
+
     report: dict[str, Any] = {
         "candidates": len(candidates),
         "gmail_drafts": [],
         "dry_run": [],
         "skipped": [],
+        "skipped_duplicate_agent": [],
         "errors": [],
     }
     if not candidates:
@@ -663,6 +728,7 @@ def run_pipeline(
                 agent2_model=agent2_model,
                 gmail_service=gmail_service,
                 supabase=supabase,
+                contacted_emails=contacted_emails,
                 dry_run=dry_run,
                 agents_only=agents_only,
             )
@@ -670,6 +736,8 @@ def run_pipeline(
                 report["gmail_drafts"].append(outcome)
             elif outcome["status"] in {"dry_run", "agents_only"}:
                 report["dry_run"].append(outcome)
+            elif outcome["status"] == "skipped_already_contacted":
+                report["skipped_duplicate_agent"].append(outcome)
             else:
                 report["skipped"].append(outcome)
         except Exception as exc:
@@ -723,11 +791,13 @@ def main() -> int:
 
     gmail_count = len(report["gmail_drafts"])
     skipped = len(report["skipped"])
+    skipped_dup = len(report["skipped_duplicate_agent"])
     errors = len(report["errors"])
     print(
         f"\nDone — eligible: {report['candidates']}, "
         f"gmail_drafts_created: {gmail_count}, "
         f"skipped_no_agent_email: {skipped}, "
+        f"skipped_duplicate_agent: {skipped_dup}, "
         f"errors: {errors}"
     )
     if args.dry_run and report.get("dry_run"):
