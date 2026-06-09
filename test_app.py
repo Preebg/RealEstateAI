@@ -453,16 +453,9 @@ class TestDailyQuotaDetection(unittest.TestCase):
         found: list[str] = []
 
         def fake_attempt(**kwargs):
-            region = kwargs.get("split_region")
-            if region == "Upstate NY":
-                rows = []
-                for market, _ in kwargs.get("region_market_needs") or []:
-                    if market == "Rochester":
-                        rows.append(_VERIFIED_DISCOVERY_ROW)
-                    elif market == "Syracuse":
-                        rows.append(syracuse_row)
-                return rows, "upstate"
-            return [], ""
+            if kwargs.get("total_needed") is not None:
+                return [], ""
+            return [rochester_row, syracuse_row], "combined"
 
         with patch("engine._run_discovery_attempt", side_effect=fake_attempt):
             listings = discover_hot_market_listings(
@@ -731,7 +724,7 @@ class TestDiscoveryParsing(unittest.TestCase):
         self.assertEqual(listings[0]["city"], "Rochester")
         self.assertEqual(listings[0]["list_price"], 210000.0)
 
-    def test_discover_uses_split_market_when_combined_empty(self):
+    def test_discover_global_topup_when_combined_empty(self):
         calls = {"count": 0}
 
         def fake_generate(model, prompt, **kwargs):
@@ -756,7 +749,7 @@ class TestDiscoveryParsing(unittest.TestCase):
 
         self.assertEqual(len(listings), 1)
         self.assertEqual(listings[0]["city"], "Rochester")
-        self.assertGreater(calls["count"], 1)
+        self.assertEqual(calls["count"], 2)
 
     def test_plan_redistributes_unfilled_rochester_slots(self):
         from engine import (
@@ -808,49 +801,46 @@ class TestDiscoveryParsing(unittest.TestCase):
         self.assertEqual(rochester_need, _scaled_market_target("Rochester") - 3)
         self.assertEqual(sum(count for _, count in plan), MAX_DISCOVERY_LISTINGS - len(listings))
 
-    def test_discover_redistributes_when_rochester_exhausted(self):
-        upstate_calls = 0
-        other_regions: list[str] = []
+    def test_discover_global_topup_after_partial_combined(self):
+        calls = {"count": 0}
 
         def fake_discovery_attempt(**kwargs):
-            nonlocal upstate_calls
-            region = kwargs.get("split_region")
-            if region == "Upstate NY":
-                upstate_calls += 1
-                if upstate_calls == 1:
-                    payload = [
-                        {
-                            "address": f"{idx} Park Ave, Rochester, NY 1460{idx}",
-                            "city": "Rochester",
-                            "list_price": 189000 + idx * 1000,
-                            "listing_url": (
-                                f"https://www.zillow.com/homedetails/rochester-{idx}/"
-                            ),
-                        }
-                        for idx in range(3)
-                    ]
-                    return payload, json.dumps(payload)
-                return [], "[]"
-            if region:
-                other_regions.append(region)
-                rows = [
+            calls["count"] += 1
+            if kwargs.get("total_needed") is None:
+                payload = [
                     {
-                        "address": f"1 Oak St, {market}, ST 12345",
-                        "city": market,
-                        "list_price": 195000,
-                        "listing_url": f"https://www.zillow.com/homedetails/{market}-1/",
+                        "address": f"{idx} Park Ave, Rochester, NY 1460{idx}",
+                        "city": "Rochester",
+                        "list_price": 189000 + idx * 1000,
+                        "listing_url": (
+                            f"https://www.zillow.com/homedetails/rochester-{idx}/"
+                        ),
                     }
-                    for market, _ in kwargs.get("region_market_needs") or []
+                    for idx in range(3)
                 ]
-                return rows, json.dumps(rows)
-            return [], "[]"
+                return payload, json.dumps(payload)
+            rows = [
+                {
+                    "address": "1 Oak St, Syracuse, NY 13039",
+                    "city": "Syracuse",
+                    "list_price": 195000,
+                    "listing_url": "https://www.zillow.com/homedetails/syracuse-1/",
+                },
+                {
+                    "address": "2 Pine Rd, Orlando, FL 32801",
+                    "city": "Orlando",
+                    "list_price": 210000,
+                    "listing_url": "https://www.zillow.com/homedetails/orlando-2/",
+                },
+            ]
+            return rows, json.dumps(rows)
 
         with patch("engine._run_discovery_attempt", side_effect=fake_discovery_attempt):
             listings = discover_hot_market_listings(model=DISCOVERY_MODEL)
 
         rochester_count = sum(1 for item in listings if item["city"] == "Rochester")
         self.assertEqual(rochester_count, 3)
-        self.assertIn("Florida", other_regions)
+        self.assertEqual(calls["count"], 2)
         self.assertGreater(len(listings), 3)
 
     def test_plan_region_collapses_carolinas_markets(self):

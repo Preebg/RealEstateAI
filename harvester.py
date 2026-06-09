@@ -634,7 +634,7 @@ async def run_harvester_pipeline_async(admin_user_id: str) -> dict[str, Any]:
     Stage 4 (Synthesis): gemini-3.1-flash-lite-preview -> gemini-3.5-flash -> gemma-4-26b-a4b-it
 
     Discovery overlaps with downstream stages: each verified listing is researched as soon
-    as it is found. Per-market discovery agents run in parallel (≤13 RPM per model).
+    as it is found. Discovery is one combined all-market call per model tier (≤13 RPM).
     """
     global _active_discovery_model, _active_research_model, _active_synthesis_model
     _active_discovery_model = engine.DISCOVERY_MODEL
@@ -854,7 +854,7 @@ def _render_streamlit_app() -> None:
     st.info(
         f"Discovery uses Search Grounding (≤{engine.MAX_DISCOVERY_LISTINGS} listings under "
         f"${engine.MAX_DISCOVERY_PRICE:,}, suburbs included). Each verified address is sent "
-        f"to research immediately — even while slower Gemma per-market discovery continues — "
+        f"to research immediately as discovery returns verified rows — "
         f"then to synthesis as soon as research finishes "
         f"(rate-limited to {engine.HARVESTER_RPM_PER_MODEL} calls/min per model). "
         f"Synthesis skips Poor condition or price > ${engine.MAX_SYNTHESIS_PRICE:,}."
