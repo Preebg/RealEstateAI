@@ -2102,17 +2102,21 @@ class TestDataProvenance(unittest.TestCase):
     def test_get_final_analysis_attaches_provenance(self):
         from engine import get_final_analysis
 
-        result = get_final_analysis(
-            {
-                "price": 200000,
-                "rent": 1600,
-                "tax_rate": 3.0,
-                "insurance": 100,
-                "predicted_value": 205000,
-                "location_score": 6.5,
-            },
-            "123 Main St, Rochester, NY",
-        )
+        initial = {
+            "price": 200000,
+            "rent": 1600,
+            "tax_rate": 3.0,
+            "insurance": 100,
+            "predicted_value": 205000,
+            "location_score": 6.5,
+            "year_built": 1998,
+        }
+        with patch("engine.run_geospatial_enrichment", return_value={}):
+            result = get_final_analysis(
+                initial,
+                "123 Main St, Rochester, NY",
+                skip_comps=True,
+            )
         self.assertIn("confidence_score", result)
         self.assertIn("data_provenance", result)
 
