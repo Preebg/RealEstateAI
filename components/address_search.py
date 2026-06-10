@@ -32,12 +32,13 @@ def render_property_address_input(
 
     _coerce_address_input_state(key)
 
+    st.markdown('<span class="address-search-marker"></span>', unsafe_allow_html=True)
     st.multiselect(
         label="Property Address",
         options=get_kb_address_options(),
         max_selections=1,
         accept_new_options=True,
-        placeholder="Start typing to search the database (e.g. 28 Grant Ave)…",
+        placeholder="e.g. 28 Grant Ave, Rochester NY",
         key=key,
         disabled=disabled,
         help=(

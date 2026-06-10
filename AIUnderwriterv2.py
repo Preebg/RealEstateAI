@@ -17,7 +17,7 @@ def _render_model_validation_page() -> None:
 
 st.set_page_config(
     page_title=APP_NAME,
-    page_icon="🏠",
+    page_icon="📍",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -50,27 +50,27 @@ nav_pages = [
     st.Page(
         "pages/Home.py",
         title="Home",
-        icon="🗺️",
+        icon=":material/map:",
         url_path="home",
         default=not open_individual_search,
     ),
     st.Page(
         "pages/1_Individual_Search.py",
         title="Individual Search",
-        icon="🔍",
+        icon=":material/search:",
         url_path="individual-search",
         default=open_individual_search,
     ),
     st.Page(
         "pages/2_Compare_Properties.py",
         title="Compare",
-        icon="⚖️",
+        icon=":material/compare:",
         url_path="compare",
     ),
     st.Page(
         _render_model_validation_page,
         title="Model Validation",
-        icon="📊",
+        icon=":material/analytics:",
         url_path="model-validation",
     ),
 ]
@@ -86,12 +86,8 @@ pg = st.navigation(nav_pages)
 pg.run()
 
 if authenticated:
-    from services.deferred_analysis import (
-        render_background_deferred_worker,
-        render_global_deferred_status,
-    )
+    from services.deferred_analysis import render_background_deferred_worker
 
     render_background_deferred_worker()
-    render_global_deferred_status()
 
 render_app_footer_glossary()

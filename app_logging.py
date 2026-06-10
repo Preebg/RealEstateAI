@@ -54,6 +54,15 @@ class _StdlibLogger:
         else:
             self._logger.log(level, json.dumps(payload))
 
+    def info(self, event: str, **context: Any) -> None:
+        self._emit(logging.INFO, event, **context)
+
+    def warning(self, event: str, **context: Any) -> None:
+        self._emit(logging.WARNING, event, **context)
+
+    def error(self, event: str, **context: Any) -> None:
+        self._emit(logging.ERROR, event, **context)
+
 
 def _init_sentry() -> None:
     global _SENTRY_ENABLED
@@ -124,19 +133,22 @@ def report_error(
     **context: Any,
 ) -> None:
     """Log a structured error and send it to Sentry when configured."""
+    from security_utils import redact_log_context
+
+    safe_context = redact_log_context(context)
     log_fn = getattr(logger, level, logger.error)
     log_fn(
         event,
         error=str(exc),
         error_type=type(exc).__name__,
         exc_info=exc,
-        **context,
+        **safe_context,
     )
     if _SENTRY_ENABLED:
         import sentry_sdk
 
         with sentry_sdk.push_scope() as scope:
-            for key, value in context.items():
+            for key, value in safe_context.items():
                 scope.set_extra(key, value)
             scope.set_tag("component", context.get("component", "unknown"))
             sentry_sdk.capture_exception(exc)

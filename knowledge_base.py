@@ -695,6 +695,17 @@ def delete_canonical_property_by_id(property_id: str) -> bool:
     if not property_id or not is_valid_uuid(property_id):
         return False
 
+    if in_streamlit_app():
+        user = get_logged_in_user()
+        admin_uid = get_admin_uid()
+        if not user or not admin_uid or user["id"] != admin_uid:
+            log.warning(
+                "kb_canonical_delete_denied",
+                property_id=property_id,
+                user_id=user["id"] if user else None,
+            )
+            return False
+
     supabase = get_client()
     try:
         supabase.table("user_saved_properties").delete().eq(

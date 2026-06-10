@@ -20,7 +20,7 @@ from knowledge_base import (
     render_user_saved_properties_sidebar,
 )
 from market_pulse import render_market_pulse
-from ui_theme import render_page_hero, style_matplotlib_chart
+from ui_theme import render_page_hero, render_sidebar_section_label, style_matplotlib_chart
 
 MAX_COMPARE_PROPERTIES = 4
 DEFAULT_CLOSING_COSTS_PCT = 3.0
@@ -245,8 +245,8 @@ def _render_comparison_charts(rows: list[dict[str, Any]]) -> None:
 def render_property_compare_page() -> None:
     """Compare up to four saved properties on cash flow, appreciation, and alignment scores."""
     render_page_hero(
-        "⚖️ Compare Saved Properties",
-        "Pick up to four bookmarks and compare cash flow, appreciation, and hybrid optimization scores side by side.",
+        "Compare Properties",
+        "Side-by-side cash flow, returns, and alignment scores for up to four saved properties.",
     )
 
     from share_access import is_guest_viewer
@@ -262,27 +262,33 @@ def render_property_compare_page() -> None:
 
     with st.sidebar:
         render_auth_sidebar()
+        render_sidebar_section_label("Saved properties")
         render_user_saved_properties_sidebar()
         st.divider()
         render_market_pulse()
         st.divider()
-        st.header("Comparison Assumptions")
-        down_payment = st.number_input(
-            "Down Payment (%)", value=25.0, min_value=0.0, max_value=100.0, key="compare_down"
-        )
-        loan_term = st.number_input(
-            "Loan Term (yrs)", value=30, min_value=1, max_value=40, key="compare_term"
-        )
-        interest_rate = st.number_input(
-            "Mortgage Rate (%)", value=6.0, min_value=0.0, max_value=20.0, key="compare_rate"
-        )
-        closing_costs = st.number_input(
-            "Closing Costs (%)",
-            value=DEFAULT_CLOSING_COSTS_PCT,
-            min_value=0.0,
-            max_value=10.0,
-            key="compare_closing",
-        )
+        with st.container(border=True):
+            render_sidebar_section_label("Loan assumptions")
+            down_payment = st.number_input(
+                "Down Payment (%)",
+                value=25.0,
+                min_value=0.0,
+                max_value=100.0,
+                key="compare_down",
+            )
+            loan_term = st.number_input(
+                "Loan Term (yrs)", value=30, min_value=1, max_value=40, key="compare_term"
+            )
+            interest_rate = st.number_input(
+                "Mortgage Rate (%)", value=6.0, min_value=0.0, max_value=20.0, key="compare_rate"
+            )
+            closing_costs = st.number_input(
+                "Closing Costs (%)",
+                value=DEFAULT_CLOSING_COSTS_PCT,
+                min_value=0.0,
+                max_value=10.0,
+                key="compare_closing",
+            )
 
     saved = get_user_saved_properties(user["id"])
     if not saved:
@@ -297,14 +303,15 @@ def render_property_compare_page() -> None:
     }
     option_labels = list(address_options.keys())
 
-    st.subheader("Select properties")
-    selected_addresses = st.multiselect(
-        f"Choose up to {MAX_COMPARE_PROPERTIES} saved properties",
-        options=option_labels,
-        default=option_labels[: min(len(option_labels), MAX_COMPARE_PROPERTIES)],
-        help=f"Maximum {MAX_COMPARE_PROPERTIES} properties can be compared at once.",
-        key="compare_property_picks",
-    )
+    with st.container(border=True):
+        st.markdown("##### Select properties")
+        selected_addresses = st.multiselect(
+            f"Choose up to {MAX_COMPARE_PROPERTIES} saved properties",
+            options=option_labels,
+            default=option_labels[: min(len(option_labels), MAX_COMPARE_PROPERTIES)],
+            help=f"Maximum {MAX_COMPARE_PROPERTIES} properties can be compared at once.",
+            key="compare_property_picks",
+        )
 
     if len(selected_addresses) > MAX_COMPARE_PROPERTIES:
         st.warning(
@@ -329,7 +336,7 @@ def render_property_compare_page() -> None:
         for prop in selected_props
     ]
 
-    table_tab, chart_tab = st.tabs(["📊 Metrics Table", "📈 Charts"])
+    table_tab, chart_tab = st.tabs(["Metrics table", "Charts"])
 
     with table_tab:
         st.caption(

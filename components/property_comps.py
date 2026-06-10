@@ -334,39 +334,6 @@ def ensure_comps_analysis(property_info: dict[str, Any]) -> dict[str, Any]:
         return property_info
 
     needs_recompute = comps_analysis_needs_recompute(comps)
-    # #region agent log
-    try:
-        import json
-        import time
-
-        with open("debug-8a19ea.log", "a", encoding="utf-8") as _df:
-            _df.write(
-                json.dumps(
-                    {
-                        "sessionId": "8a19ea",
-                        "runId": "pre-fix",
-                        "hypothesisId": "A",
-                        "location": "property_comps.py:ensure_comps_analysis",
-                        "message": "comps recompute decision",
-                        "data": {
-                            "needs_recompute": needs_recompute,
-                            "priced_count": sum(
-                                1
-                                for c in (comps.get("comparable_properties") or [])
-                                if safe_float(c.get("sale_price")) > 0
-                            ),
-                            "comp_count": comps.get("comp_count"),
-                            "median_sale_price": comps.get("median_sale_price"),
-                            "has_comp_suggested_value": "comp_suggested_value" in comps,
-                        },
-                        "timestamp": int(time.time() * 1000),
-                    }
-                )
-                + "\n"
-            )
-    except OSError:
-        pass
-    # #endregion
 
     if not needs_recompute:
         apply_comp_implied_market_value(property_info, comps)

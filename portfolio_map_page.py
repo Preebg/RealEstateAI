@@ -26,7 +26,8 @@ from knowledge_base import (
 )
 from market_pulse import render_market_pulse
 from app_nav import navigate_to_individual_search
-from ui_theme import render_page_hero
+from security_utils import escape_html
+from ui_theme import render_callout_info, render_map_roi_legend, render_page_hero
 
 # ---------------------------------------------------------------------------
 # Market fallbacks — city centers with deterministic per-address jitter
@@ -351,7 +352,7 @@ def invalidate_portfolio_cache() -> None:
     """Clear portfolio map caches without st.cache_data.clear() (avoids stale module KeyErrors)."""
     for cached in (
         load_global_portfolio_properties,
-        load_geocoded_portfolio_dataframe,
+        _build_portfolio_dataframe_cached,
     ):
         try:
             cached.clear()
@@ -396,6 +397,10 @@ def _resolve_one_year_roi(prop: dict[str, Any], price: float, rent: float) -> fl
     """
     if price <= 0:
         return 0.0
+
+    stored_roi = prop.get("one_year_roi")
+    if stored_roi is not None and _safe_float(stored_roi) != 0.0:
+        return _safe_float(stored_roi)
 
     predicted_value = _safe_float(prop.get("predicted_value"))
     forecast_rate = _safe_float(prop.get("forecast_rate"))
@@ -603,10 +608,27 @@ def attach_coordinates(df: pd.DataFrame) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=300, show_spinner=False)
+def _build_portfolio_dataframe_cached(properties_json: str) -> pd.DataFrame:
+    """Cache analyzed metrics separately from geocoding (invalidates on KB writes)."""
+    properties = json.loads(properties_json)
+    return build_portfolio_dataframe(properties)
+
+
 def load_geocoded_portfolio_dataframe() -> pd.DataFrame:
     """Load, analyze, and geocode the full portfolio once per cache window."""
     properties = load_global_portfolio_properties()
-    return attach_coordinates(build_portfolio_dataframe(properties))
+    properties_json = json.dumps(properties, sort_keys=True, default=str)
+    analyzed = _build_portfolio_dataframe_cached(properties_json)
+    return attach_coordinates(analyzed)
+
+
+@st.fragment
+def _render_portfolio_map_fragment(
+    map_df: pd.DataFrame,
+    focus_address: str | None,
+) -> tuple[str | None, dict[str, Any] | None]:
+    """Isolate folium rebuilds from filter/ledger interactions outside the map."""
+    return render_portfolio_map(map_df, focus_address=focus_address)
 
 
 def _profitability_to_hex(
@@ -928,8 +950,10 @@ def _build_folium_map(
 
     for row in mappable.itertuples(index=False):
         is_focus = focus_address is not None and row.address == focus_address
+        safe_address = escape_html(row.address)
+        safe_category = escape_html(getattr(row, "category", ""))
         tooltip = (
-            f"<b>{row.address}</b><br/>"
+            f"<b>{safe_address}</b><br/>"
             f"Price: ${row.price:,.0f}<br/>"
             f"Rent: ${row.rent:,.0f}/mo<br/>"
             f"Cash Flow: ${row.monthly_cash_flow:,.0f}/mo<br/>"
@@ -941,14 +965,15 @@ def _build_folium_map(
         env_line = ""
         if isinstance(env, dict) and env.get("level"):
             env_score = env.get("score")
+            env_level = escape_html(env.get("level"))
             env_line = (
-                f"Environmental risk: {env.get('level')}"
+                f"Environmental risk: {env_level}"
                 f"{f' ({env_score:.1f}/10)' if env_score is not None else ''}<br/>"
             )
         popup = (
             f"<div style='min-width:220px'>"
-            f"<b>{row.address}</b><br/>"
-            f"{row.category}<br/>"
+            f"<b>{safe_address}</b><br/>"
+            f"{safe_category}<br/>"
             f"Price: ${row.price:,.0f}<br/>"
             f"Rent: ${row.rent:,.0f}/mo<br/>"
             f"Cash Flow: ${row.monthly_cash_flow:,.0f}/mo<br/>"
@@ -1325,8 +1350,13 @@ def render_portfolio_map_page() -> None:
     from share_access import is_guest_viewer, render_guest_sidebar
 
     render_page_hero(
-        "🗺️ Portfolio Map",
-        "Explore harvested properties by one-year ROI, cash flow, and quantum alignment score.",
+        "Portfolio Map",
+        "Browse analyzed properties across active markets. Filter by returns and cash flow, then open any address for a full report.",
+    )
+
+    render_callout_info(
+        "<strong>How to use:</strong> Adjust filters below, click a map marker or ledger row "
+        "to select a property, then open it in Individual Search for a detailed analysis."
     )
 
     with st.sidebar:
@@ -1340,7 +1370,18 @@ def render_portfolio_map_page() -> None:
     portfolio_df = load_geocoded_portfolio_dataframe()
 
     if portfolio_df.empty:
-        st.info("No properties in the knowledge base yet. Run the harvester to populate the map.")
+        st.markdown(
+            '<div class="section-card" style="text-align:center;padding:2rem 1.5rem;">'
+            '<p style="font-size:2rem;margin:0 0 0.5rem 0;opacity:0.35;">📍</p>'
+            "<p><strong>No properties on the map yet</strong></p>"
+            '<p class="muted-caption" style="margin:0.5rem auto 1rem auto;">'
+            "The shared knowledge base is empty. Search an address to add your first property, "
+            "or run the harvester to batch-populate markets."
+            "</p></div>",
+            unsafe_allow_html=True,
+        )
+        if st.button("Search a property", type="primary", key="map_empty_cta"):
+            navigate_to_individual_search()
         return
 
     price_min, price_max = _numeric_column_bounds(
@@ -1370,7 +1411,8 @@ def render_portfolio_map_page() -> None:
     )
 
     with st.container(border=True):
-        st.markdown("##### Filters & sorting")
+        st.markdown("##### Filters and sorting")
+        st.caption("Narrow the map and ledger by location, price, and return metrics.")
         cat_col1, cat_col2, sort_col = st.columns([1, 1, 1])
 
         with cat_col1:
@@ -1495,10 +1537,10 @@ def render_portfolio_map_page() -> None:
         )
 
     st.markdown("##### Map")
+    render_map_roi_legend()
     st.caption(
         "Hover for quick stats · click a marker to select · "
-        "zoom or pan to filter the ledger below · "
-        "click a ledger row to focus the map · green = higher 1-yr ROI"
+        "zoom or pan to filter the ledger · click a ledger row to focus the map"
     )
 
     if "map_selected_address" not in st.session_state:
@@ -1507,7 +1549,10 @@ def render_portfolio_map_page() -> None:
     _apply_ledger_selection_to_map(st.session_state.get("property_ledger"), map_df)
 
     selected_address = st.session_state.get("map_selected_address")
-    clicked_address, map_viewport = render_portfolio_map(map_df, focus_address=selected_address)
+    clicked_address, map_viewport = _render_portfolio_map_fragment(
+        map_df,
+        focus_address=selected_address,
+    )
     if clicked_address:
         st.session_state["map_selected_address"] = clicked_address
 

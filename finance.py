@@ -392,6 +392,9 @@ def project_value_schedule(
     return [base_value * ((1.0 + rate) ** year) for year in range(num_years)]
 
 
+# Standard down payment for 1-year ROI metrics (cash invested = down payment only).
+ROI_DOWN_PAYMENT_PCT = 20.0
+
 # Listings above this 1-year ROI are treated as unreliable (often foreclosures).
 MAX_RELIABLE_ONE_YEAR_ROI_PCT = 100.0
 
@@ -407,29 +410,28 @@ def calculate_one_year_roi(
     predicted_value: float,
     forecast_rate_pct: float,
     monthly_net_cash_flow: float,
-    down_payment_pct: float = 25.0,
+    down_payment_pct: float = ROI_DOWN_PAYMENT_PCT,
     closing_costs_pct: float = 3.0,
 ) -> float:
     """
-    One-year ROI: (1yr appreciation gain + annual cash flow) / cash invested.
+    One-year ROI: (1yr appreciation gain + annual cash flow) / down payment.
 
-    Appreciation gain = projected value after one year minus purchase price.
-    Cash invested = down payment + closing costs.
+    Appreciation grows from the purchase price at *forecast_rate_pct*; gain is
+    year-one value minus purchase price. Cash invested is the down payment only.
+    *predicted_value* is retained for API compatibility but does not inflate gain
+    when purchase price is below market.
     """
+    _ = predicted_value, closing_costs_pct
     if current_price <= 0:
         return 0.0
 
-    base_value = predicted_value if predicted_value > 0 else current_price
-    value_after_one_year = base_value * (1.0 + forecast_rate_pct / 100.0)
+    value_after_one_year = current_price * (1.0 + forecast_rate_pct / 100.0)
     appreciation_gain = value_after_one_year - current_price
     annual_cash_flow = monthly_net_cash_flow * 12.0
-    closing_costs_total = calculate_closing_costs(current_price, closing_costs_pct)
-    total_investment = calculate_total_investment(
-        current_price, down_payment_pct, closing_costs_total
-    )
-    if total_investment <= 0:
+    down_payment_amount = current_price * (down_payment_pct / 100.0)
+    if down_payment_amount <= 0:
         return 0.0
-    return ((appreciation_gain + annual_cash_flow) / total_investment) * 100.0
+    return ((appreciation_gain + annual_cash_flow) / down_payment_amount) * 100.0
 
 
 def calculate_one_year_roi_for_purchase(
@@ -437,7 +439,7 @@ def calculate_one_year_roi_for_purchase(
     purchase_price: float,
     predicted_value: float,
     forecast_rate_pct: float,
-    down_payment_pct: float = 25.0,
+    down_payment_pct: float = ROI_DOWN_PAYMENT_PCT,
     interest_rate: float = 6.0,
     loan_term: int = 30,
     closing_costs_pct: float = 3.0,

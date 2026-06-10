@@ -1,3 +1,5 @@
+from typing import Any
+
 import streamlit as st
 
 from authenticate import render_auth_page, render_auth_sidebar
@@ -21,7 +23,8 @@ from property_nav import consume_map_property_selection, load_property_from_kb
 from services.deferred_analysis import (
     clear_deferred_analysis_state,
     ensure_deferred_task_queue,
-    render_deferred_progress,
+    pending_tasks,
+    render_deferred_progress_fragment,
     set_active_analysis_address,
     store_deferred_finance_context,
     restore_individual_search_address_input,
@@ -33,7 +36,7 @@ from services.property_analysis_flow import (
     run_finance_analysis,
     run_initial_property_analysis,
 )
-from ui_theme import render_page_hero
+from ui_theme import render_callout_info, render_flow_steps, render_page_hero
 
 if not render_auth_page():
     st.stop()
@@ -57,8 +60,14 @@ if _map_address:
         )
 
 render_page_hero(
-    "🔍 Individual Property Search",
-    "Research any address with AI underwriting, quantum alignment scores, and exportable reports.",
+    "Individual Search",
+    "Enter an address to see estimated rent, monthly cash flow, and 10-year returns — with optional research simulations.",
+)
+
+_has_results = bool(st.session_state.get("property_data"))
+render_flow_steps(
+    ["Search address", "Run analysis", "Review results"],
+    active_index=2 if _has_results else (1 if st.session_state.get("address_input") else 0),
 )
 
 with st.sidebar:
@@ -71,13 +80,17 @@ with st.sidebar:
     render_market_pulse()
 
 if _guest_mode:
-    st.info(
-        "You're viewing via a shared link. Browse and explore read-only — "
-        "sign in to run new AI research or save assumptions."
+    render_callout_info(
+        "You're viewing a <strong>shared property link</strong>. Explore the analysis below — "
+        "sign in to search new addresses or save your assumptions."
     )
 
 restore_individual_search_address_input()
-address = render_property_address_input(disabled=_guest_mode)
+
+with st.container(border=True):
+    st.markdown("##### Property address")
+    st.caption("Start typing to pick from analyzed properties, or enter any new address.")
+    address = render_property_address_input(disabled=_guest_mode)
 
 if "property_data" not in st.session_state:
     st.session_state["property_data"] = None
@@ -100,20 +113,14 @@ if st.button("Analyze Property", disabled=_guest_mode):
 elif _guest_mode and not st.session_state.property_data:
     st.caption("Open a property from the **Portfolio Map** or use the link your friend shared.")
 
-if st.session_state.property_data:
-    ensure_deferred_task_queue(
-        st.session_state.property_data,
-        guest_mode=_guest_mode,
-    )
-    if address:
-        set_active_analysis_address(address)
-
-    property_info = backfill_year_built_if_needed(
-        st.session_state.property_data,
-        address,
-    )
-    property_info = ensure_data_provenance(property_info)
-    st.session_state.property_data = property_info
+@st.fragment
+def _render_property_underwriting(
+    *,
+    guest_mode: bool,
+    address: str,
+    property_info: dict[str, Any],
+) -> None:
+    """Assumption sliders, finance metrics, and analysis — fragment-scoped reruns."""
     total_confidence_pct = property_info.get("total_confidence_pct")
 
     price = safe_float(property_info.get("price"))
@@ -165,15 +172,16 @@ if st.session_state.property_data:
     )
     st.session_state.property_data = property_info
 
-    render_deferred_progress()
+    if pending_tasks():
+        render_deferred_progress_fragment()
 
     quantum_risk = resolve_quantum_risk(property_info)
 
     render_analysis_results(
-        guest_mode=_guest_mode,
+        guest_mode=guest_mode,
         address=address,
         property_info=property_info,
-        property_id=property_id or get_property_id_by_address(address),
+        property_id=property_id,
         from_kb=from_kb,
         quantum_risk=quantum_risk,
         assumptions=assumptions,
@@ -188,7 +196,7 @@ if st.session_state.property_data:
     )
 
     render_hitl_save_section(
-        guest_mode=_guest_mode,
+        guest_mode=guest_mode,
         property_info=property_info,
         address=address,
         property_id=property_id,
@@ -199,4 +207,26 @@ if st.session_state.property_data:
         appreciation_forecast=appreciation_forecast,
         branding_label=branding_label,
         get_pretty_label=get_pretty_label,
+    )
+
+
+if st.session_state.property_data:
+    ensure_deferred_task_queue(
+        st.session_state.property_data,
+        guest_mode=_guest_mode,
+    )
+    if address:
+        set_active_analysis_address(address)
+
+    property_info = backfill_year_built_if_needed(
+        st.session_state.property_data,
+        address,
+    )
+    property_info = ensure_data_provenance(property_info)
+    st.session_state.property_data = property_info
+
+    _render_property_underwriting(
+        guest_mode=_guest_mode,
+        address=address,
+        property_info=property_info,
     )

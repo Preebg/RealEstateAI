@@ -286,11 +286,11 @@ def render_backtest_page() -> None:
 
     from authenticate import get_logged_in_user
     from knowledge_base import get_admin_uid
+    from ui_theme import render_page_hero
 
-    st.title("Model validation backtest")
-    st.caption(
-        "Upload a CSV of historical comps with actual outcomes and your model's "
-        "predictions at analysis time. Metrics: MAPE, RMSE, and calibration plots."
+    render_page_hero(
+        "Model Validation",
+        "Measure prediction accuracy against historical comps — MAPE, RMSE, and calibration plots.",
     )
 
     user = get_logged_in_user()

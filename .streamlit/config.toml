@@ -32,3 +32,7 @@ borderColor = "#1e2640"
 backgroundColor = "#0e1320"
 secondaryBackgroundColor = "#161d2e"
 textColor = "#e8eaf0"
+
+
+[server]
+enableXsrfProtection = true

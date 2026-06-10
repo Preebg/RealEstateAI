@@ -186,6 +186,25 @@ def _is_localhost_url(url: str) -> bool:
     return host in {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
 
 
+def _is_trusted_app_host(hostname: str) -> bool:
+    """Hosts we accept when inferring OAuth redirect from request headers."""
+    host = (hostname or "").lower().strip()
+    if not host:
+        return False
+    if _is_localhost_url(f"https://{host}"):
+        return True
+    if host.endswith(".streamlit.app"):
+        return True
+    configured = _configured_redirect_url()
+    if configured:
+        from urllib.parse import urlsplit
+
+        allowed_host = (urlsplit(configured).hostname or "").lower()
+        if allowed_host and host == allowed_host:
+            return True
+    return False
+
+
 def _origin_from_request_headers() -> str:
     """Best-effort app origin when ``st.context.url`` is unavailable."""
     try:
@@ -193,11 +212,19 @@ def _origin_from_request_headers() -> str:
         host = headers.get("Host") or headers.get("host")
         if not host:
             return ""
+        from urllib.parse import urlsplit
+
+        hostname = (urlsplit(f"//{host}").hostname or host).split(":")[0]
+        if not _is_trusted_app_host(hostname):
+            log.warning("oauth_origin_rejected_untrusted_host", host=hostname)
+            return ""
         proto = (
             headers.get("X-Forwarded-Proto")
             or headers.get("x-forwarded-proto")
             or "https"
         )
+        if proto not in {"http", "https"}:
+            proto = "https"
         return _normalize_app_url(f"{proto}://{host}")
     except Exception:
         return ""
@@ -254,7 +281,13 @@ def _get_redirect_url() -> str:
         return configured
 
     if context_url:
-        return context_url
+        from urllib.parse import urlsplit
+
+        context_host = urlsplit(context_url).hostname or ""
+        if _is_localhost_url(context_url) or _is_trusted_app_host(context_host):
+            return context_url
+    if configured:
+        return configured
     return "http://localhost:8501"
 
 
@@ -467,9 +500,11 @@ def _restore_auth_handoff() -> bool:
         return False
 
     if get_logged_in_user():
+        _consume_auth_handoff(handoff_id)
+        _clear_query_param("auth_handoff")
         return False
 
-    row = _peek_auth_handoff(handoff_id)
+    row = _consume_auth_handoff_row(handoff_id)
     if not row:
         log.warning("oauth_handoff_not_found", handoff_id=handoff_id[:8] + "…")
         return False
@@ -482,6 +517,7 @@ def _restore_auth_handoff() -> bool:
     }
     st.session_state.pop("google_oauth_url", None)
     st.session_state.pop("google_signin_url", None)
+    _clear_query_param("auth_handoff")
     log.info("oauth_handoff_restored", handoff_id=handoff_id[:8] + "…")
     return True
 
@@ -521,11 +557,6 @@ def _read_pkce_verifier(supabase: Client | None = None) -> str | None:
 
     if st.session_state.get("pkce_code_verifier"):
         return str(st.session_state["pkce_code_verifier"])
-
-    pkce_param = _query_param("pkce_verifier")
-    if pkce_param:
-        st.session_state["pkce_code_verifier"] = pkce_param
-        return pkce_param
 
     if supabase is not None:
         sdk_verifier = _extract_verifier_from_auth_client(supabase)
@@ -632,7 +663,7 @@ def process_auth_callback() -> bool:
             _clear_oauth_query_params(keep_handoff=True)
         except (APIError, ValueError, TypeError) as exc:
             report_error(log, "oauth_exchange_failed", exc)
-            st.error(f"Sign-in failed: {exc}")
+            st.error("Sign-in failed. Please try again or use email/password.")
             _clear_oauth_query_params()
             _clear_pending_pkce()
 
@@ -909,20 +940,22 @@ def render_login_page() -> bool:
     if get_logged_in_user():
         return True
 
-    left, center, right = st.columns([1, 1.2, 1])
+    left, center, right = st.columns([1, 1.15, 1])
     with center:
         st.markdown('<span class="login-card-marker"></span>', unsafe_allow_html=True)
         st.markdown(
-            f'<div class="login-brand"><h2>🏠 {APP_NAME}</h2>'
-            '<p>Sign in to access your private knowledge base and run analyses.</p>'
-            '</div>',
+            f'<div class="login-brand">'
+            f'<p class="login-wordmark">{APP_NAME}</p>'
+            '<p class="login-tagline">'
+            "Research rental properties with AI estimates, cash flow, and 10-year returns."
+            "</p></div>",
             unsafe_allow_html=True,
         )
 
         login_tab, signup_tab = st.tabs(["Log in", "Sign up"])
 
         with login_tab:
-            st.markdown("##### Sign in with Google")
+            st.markdown("##### Continue with Google")
 
             redirect_warning = _oauth_redirect_config_warning()
             if redirect_warning:
@@ -951,8 +984,8 @@ def render_login_page() -> bool:
             except Exception as exc:
                 st.error(f"Google sign-in is unavailable: {exc}")
 
-            st.divider()
-            st.markdown("##### Or use email and password")
+            st.markdown('<div class="auth-divider">or</div>', unsafe_allow_html=True)
+            st.markdown("##### Email and password")
 
             login_email = st.text_input(
                 "Email", key="auth_login_email", placeholder="you@email.com"
@@ -968,8 +1001,8 @@ def render_login_page() -> bool:
                     try:
                         sign_in_with_email(login_email, login_password)
                         st.rerun()
-                    except Exception as exc:
-                        st.error(f"Login failed: {exc}")
+                    except Exception:
+                        st.error("Login failed. Check your email and password.")
 
         with signup_tab:
             signup_email = st.text_input(
@@ -1072,8 +1105,8 @@ def render_login_page() -> bool:
                         st.success(message)
                         if get_logged_in_user():
                             st.rerun()
-                    except Exception as exc:
-                        st.error(f"Sign-up failed: {exc}")
+                    except Exception:
+                        st.error("Sign-up failed. Try a different email or password.")
 
             st.caption("Already have an account? Use the **Log in** tab.")
 

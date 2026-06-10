@@ -9,6 +9,7 @@ import re
 import threading
 import time
 from collections.abc import Callable
+from functools import lru_cache
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -3237,6 +3238,11 @@ def run_property_value_agent(
     if not matches_property_value_trigger(strategy_label):
         return enriched
 
+    from comps_analysis import property_has_existing_comps
+
+    if property_has_existing_comps(enriched):
+        return enriched
+
     _log.info(
         "triggering_property_value_agent",
         address=address,
@@ -3280,6 +3286,11 @@ async def run_property_value_agent_async(
     )
     enriched["predicted_strategy_label"] = strategy_label
     if not matches_property_value_trigger(strategy_label):
+        return enriched
+
+    from comps_analysis import property_has_existing_comps
+
+    if property_has_existing_comps(enriched):
         return enriched
 
     _log.info(
@@ -3875,6 +3886,11 @@ def fetch_comparable_properties(
 
     May adjust predicted_value upward when comps show material undervaluation.
     """
+    from comps_analysis import property_has_existing_comps
+
+    if property_has_existing_comps(property_data):
+        return dict(property_data)
+
     active_model = model or PRIMARY_SEARCH_MODEL
     raw = comps_agent(address, property_data, active_model, num_comps=num_comps)
     extracted = _extract_json(raw)
@@ -4074,7 +4090,9 @@ def get_final_analysis(
             f"https://www.google.com/search?q={address.replace(' ', '+')}"
         ]
 
-    if not skip_comps and not property_data.get("comps_analysis"):
+    from comps_analysis import property_has_existing_comps
+
+    if not skip_comps and not property_has_existing_comps(property_data):
         try:
             property_data = fetch_comparable_properties(address, property_data)
         except Exception as exc:
@@ -4129,9 +4147,40 @@ def _portfolio_inputs_from_legacy(
     )
 
 
+def _quantum_risk_cache_key(
+    cash_flow: float, forecast_rate: float, location_score: float
+) -> tuple[float, float, float]:
+    """Stable cache key aligned with ``finance_task_signature`` rounding."""
+    return (round(cash_flow, 2), round(forecast_rate, 4), round(location_score, 2))
+
+
 def calculate_quantum_risk(*args: float, **kwargs: float) -> dict[str, float]:
     """Backward-compatible wrapper around :func:`quantum_portfolio.score_portfolio`."""
-    return score_portfolio(_portfolio_inputs_from_legacy(*args, **kwargs)).to_dict()
+    inputs = _portfolio_inputs_from_legacy(*args, **kwargs)
+    cash_flow, forecast_rate, location_score = _quantum_risk_cache_key(
+        inputs.monthly_cash_flow,
+        inputs.forecast_rate,
+        inputs.location_score,
+    )
+    return dict(_cached_quantum_risk(cash_flow, forecast_rate, location_score))
+
+
+@lru_cache(maxsize=256)
+def _cached_quantum_risk(
+    cash_flow: float, forecast_rate: float, location_score: float
+) -> dict[str, float]:
+    return score_portfolio(
+        PortfolioInputs(
+            monthly_cash_flow=cash_flow,
+            forecast_rate=forecast_rate,
+            location_score=location_score,
+        )
+    ).to_dict()
+
+
+def clear_quantum_risk_cache() -> None:
+    """Reset memoized QAOA scores (e.g. before tests that patch the optimizer)."""
+    _cached_quantum_risk.cache_clear()
 
 
 def calculate_quantum_probability(*args: float, **kwargs: float) -> float:

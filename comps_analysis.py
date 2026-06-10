@@ -59,6 +59,21 @@ def has_loaded_comps(property_data: dict[str, Any]) -> bool:
     return isinstance(comps, dict) and bool(comps.get("comparable_properties"))
 
 
+def property_has_existing_comps(property_data: dict[str, Any]) -> bool:
+    """True when sales comps are loaded or a prior comp-implied valuation exists."""
+    if has_loaded_comps(property_data):
+        return True
+    comps = property_data.get("comps_analysis")
+    if isinstance(comps, dict):
+        comp_count = int(comps.get("comp_count") or 0)
+        if comp_count >= MIN_COMPS_FOR_SUMMARY:
+            if safe_float(comps.get("comp_suggested_value")) > 0:
+                return True
+    if property_data.get("comps_adjusted_predicted_value"):
+        return True
+    return False
+
+
 def comps_analysis_needs_recompute(comps: dict[str, Any]) -> bool:
     """Return True when comparable_properties exist but summary metrics look stale."""
     raw = comps.get("comparable_properties") or []

@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 from datetime import timedelta
-from typing import Any
+from typing import Any, Literal
 
 import streamlit as st
 
+from comps_analysis import property_has_existing_comps
 from engine import calculate_quantum_risk, fetch_comparable_properties, safe_float
 from finance import calculate_10yr_appreciation
+
+RerunScope = Literal["app", "fragment"]
 
 INDIVIDUAL_SEARCH_ADDRESS_KEY = "individual_search_address"
 DEFERRED_FINANCE_CONTEXT_KEY = "deferred_finance_context"
@@ -19,13 +22,6 @@ TASK_LABELS: dict[str, str] = {
     "quantum": "Running quantum alignment simulation",
     "forecast_chart": "Building appreciation forecast chart",
 }
-
-
-def _has_comps(property_data: dict[str, Any]) -> bool:
-    comps = property_data.get("comps_analysis")
-    return bool(
-        isinstance(comps, dict) and comps.get("comparable_properties")
-    )
 
 
 def set_active_analysis_address(address: str) -> None:
@@ -124,7 +120,7 @@ def build_deferred_task_queue(
 ) -> list[str]:
     """Return ordered list of background tasks still needed for *property_data*."""
     tasks: list[str] = []
-    if not guest_mode and not _has_comps(property_data):
+    if not guest_mode and not property_has_existing_comps(property_data):
         tasks.append("comps")
     if not property_data.get("quantum_risk"):
         tasks.append("quantum")
@@ -267,16 +263,63 @@ def render_deferred_progress() -> None:
     )
 
 
+def _complete_deferred_task(
+    *,
+    task: str,
+    label: str,
+    address: str,
+    property_info: dict[str, Any],
+    finance_context: dict[str, Any] | None,
+    queue: list[str],
+    show_status: bool,
+) -> None:
+    """Execute one deferred task and advance the session queue."""
+    if show_status:
+        with st.status(f"⏳ {label}...", expanded=True) as status:
+            try:
+                _execute_task(
+                    task,
+                    address=address,
+                    property_info=property_info,
+                    finance_context=finance_context,
+                )
+                st.session_state.property_data = property_info
+                st.session_state[DEFERRED_TASKS_KEY] = queue[1:]
+                status.update(label=f"✅ {label}", state="complete")
+            except Exception as exc:
+                st.warning(f"Could not complete {label.lower()}: {exc}")
+                st.session_state[DEFERRED_TASKS_KEY] = queue[1:]
+                status.update(label=f"⚠️ {label} skipped", state="error")
+        return
+
+    try:
+        _execute_task(
+            task,
+            address=address,
+            property_info=property_info,
+            finance_context=finance_context,
+        )
+        st.session_state.property_data = property_info
+        st.session_state[DEFERRED_TASKS_KEY] = queue[1:]
+    except Exception as exc:
+        if show_status:
+            st.warning(f"Could not complete {label.lower()}: {exc}")
+        st.session_state[DEFERRED_TASKS_KEY] = queue[1:]
+
+
 def process_next_deferred_task(
     *,
     address: str | None = None,
     finance_context: dict[str, Any] | None = None,
     rerun: bool = True,
+    rerun_scope: RerunScope = "app",
+    show_status: bool = True,
 ) -> bool:
     """
     Run the next queued heavy task.
 
-    Returns True when a task was executed (and *rerun* triggers a full app rerun).
+    Returns True when a task was executed. When *rerun* is set, uses
+    *rerun_scope* while work remains and one full app rerun when the queue empties.
     """
     queue = pending_tasks()
     if not queue:
@@ -295,33 +338,38 @@ def process_next_deferred_task(
 
     task = queue[0]
     label = TASK_LABELS.get(task, task)
-
-    with st.status(f"⏳ {label}...", expanded=True) as status:
-        try:
-            _execute_task(
-                task,
-                address=resolved_address,
-                property_info=property_info,
-                finance_context=resolved_finance,
-            )
-            st.session_state.property_data = property_info
-            st.session_state[DEFERRED_TASKS_KEY] = queue[1:]
-            status.update(label=f"✅ {label}", state="complete")
-        except Exception as exc:
-            st.warning(f"Could not complete {label.lower()}: {exc}")
-            st.session_state[DEFERRED_TASKS_KEY] = queue[1:]
-            status.update(label=f"⚠️ {label} skipped", state="error")
+    _complete_deferred_task(
+        task=task,
+        label=label,
+        address=resolved_address,
+        property_info=property_info,
+        finance_context=resolved_finance,
+        queue=queue,
+        show_status=show_status,
+    )
 
     if rerun:
-        st.rerun()
+        if pending_tasks():
+            st.rerun(scope=rerun_scope)
+        else:
+            st.rerun(scope="app")
     return True
 
 
-def tick_deferred_analysis(*, rerun: bool = True) -> bool:
+def tick_deferred_analysis(
+    *,
+    rerun: bool = True,
+    rerun_scope: RerunScope = "app",
+    show_status: bool = True,
+) -> bool:
     """Advance one deferred task using persisted session context."""
     if not pending_tasks():
         return False
-    return process_next_deferred_task(rerun=rerun)
+    return process_next_deferred_task(
+        rerun=rerun,
+        rerun_scope=rerun_scope,
+        show_status=show_status,
+    )
 
 
 def render_global_deferred_status() -> None:
@@ -350,6 +398,20 @@ def render_background_deferred_worker() -> None:
 
 @st.fragment(run_every=timedelta(seconds=2))
 def _background_deferred_worker_fragment() -> None:
+    """Fragment-scoped polling: advances work without full-app reruns every 2s."""
+    render_global_deferred_status()
     if not pending_tasks():
         return
-    tick_deferred_analysis(rerun=True)
+    tick_deferred_analysis(
+        rerun=True,
+        rerun_scope="fragment",
+        show_status=False,
+    )
+
+
+@st.fragment(run_every=timedelta(seconds=2))
+def render_deferred_progress_fragment() -> None:
+    """Refresh the Individual Search progress bar without a full app rerun."""
+    if not pending_tasks():
+        return
+    render_deferred_progress()

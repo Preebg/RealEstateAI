@@ -29,6 +29,7 @@ with patch("streamlit.secrets", {"GEMINI_API_KEY": "fake_key"}):
         ALIGNMENT_SCORE_KEYS,
         calculate_quantum_probability,
         calculate_quantum_risk,
+        clear_quantum_risk_cache,
     )
     from engine import (
         DISCOVERY_FALLBACK_MODEL,
@@ -234,6 +235,7 @@ class TestAIUnderwriterEngine(unittest.TestCase):
         High-value inputs should yield strong marginal success rates after COBYLA
         minimizes the QAOA cost Hamiltonian (optimized cost <= initial cost).
         """
+        clear_quantum_risk_cache()
         opt_results: list = []
         call_records: list[tuple] = []
 
@@ -273,6 +275,7 @@ class TestAIUnderwriterEngine(unittest.TestCase):
 
     def test_quantum_optimizer_bounds(self):
         """Extreme inputs are clamped; outputs stay in [0, 100] with no optimizer failure."""
+        clear_quantum_risk_cache()
         extreme_cases = (
             (-1_000_000_000.0, 999_999.0, -1_000_000.0),
             (1_000_000_000.0, -500.0, 10_000.0),
@@ -301,6 +304,7 @@ class TestAIUnderwriterEngine(unittest.TestCase):
         assert_valid_quantum_risk(self, all_zero)
         self.assertEqual(all_zero["overall_success_pct"], 0.0)
 
+        clear_quantum_risk_cache()
         with patch("quantum_portfolio.minimize", wraps=scipy_minimize) as mock_minimize:
             oversaturated = calculate_quantum_risk(50_000.0, 500.0, 500.0)
         mock_minimize.assert_called_once()
@@ -328,6 +332,7 @@ class TestAIUnderwriterEngine(unittest.TestCase):
 
     def test_quantum_simulator_uses_fixed_seed(self):
         """Every AerSimulator.run in the QAOA path must pass seed_simulator=42."""
+        clear_quantum_risk_cache()
         seeds: list[int | None] = []
         original_run = AerSimulator.run
 
@@ -991,22 +996,37 @@ class TestOneYearROI(unittest.TestCase):
     def test_positive_appreciation_and_negative_cashflow(self):
         from finance import calculate_one_year_roi
 
-        # $200k purchase, $210k predicted, 4% annual growth, -$500/mo cash flow
+        # $200k purchase, 4% annual growth, -$500/mo cash flow, 20% down
         roi = calculate_one_year_roi(
             current_price=200_000,
             predicted_value=210_000,
             forecast_rate_pct=4.0,
             monthly_net_cash_flow=-500,
-            down_payment_pct=25.0,
+            down_payment_pct=20.0,
             closing_costs_pct=3.0,
         )
-        value_after_one_year = 210_000 * 1.04
+        value_after_one_year = 200_000 * 1.04
         appreciation_gain = value_after_one_year - 200_000
         annual_cash_flow = -500 * 12
-        investment = 200_000 * 0.25 + 200_000 * 0.03
-        expected = ((appreciation_gain + annual_cash_flow) / investment) * 100.0
+        down_payment = 200_000 * 0.20
+        expected = ((appreciation_gain + annual_cash_flow) / down_payment) * 100.0
         self.assertAlmostEqual(roi, expected, places=2)
-        self.assertLess(roi, appreciation_gain / investment * 100)
+        self.assertLess(roi, appreciation_gain / down_payment * 100)
+
+    def test_high_predicted_value_does_not_inflate_appreciation_gain(self):
+        from finance import calculate_one_year_roi
+
+        roi = calculate_one_year_roi(
+            current_price=200_000,
+            predicted_value=500_000,
+            forecast_rate_pct=5.0,
+            monthly_net_cash_flow=0.0,
+            down_payment_pct=20.0,
+        )
+        expected_gain = 200_000 * 0.05
+        expected = (expected_gain / (200_000 * 0.20)) * 100.0
+        self.assertAlmostEqual(roi, expected, places=2)
+        self.assertLess(roi, 50.0)
 
     def test_zero_price_returns_zero(self):
         from finance import calculate_one_year_roi
@@ -1305,6 +1325,7 @@ class TestUnreliableForeclosureROI(unittest.TestCase):
         )
 
         with (
+            patch("knowledge_base.in_streamlit_app", return_value=False),
             patch(
                 "knowledge_base._fetch_canonical_properties",
                 return_value=[bad_row, good_row],
@@ -2640,6 +2661,23 @@ class TestCompsAnalysis(unittest.TestCase):
         self.assertEqual(result["comps_analysis"]["comp_count"], 2)
         self.assertTrue(result.get("comps_adjusted_predicted_value"))
 
+    def test_fetch_comparable_properties_skips_when_comps_exist(self):
+        from engine import fetch_comparable_properties
+
+        subject = {
+            "price": 170000,
+            "comps_analysis": {
+                "comparable_properties": [
+                    {"address": "9 Oak Ave", "sale_price": 205000},
+                ],
+                "comp_count": 1,
+            },
+        }
+        with patch("engine.comps_agent") as mock_agent:
+            result = fetch_comparable_properties("123 Main St, Rochester, NY", subject)
+        mock_agent.assert_not_called()
+        self.assertEqual(result["comps_analysis"]["comp_count"], 1)
+
 
 class TestPdfGenerator(unittest.TestCase):
     def test_generate_property_pdf_includes_comps_and_forecast(self):
@@ -2759,6 +2797,81 @@ class TestShareAccess(unittest.TestCase):
             resolved = ensure_property_saved_for_share(property_data, "123 Main St, Rochester, NY")
         self.assertEqual(resolved, "11111111-1111-1111-1111-111111111111")
         mock_save.assert_not_called()
+
+
+class TestSecurityHardening(unittest.TestCase):
+    def test_escape_html_neutralizes_script_tags(self):
+        from security_utils import escape_html
+
+        payload = '<img src=x onerror="alert(1)">'
+        escaped = escape_html(payload)
+        self.assertNotIn("<img", escaped)
+        self.assertIn("&lt;img", escaped)
+
+    def test_redact_log_context_masks_tokens(self):
+        from security_utils import redact_log_context
+
+        redacted = redact_log_context(
+            {"share_token": "secret-token", "property_id": "abc"}
+        )
+        self.assertEqual(redacted["share_token"], "[redacted]")
+        self.assertEqual(redacted["property_id"], "abc")
+
+    def test_delete_canonical_denied_for_non_admin_in_streamlit(self):
+        from unittest.mock import MagicMock, patch
+
+        from knowledge_base import delete_canonical_property_by_id
+
+        property_id = "7f35bc1e-9de5-484d-8f73-27fd3da733eb"
+        with (
+            patch("knowledge_base.in_streamlit_app", return_value=True),
+            patch("knowledge_base.get_logged_in_user", return_value={"id": "user-a"}),
+            patch("knowledge_base.get_admin_uid", return_value="admin-b"),
+            patch("knowledge_base.get_client") as mock_client,
+            patch("knowledge_base.log", MagicMock()),
+        ):
+            self.assertFalse(delete_canonical_property_by_id(property_id))
+            mock_client.assert_not_called()
+
+    def test_delete_canonical_allowed_for_admin_in_streamlit(self):
+        from unittest.mock import MagicMock, patch
+
+        from knowledge_base import delete_canonical_property_by_id
+
+        admin_id = "7f35bc1e-9de5-484d-8f73-27fd3da733eb"
+        property_id = "11111111-1111-1111-1111-111111111111"
+        mock_supabase = MagicMock()
+        with (
+            patch("knowledge_base.in_streamlit_app", return_value=True),
+            patch(
+                "knowledge_base.get_logged_in_user",
+                return_value={"id": admin_id, "email": "admin@example.com"},
+            ),
+            patch("knowledge_base.get_admin_uid", return_value=admin_id),
+            patch("knowledge_base.get_client", return_value=mock_supabase),
+            patch("knowledge_base.invalidate_kb_cache"),
+            patch("knowledge_base.log", MagicMock()),
+        ):
+            self.assertTrue(delete_canonical_property_by_id(property_id))
+
+    def test_read_pkce_verifier_ignores_query_param(self):
+        from unittest.mock import patch
+
+        import authenticate
+
+        with (
+            patch.object(authenticate.st, "session_state", {}),
+            patch.object(authenticate.st, "query_params", {"pkce_verifier": "leaked"}),
+            patch("authenticate._load_pending_pkce", return_value=None),
+        ):
+            self.assertIsNone(authenticate._read_pkce_verifier())
+
+    def test_oauth_redirect_rejects_untrusted_forwarded_host(self):
+        import authenticate
+
+        self.assertFalse(authenticate._is_trusted_app_host("evil.example.com"))
+        self.assertTrue(authenticate._is_trusted_app_host("localhost"))
+        self.assertTrue(authenticate._is_trusted_app_host("my-app.streamlit.app"))
 
 
 if __name__ == "__main__":

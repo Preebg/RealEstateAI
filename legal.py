@@ -133,11 +133,13 @@ def requested_legal_path() -> str | None:
 
 def render_legal_page(path: str) -> None:
     """Render a standalone public legal page."""
+    from ui_theme import render_page_hero
+
     if path == TERMS_PATH:
-        st.title("Terms of Service")
+        render_page_hero("Terms of Service", f"Legal terms for using {APP_NAME}.")
         st.markdown(get_terms_of_service_text())
     elif path == PRIVACY_PATH:
-        st.title("Privacy Policy")
+        render_page_hero("Privacy Policy", f"How {APP_NAME} collects and uses your data.")
         st.markdown(get_privacy_policy_text())
     else:
         st.error("Unknown legal page.")

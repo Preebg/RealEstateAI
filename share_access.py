@@ -441,7 +441,7 @@ def create_headless_property_share_url(
 
 def render_guest_sidebar() -> None:
     """Sidebar for read-only guest viewers."""
-    st.markdown("### 👀 Guest view")
+    st.markdown("### Guest view")
     st.caption(
         "You're viewing a shared link. Browse properties read-only — "
         "sign in to save or run new analyses."

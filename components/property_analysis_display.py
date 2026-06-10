@@ -26,8 +26,8 @@ from engine import (
     safe_float,
 )
 from finance import (
+    ROI_DOWN_PAYMENT_PCT,
     calculate_10yr_appreciation,
-    calculate_one_year_roi,
     calculate_one_year_roi_for_purchase,
     simulate_market_crash,
 )
@@ -53,7 +53,7 @@ def _render_market_crash_simulation(
     finance: dict[str, Any],
 ) -> None:
     """Interactive stress test: sudden market drop and worsened rental assumptions."""
-    with st.expander("📉 Market Crash Simulation", expanded=False):
+    with st.expander("Market crash simulation", expanded=False):
         st.caption(
             "Model a sudden downturn for **this property** — value drop, rent decline, "
             "and higher vacancy — then compare baseline vs stressed outcomes."
@@ -234,7 +234,8 @@ def _render_market_crash_simulation(
         ax.ticklabel_format(style="plain", axis="y")
         ax.legend(loc="upper left", fontsize=8)
         style_matplotlib_chart(fig, ax)
-        st.pyplot(fig)
+        st.pyplot(fig, clear_figure=True)
+        plt.close(fig)
 
         st.info(
             f"**Assumptions:** {price_drop_pct:.0f}% value drop in year {crash_year}, "
@@ -305,169 +306,201 @@ def render_analysis_results(
     loan_term = loan_params["loan_term"]
 
     st.divider()
-    st.subheader("📊 Analysis Overview")
+
     share_property_id = property_id
-    render_share_popover(
-        guest_mode=guest_mode,
-        share_property_id=share_property_id,
-        from_kb=from_kb,
-        property_info=property_info,
-        address=address,
-    )
+    header_col, share_col = st.columns([4, 1])
+    with header_col:
+        st.markdown('<p class="analysis-section-title">Analysis results</p>', unsafe_allow_html=True)
+    with share_col:
+        render_share_popover(
+            guest_mode=guest_mode,
+            share_property_id=share_property_id,
+            from_kb=from_kb,
+            property_info=property_info,
+            address=address,
+        )
     render_pending_share_clipboard_copy()
 
-    quantum_ready = isinstance(quantum_risk, dict) and bool(quantum_risk)
-    with st.container():
-        st.markdown('<span class="quantum-scores-marker"></span>', unsafe_allow_html=True)
+    if total_confidence_pct is not None:
         st.markdown(
-            '<div class="quantum-scores-title">⚛️ Quantum Alignment Scores</div>',
+            '<p class="confidence-explainer">'
+            "<strong>Data quality badges</strong> show how confident we are in scraped or "
+            "inferred values — not whether a number is good or bad for investing."
+            "</p>",
             unsafe_allow_html=True,
         )
-        qrow1_col1, qrow1_col2 = st.columns(2)
-        with qrow1_col1:
-            if quantum_ready:
-                st.metric(
-                    label="Cash Flow Success",
-                    value=f"{quantum_risk['cashflow_success_pct']:.1f}%",
-                    help="QAOA alignment with positive cash-flow targets (0–100%).",
-                )
-            else:
-                _pending_metric(
-                    "Cash Flow Success",
-                    help_text="QAOA alignment with positive cash-flow targets (0–100%).",
-                )
-        with qrow1_col2:
-            if quantum_ready:
-                st.metric(
-                    label="Appreciation Success",
-                    value=f"{quantum_risk['appreciation_success_pct']:.1f}%",
-                    help="QAOA alignment with appreciation forecast targets (0–100%).",
-                )
-            else:
-                _pending_metric(
-                    "Appreciation Success",
-                    help_text="QAOA alignment with appreciation forecast targets (0–100%).",
-                )
 
-        qrow2_col1, qrow2_col2 = st.columns(2)
-        with qrow2_col1:
-            if quantum_ready:
-                st.metric(
-                    label="Combined Wealth Success",
-                    value=f"{quantum_risk['combined_wealth_success_pct']:.1f}%",
-                    help="Joint cash-flow and appreciation alignment from QAOA (0–100%).",
-                )
-            else:
-                _pending_metric(
-                    "Combined Wealth Success",
-                    help_text="Joint cash-flow and appreciation alignment from QAOA (0–100%).",
-                )
-        with qrow2_col2:
-            if quantum_ready:
-                st.metric(
-                    label="Overall Alignment Score",
-                    value=f"{quantum_risk['overall_success_pct']:.1f}%",
-                    help="Weighted overall QAOA alignment across cash flow, appreciation, and location.",
-                )
-            else:
-                _pending_metric(
-                    "Overall Alignment Score",
-                    help_text="Weighted overall QAOA alignment across cash flow, appreciation, and location.",
-                )
+    quantum_ready = isinstance(quantum_risk, dict) and bool(quantum_risk)
 
-    tab1 = st.tabs(["📋 Detailed Metrics"])[0]
+    purchase_price = safe_float(assumptions.get("offer_amount")) or price
+    forecast_rate = safe_float(property_info.get("forecast_rate"))
+    if forecast_rate <= 0:
+        live_forecast = property_info.get("_forecast_display_cache")
+        if isinstance(live_forecast, dict):
+            forecast_rate = safe_float(live_forecast.get("annual_rate"))
+    if forecast_rate <= 0:
+        forecast_rate = calculate_10yr_appreciation(
+            predicted_value or purchase_price,
+            location_score,
+            market_city,
+        )["annual_rate"]
 
-    with tab1:
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Monthly Take-Home", f"${monthly_net_cash_flow:,.2f}")
-        col2.metric("Risk-Adjusted Cap Rate", f"{cap_rate:.2f}%")
-        col3.metric("Cash On Cash", f"{cash_on_cash:.2f}%")
+    roi_base_value = predicted_value if predicted_value > 0 else purchase_price
+    roi_closing_costs_pct = assumptions.get("user_closing_costs_pct", 3.0)
+    roi_common_kwargs = {
+        "predicted_value": roi_base_value,
+        "forecast_rate_pct": forecast_rate,
+        "down_payment_pct": ROI_DOWN_PAYMENT_PCT,
+        "interest_rate": interest_rate,
+        "loan_term": int(loan_term),
+        "closing_costs_pct": roi_closing_costs_pct,
+        "tax_rate": safe_float(property_info.get("tax_rate")),
+        "monthly_insurance": monthly_insurance,
+        "monthly_hoa": monthly_HOA,
+        "maint_percent": assumptions.get("final_maint_percent", 0.0),
+        "monthly_rent": final_monthly_rent,
+        "vacancy_reserve_pct": assumptions.get("user_vacancy_reserve", 5.0),
+        "management_fee_pct": assumptions.get("user_management_fee", 10.0),
+    }
+    offer_one_year_roi = calculate_one_year_roi_for_purchase(
+        purchase_price=purchase_price,
+        **roi_common_kwargs,
+    )
+    market_one_year_roi = calculate_one_year_roi_for_purchase(
+        purchase_price=market_value,
+        **roi_common_kwargs,
+    )
 
-        purchase_price = safe_float(assumptions.get("offer_amount")) or price
-        forecast_rate = safe_float(property_info.get("forecast_rate"))
-        if forecast_rate <= 0:
-            live_forecast = property_info.get("_forecast_display_cache")
-            if isinstance(live_forecast, dict):
-                forecast_rate = safe_float(live_forecast.get("annual_rate"))
-        if forecast_rate <= 0:
-            forecast_rate = calculate_10yr_appreciation(
-                predicted_value or purchase_price,
-                location_score,
-                market_city,
-            )["annual_rate"]
+    # ── Summary ──
+    st.markdown('<p class="analysis-section-title">Summary</p>', unsafe_allow_html=True)
+    st.write(property_info.get("summary", "No summary available."))
+    st.caption(f"Strategy profile: {branding_label}")
 
-        roi_base_value = predicted_value if predicted_value > 0 else purchase_price
-        offer_one_year_roi = calculate_one_year_roi(
-            current_price=purchase_price,
-            predicted_value=roi_base_value,
-            forecast_rate_pct=forecast_rate,
-            monthly_net_cash_flow=monthly_net_cash_flow,
-            down_payment_pct=down_payment,
-            closing_costs_pct=assumptions.get("user_closing_costs_pct", 3.0),
-        )
-        market_one_year_roi = calculate_one_year_roi_for_purchase(
-            purchase_price=market_value,
-            predicted_value=roi_base_value,
-            forecast_rate_pct=forecast_rate,
-            down_payment_pct=down_payment,
-            interest_rate=interest_rate,
-            loan_term=int(loan_term),
-            closing_costs_pct=assumptions.get("user_closing_costs_pct", 3.0),
-            tax_rate=safe_float(property_info.get("tax_rate")),
-            monthly_insurance=monthly_insurance,
-            monthly_hoa=monthly_HOA,
-            maint_percent=assumptions.get("final_maint_percent", 0.0),
-            monthly_rent=final_monthly_rent,
-            vacancy_reserve_pct=assumptions.get("user_vacancy_reserve", 5.0),
-            management_fee_pct=assumptions.get("user_management_fee", 10.0),
-        )
+    # ── Key metrics ──
+    st.markdown('<p class="analysis-section-title">At a glance</p>', unsafe_allow_html=True)
+    hero1, hero2, hero3, hero4 = st.columns(4)
+    hero1.metric("Monthly cash flow", f"${monthly_net_cash_flow:,.0f}")
+    hero2.metric("1-year ROI", f"{offer_one_year_roi:.2f}%")
+    hero3.metric("Cap rate", f"{cap_rate:.2f}%")
+    hero4.metric("Cash on cash", f"{cash_on_cash:.2f}%")
 
-        roi_col1, roi_col2 = st.columns(2)
-        roi_col1.metric(
-            "1-Year ROI (Your Offer)",
-            f"{offer_one_year_roi:.2f}%",
-            help=(
-                "Return on cash invested over one year at your offer price: "
-                "appreciation gain plus annual cash flow, divided by down payment and closing costs."
-            ),
-        )
-        roi_delta = market_one_year_roi - offer_one_year_roi
-        roi_col2.metric(
-            "1-Year ROI at Market Value",
-            f"{market_one_year_roi:.2f}%",
-            delta=f"{roi_delta:+.2f}%" if abs(market_value - purchase_price) >= 1 else None,
-            help=(
-                "Same calculation assuming you pay comp-implied market value instead of your offer. "
-                "Delta shows the impact vs your offer price."
-            ),
-        )
+    # ── Financials ──
+    st.markdown('<p class="analysis-section-title">Financial details</p>', unsafe_allow_html=True)
+    fin1, fin2, fin3 = st.columns(3)
+    fin1.metric("Monthly take-home", f"${monthly_net_cash_flow:,.2f}")
+    fin2.metric("Risk-adjusted cap rate", f"{cap_rate:.2f}%")
+    fin3.metric("Total investment", f"${total_investment:,.0f}")
 
-        st.markdown(f"**Strategy Status:** :blue[{branding_label}]")
-        st.subheader("🎯 AI Valuation")
-        if has_comp_market_value:
-            st.info(
-                _markdown_safe_text(
-                    f"**Market Value (from comps):** ${market_value:,.2f}\n\n"
-                    f"**Reasoning:** {prediction_reasoning}"
-                )
+    roi_col1, roi_col2 = st.columns(2)
+    roi_col1.metric(
+        "1-year ROI (your offer)",
+        f"{offer_one_year_roi:.2f}%",
+        help=(
+            "Return on down payment over one year at your offer price: "
+            f"year-one value gain plus annual cash flow, divided by a {ROI_DOWN_PAYMENT_PCT:.0f}% down payment."
+        ),
+    )
+    roi_delta = market_one_year_roi - offer_one_year_roi
+    roi_col2.metric(
+        "1-year ROI at market value",
+        f"{market_one_year_roi:.2f}%",
+        delta=f"{roi_delta:+.2f}%" if abs(market_value - purchase_price) >= 1 else None,
+        help=(
+            "Same calculation assuming you pay comp-implied market value instead of your offer."
+        ),
+    )
+
+    st.markdown("##### Estimated value")
+    if has_comp_market_value:
+        st.info(
+            _markdown_safe_text(
+                f"**Market value (from comps):** ${market_value:,.2f}\n\n"
+                f"**Reasoning:** {prediction_reasoning}"
             )
-        else:
-            st.info(
-                _markdown_safe_text(
-                    f"**Predicted Market Value:** ${predicted_value:,.2f}\n\n"
-                    f"**Reasoning:** {prediction_reasoning}\n\n"
-                    "_Run **Check Area Comps** below to set market value from nearby sales._"
-                )
+        )
+    else:
+        st.info(
+            _markdown_safe_text(
+                f"**Predicted market value:** ${predicted_value:,.2f}\n\n"
+                f"**Reasoning:** {prediction_reasoning}\n\n"
+                "_Run **Check Area Comps** below to set market value from nearby sales._"
             )
-
-        render_property_comps_section(
-            guest_mode=guest_mode,
-            address=address,
-            property_info=property_info,
-            offer_amount=assumptions.get("offer_amount") or safe_float(property_info.get("price")),
         )
 
-        with st.expander("📈 10-Year Appreciation Forecast"):
+    # ── Comps ──
+    st.markdown('<p class="analysis-section-title">Comparable sales</p>', unsafe_allow_html=True)
+    render_property_comps_section(
+        guest_mode=guest_mode,
+        address=address,
+        property_info=property_info,
+        offer_amount=assumptions.get("offer_amount") or safe_float(property_info.get("price")),
+    )
+
+    # ── Advanced simulations ──
+    with st.expander("Advanced: research simulations", expanded=False):
+        st.caption(
+            "Portfolio-alignment scores and stress tests are educational simulations — "
+            "not financial advice or market predictions."
+        )
+        with st.container():
+            st.markdown('<span class="quantum-scores-marker"></span>', unsafe_allow_html=True)
+            st.markdown(
+                '<div class="quantum-scores-title">Portfolio alignment scores</div>',
+                unsafe_allow_html=True,
+            )
+            qrow1_col1, qrow1_col2 = st.columns(2)
+            with qrow1_col1:
+                if quantum_ready:
+                    st.metric(
+                        label="Cash flow alignment",
+                        value=f"{quantum_risk['cashflow_success_pct']:.1f}%",
+                        help="Alignment with positive cash-flow targets (0–100%).",
+                    )
+                else:
+                    _pending_metric(
+                        "Cash flow alignment",
+                        help_text="Alignment with positive cash-flow targets (0–100%).",
+                    )
+            with qrow1_col2:
+                if quantum_ready:
+                    st.metric(
+                        label="Appreciation alignment",
+                        value=f"{quantum_risk['appreciation_success_pct']:.1f}%",
+                        help="Alignment with appreciation forecast targets (0–100%).",
+                    )
+                else:
+                    _pending_metric(
+                        "Appreciation alignment",
+                        help_text="Alignment with appreciation forecast targets (0–100%).",
+                    )
+
+            qrow2_col1, qrow2_col2 = st.columns(2)
+            with qrow2_col1:
+                if quantum_ready:
+                    st.metric(
+                        label="Combined wealth alignment",
+                        value=f"{quantum_risk['combined_wealth_success_pct']:.1f}%",
+                        help="Joint cash-flow and appreciation alignment (0–100%).",
+                    )
+                else:
+                    _pending_metric(
+                        "Combined wealth alignment",
+                        help_text="Joint cash-flow and appreciation alignment (0–100%).",
+                    )
+            with qrow2_col2:
+                if quantum_ready:
+                    st.metric(
+                        label="Overall alignment score",
+                        value=f"{quantum_risk['overall_success_pct']:.1f}%",
+                        help="Weighted alignment across cash flow, appreciation, and location.",
+                    )
+                else:
+                    _pending_metric(
+                        "Overall alignment score",
+                        help_text="Weighted alignment across cash flow, appreciation, and location.",
+                    )
+
+        with st.expander("10-year appreciation forecast", expanded=False):
             live_forecast = property_info.get("_forecast_display_cache")
             if not isinstance(live_forecast, dict):
                 if is_task_pending("forecast_chart"):
@@ -528,7 +561,8 @@ def render_analysis_results(
                 ax.legend(loc="upper left", fontsize=8)
                 style_matplotlib_chart(fig, ax)
 
-                st.pyplot(fig)
+                st.pyplot(fig, clear_figure=True)
+                plt.close(fig)
 
         _render_market_crash_simulation(
             price=price,
@@ -543,10 +577,7 @@ def render_analysis_results(
             finance=finance,
         )
 
-    st.markdown("### 📝 AI Property Summary")
-    st.write(property_info.get("summary", "No summary available."))
-
-    with st.expander("View Detailed Monthly Breakdown"):
+    with st.expander("Monthly expense breakdown"):
         if total_confidence_pct is not None:
             st.metric(
                 label="Data Confidence",
@@ -557,7 +588,7 @@ def render_analysis_results(
                 ),
             )
         metric_col1, metric_col2, metric_col3 = st.columns(3)
-        metric_col1.metric("List Price", f"${price:,.2f}")
+        metric_col1.metric("Your Offer", f"${purchase_price:,.2f}")
         metric_col2.metric("Monthly Rent", f"${final_monthly_rent:,.2f}")
         metric_col3.metric("Property Taxes (monthly)", f"${monthly_taxes:,.2f}")
         st.write("Monthly Cash Flow")
