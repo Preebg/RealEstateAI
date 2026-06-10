@@ -140,7 +140,8 @@ def _render_property_underwriting(
     property_id = property_info.get("id") or get_property_id_by_address(address)
     branding_label = property_info.get("property_label", "Balanced")
 
-    assumptions = render_assumption_sliders(property_info)
+    with st.sidebar:
+        assumptions = render_assumption_sliders(property_info)
 
     purchase_price = safe_float(assumptions.get("offer_amount")) or price
     finance = run_finance_analysis(
@@ -157,7 +158,9 @@ def _render_property_underwriting(
         vacancy_reserve_pct=assumptions["user_vacancy_reserve"],
         management_fee_pct=assumptions["user_management_fee"],
     )
-    render_closing_costs_caption(finance["user_closing_costs_total"])
+    with st.sidebar:
+        render_closing_costs_caption(finance["user_closing_costs_total"])
+        st.write(f"💸 Total Cash Required: **${finance['total_investment']:,.2f}**")
 
     sync_quantum_recompute_queue(
         property_info,

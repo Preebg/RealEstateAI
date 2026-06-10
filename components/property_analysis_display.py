@@ -633,7 +633,6 @@ def render_analysis_results(
             "Disclaimer: This is an AI-powered tool for educational purposes. "
             "Always verify financial data with a professional before making investment decisions."
         )
-        st.sidebar.write(f"💸 Total Cash Required: **${total_investment:,.2f}**")
 
         investment_params = {
             "Offer Amount": f"${assumptions.get('offer_amount', price):,.0f}",

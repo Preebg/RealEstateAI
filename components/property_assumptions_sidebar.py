@@ -37,7 +37,7 @@ def _render_down_payment_input(purchase_price: float) -> tuple[float, str]:
     mode = st.session_state.get(DOWN_PAYMENT_MODE_KEY, "percent")
     purchase_price = max(float(purchase_price or 0), 0.0)
 
-    label_col, toggle_col = st.sidebar.columns([5, 1])
+    label_col, toggle_col = st.columns([5, 1])
     with toggle_col:
         if st.button(
             "⇄",
@@ -99,7 +99,9 @@ def _render_down_payment_input(purchase_price: float) -> tuple[float, str]:
 
 def render_assumption_sliders(property_info: dict[str, Any]) -> dict[str, float]:
     """
-    Render AI baselines and personal assumption sliders in the sidebar.
+    Render AI baselines and personal assumption sliders.
+
+    Call inside ``with st.sidebar:`` (required when invoked from an ``@st.fragment``).
 
     Returns slider values used for finance and save payloads.
     """
@@ -109,19 +111,19 @@ def render_assumption_sliders(property_info: dict[str, Any]) -> dict[str, float]
     ai_mgmt_baseline = float(property_info.get("ai_management_fee") or 0)
     ai_maint_percent = get_effective_display_maint(property_info)
 
-    st.sidebar.markdown("---")
-    st.sidebar.write("### 🤖 AI Baselines (read-only)")
-    st.sidebar.caption(f"Rent: ${original_ai_rent:,.0f}/mo")
-    st.sidebar.caption(f"Maintenance: {original_ai_maint:.1f}%")
-    st.sidebar.caption(f"Vacancy: {ai_vacancy_baseline:.1f}%")
-    st.sidebar.caption(f"Management: {ai_mgmt_baseline:.1f}%")
+    st.markdown("---")
+    st.write("### 🤖 AI Baselines (read-only)")
+    st.caption(f"Rent: ${original_ai_rent:,.0f}/mo")
+    st.caption(f"Maintenance: {original_ai_maint:.1f}%")
+    st.caption(f"Vacancy: {ai_vacancy_baseline:.1f}%")
+    st.caption(f"Management: {ai_mgmt_baseline:.1f}%")
 
-    st.sidebar.markdown("---")
-    st.sidebar.write("### 🛠️ Your Assumptions")
+    st.markdown("---")
+    st.write("### 🛠️ Your Assumptions")
 
     rent_min, rent_max = 800.0, 4000.0
     clamped_rent = max(rent_min, min(rent_max, float(get_effective_display_rent(property_info))))
-    final_monthly_rent = st.sidebar.slider(
+    final_monthly_rent = st.slider(
         "Adjust Monthly Rent ($)",
         rent_min,
         rent_max,
@@ -132,7 +134,7 @@ def render_assumption_sliders(property_info: dict[str, Any]) -> dict[str, float]
 
     maint_min, maint_max = 1.0, 15.0
     clamped_maint = max(maint_min, min(maint_max, float(ai_maint_percent)))
-    final_maint_percent = st.sidebar.slider(
+    final_maint_percent = st.slider(
         "Adjust Maintenance %",
         maint_min,
         maint_max,
@@ -143,7 +145,7 @@ def render_assumption_sliders(property_info: dict[str, Any]) -> dict[str, float]
 
     vac_min, vac_max = 1.0, 10.0
     clamped_vac = max(vac_min, min(vac_max, get_effective_display_vacancy(property_info)))
-    user_vacancy_reserve = st.sidebar.slider(
+    user_vacancy_reserve = st.slider(
         "Your Vacancy Reserve %",
         vac_min,
         vac_max,
@@ -154,7 +156,7 @@ def render_assumption_sliders(property_info: dict[str, Any]) -> dict[str, float]
 
     mgmt_min, mgmt_max = 8.0, 12.0
     clamped_mgmt = max(mgmt_min, min(mgmt_max, get_effective_display_management_fee(property_info)))
-    user_management_fee = st.sidebar.slider(
+    user_management_fee = st.slider(
         "Your Management Fee %",
         mgmt_min,
         mgmt_max,
@@ -165,7 +167,7 @@ def render_assumption_sliders(property_info: dict[str, Any]) -> dict[str, float]
 
     closing_min, closing_max = 0.0, 10.0
     clamped_closing = max(closing_min, min(closing_max, 3.0))
-    user_closing_costs_pct = st.sidebar.slider(
+    user_closing_costs_pct = st.slider(
         "Adjust Closing Costs (%)",
         closing_min,
         closing_max,
@@ -182,7 +184,7 @@ def render_assumption_sliders(property_info: dict[str, Any]) -> dict[str, float]
     else:
         offer_min, offer_max, offer_default = 50_000, 500_000, 200_000
     offer_default = max(offer_min, min(offer_max, offer_default))
-    offer_amount = st.sidebar.slider(
+    offer_amount = st.slider(
         "Your Offer Amount ($)",
         float(offer_min),
         float(offer_max),
@@ -196,7 +198,7 @@ def render_assumption_sliders(property_info: dict[str, Any]) -> dict[str, float]
 
     down_payment_pct, down_payment_label = _render_down_payment_input(offer_amount)
 
-    loan_term = st.sidebar.number_input(
+    loan_term = st.number_input(
         "Loan Term (yrs)",
         min_value=1,
         max_value=40,
@@ -204,7 +206,7 @@ def render_assumption_sliders(property_info: dict[str, Any]) -> dict[str, float]
         step=1,
         key="individual_search_loan_term",
     )
-    interest_rate = st.sidebar.number_input(
+    interest_rate = st.number_input(
         "Mortgage Rate (%)",
         min_value=0.0,
         max_value=20.0,
@@ -231,7 +233,7 @@ def render_assumption_sliders(property_info: dict[str, Any]) -> dict[str, float]
 
 
 def render_closing_costs_caption(user_closing_costs_total: float) -> None:
-    st.sidebar.caption(f"Estimated Closing Costs: ${user_closing_costs_total:,.2f}")
+    st.caption(f"Estimated Closing Costs: ${user_closing_costs_total:,.2f}")
 
 
 def render_hitl_save_section(
