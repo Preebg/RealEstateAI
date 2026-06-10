@@ -742,6 +742,30 @@ class TestGeospatialEnrichment(unittest.TestCase):
         self.assertTrue(enriched["lat"].notna().iloc[0])
         self.assertTrue(enriched["lon"].notna().iloc[0])
 
+    def test_attach_coordinates_ignores_null_island_sentinel(self):
+        """Failed geocoding stores (0, 0); map must fall back to ZIP/market coords."""
+        from portfolio_map_page import attach_coordinates
+        import pandas as pd
+
+        df = pd.DataFrame(
+            [
+                {
+                    "address": "210 Everclay Dr, Rochester, NY 14618",
+                    "zip_code": "14618",
+                    "market_city": "Rochester",
+                    "lat": 0.0,
+                    "lon": 0.0,
+                }
+            ]
+        )
+        enriched = attach_coordinates(df)
+        lat = float(enriched.iloc[0]["lat"])
+        lon = float(enriched.iloc[0]["lon"])
+        self.assertNotAlmostEqual(lat, 0.0, places=3)
+        self.assertNotAlmostEqual(lon, 0.0, places=3)
+        self.assertAlmostEqual(lat, 43.1, delta=0.5)
+        self.assertAlmostEqual(lon, -77.5, delta=0.5)
+
 
 class TestHarvestSkipLogic(unittest.TestCase):
     def test_skip_synthesis_on_zero_price(self):

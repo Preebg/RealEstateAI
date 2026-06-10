@@ -450,8 +450,12 @@ def build_portfolio_dataframe(properties: list[dict[str, Any]]) -> pd.DataFrame:
 
         stored_lat = prop.get("latitude")
         stored_lon = prop.get("longitude")
-        lat_val = float(stored_lat) if stored_lat not in (None, "") else None
-        lon_val = float(stored_lon) if stored_lon not in (None, "") else None
+        if _has_stored_coordinates(stored_lat, stored_lon):
+            lat_val = float(stored_lat)
+            lon_val = float(stored_lon)
+        else:
+            lat_val = None
+            lon_val = None
 
         records.append(
             {
@@ -577,7 +581,15 @@ def _has_stored_coordinates(lat: Any, lon: Any) -> bool:
         lon_f = float(lon)
     except (TypeError, ValueError):
         return False
-    return math.isfinite(lat_f) and math.isfinite(lon_f)
+    # Gemini returns (0, 0) when geocoding fails — not a real parcel location.
+    if lat_f == 0.0 and lon_f == 0.0:
+        return False
+    return (
+        math.isfinite(lat_f)
+        and math.isfinite(lon_f)
+        and -90.0 <= lat_f <= 90.0
+        and -180.0 <= lon_f <= 180.0
+    )
 
 
 def attach_coordinates(df: pd.DataFrame) -> pd.DataFrame:

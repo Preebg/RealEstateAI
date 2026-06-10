@@ -20,6 +20,7 @@ from knowledge_base import (
     delete_unreliable_property,
     get_admin_uid,
     get_harvest_complete_addresses,
+    get_kb_raw_data,
     get_market_pulse,
     is_property_harvest_complete,
     normalize_address_key,
@@ -712,6 +713,12 @@ async def run_harvester_pipeline_async(admin_user_id: str) -> dict[str, Any]:
 
     complete_keys = get_harvest_complete_addresses(admin_user_id)
     scanned_keys = set(complete_keys)
+    kb_raw = get_kb_raw_data(admin_user_id)
+    scanned_addresses = sorted(
+        str(row.get("address", "")).strip()
+        for key, row in kb_raw.items()
+        if key in scanned_keys and str(row.get("address", "")).strip()
+    )
     if complete_keys:
         print(
             f"Skipping {len(complete_keys)} addresses with complete harvest data "
