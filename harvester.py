@@ -16,11 +16,12 @@ import engine
 from app_logging import configure_logging, report_error
 from finance import analyze_investment
 from knowledge_base import (
+    backfill_missing_year_built_catalog,
     delete_unreliable_property,
     get_admin_uid,
+    get_harvest_complete_addresses,
     get_market_pulse,
-    get_scanned_addresses,
-    is_property_already_scanned,
+    is_property_harvest_complete,
     normalize_address_key,
     one_year_roi_unreliable_reason,
     purge_unreliable_one_year_roi_properties,
@@ -360,10 +361,10 @@ async def _research_listing(
     """Stage 2 for one listing; returns a synthesis job or None when skipped."""
     address, market_city = _validate_listing(listing)
 
-    already_scanned = await asyncio.to_thread(
-        is_property_already_scanned, address, user_id=admin_user_id
+    already_complete = await asyncio.to_thread(
+        is_property_harvest_complete, address, user_id=admin_user_id
     )
-    if already_scanned:
+    if already_complete:
         print(f"  [research] SKIP {address} — already in knowledge base")
         async with report_lock:
             report["already_scanned"].append(
@@ -505,6 +506,10 @@ async def _synthesize_listing(
         print(f"  [synthesis] UNRELIABLE {address} — {unreliable_reason} (deleted)")
         return
 
+    final_data = await asyncio.to_thread(
+        engine.backfill_year_built_if_needed, final_data, address
+    )
+
     save_result = await asyncio.to_thread(
         save_harvest_property, final_data, user_id=admin_user_id
     )
@@ -634,7 +639,7 @@ async def run_harvester_pipeline_async(admin_user_id: str) -> dict[str, Any]:
     Stage 4 (Synthesis): gemini-3.1-flash-lite-preview -> gemini-3.5-flash -> gemma-4-26b-a4b-it
 
     Discovery overlaps with downstream stages: each verified listing is researched as soon
-    as it is found. Discovery is one combined all-market call per model tier (≤13 RPM).
+    as it is found. Discovery is one combined all-market call per model tier (per-model RPM).
     """
     global _active_discovery_model, _active_research_model, _active_synthesis_model
     _active_discovery_model = engine.DISCOVERY_MODEL
@@ -669,10 +674,49 @@ async def run_harvester_pipeline_async(admin_user_id: str) -> dict[str, Any]:
             print(f"  - ... and {len(purged) - 5} more")
         log.info("harvest_unreliable_purge_complete", purged=len(purged))
 
-    scanned_addresses = sorted(get_scanned_addresses(admin_user_id))
-    scanned_keys = {normalize_address_key(addr) for addr in scanned_addresses}
-    if scanned_addresses:
-        print(f"Skipping {len(scanned_addresses)} addresses already in the knowledge base.")
+    year_backfill_results = await asyncio.to_thread(
+        backfill_missing_year_built_catalog, admin_user_id
+    )
+    if year_backfill_results:
+        backfilled = [
+            entry for entry in year_backfill_results if entry.get("status") == "backfilled"
+        ]
+        still_missing = [
+            entry
+            for entry in year_backfill_results
+            if entry.get("status") == "still_missing"
+        ]
+        report["year_built_backfilled"] = backfilled
+        report["year_built_still_missing"] = still_missing
+        if backfilled:
+            print(
+                f"Backfilled year_built for {len(backfilled)} existing catalog "
+                f"properties ({len(still_missing)} still unknown)."
+            )
+            for entry in backfilled[:5]:
+                print(
+                    f"  - {entry['address']} -> {entry.get('year_built')}"
+                )
+            if len(backfilled) > 5:
+                print(f"  - ... and {len(backfilled) - 5} more")
+            log.info(
+                "harvest_year_built_backfill_complete",
+                backfilled=len(backfilled),
+                still_missing=len(still_missing),
+            )
+        elif still_missing:
+            print(
+                f"Attempted year_built backfill for {len(still_missing)} "
+                "catalog properties; none resolved."
+            )
+
+    complete_keys = get_harvest_complete_addresses(admin_user_id)
+    scanned_keys = set(complete_keys)
+    if complete_keys:
+        print(
+            f"Skipping {len(complete_keys)} addresses with complete harvest data "
+            "(year_built present)."
+        )
 
     session = engine.create_genai_session()
     rate_limiter = engine.ModelRateLimiter(requests_per_minute=engine.HARVESTER_RPM_PER_MODEL)
@@ -727,15 +771,18 @@ async def run_harvester_pipeline_async(admin_user_id: str) -> dict[str, Any]:
     print("=" * 60)
 
     def _run_discovery() -> list[dict[str, Any]]:
-        return execute_with_rpd_fallback(
-            engine.discover_hot_market_listings,
-            stage="discovery",
-            fallback_model=engine.DISCOVERY_FALLBACK_MODEL,
+        # discover_hot_market_listings walks DISCOVERY_MODEL_CHAIN on RPD/empty:
+        # gemini-2.5-flash -> gemini-2.5-flash-lite -> gemma-4-26b-a4b-it
+        return engine.discover_hot_market_listings(
             exclude_addresses=scanned_addresses,
             on_listing_found=on_listing_found,
         )
 
     listings = await asyncio.to_thread(_run_discovery)
+    if listings:
+        used_model = str(listings[0].get("discovery_model", "")).strip()
+        if used_model:
+            _active_discovery_model = used_model
     if scanned_keys:
         listings = [
             listing

@@ -11,6 +11,8 @@ Run on your harvester machine (long-running; needs local Gmail OAuth once):
 
 Credentials: st.secrets / .streamlit/secrets.toml
 (GEMINI_API_KEY, Supabase, Google OAuth, SUPABASE_SERVICE_ROLE_KEY for property share links).
+
+Gemini calls share the same per-model RPM limiter as the harvester (see engine.MODEL_RPM_LIMITS).
 """
 
 from __future__ import annotations

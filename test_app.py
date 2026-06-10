@@ -1,9 +1,13 @@
 import json
 import logging
 import math
+import tempfile
 import unittest
 from datetime import date
+from pathlib import Path
 from unittest.mock import patch
+
+from google.genai import errors
 
 from scipy.optimize import minimize as scipy_minimize
 
@@ -33,7 +37,11 @@ with patch("streamlit.secrets", {"GEMINI_API_KEY": "fake_key"}):
         DISCOVERY_MODEL_CHAIN,
         RESEARCH_MODEL,
         discover_hot_market_listings,
+        DEFAULT_MODEL_RPM,
+        SharedModelRateLimiter,
+        acquire_model_rpm,
         is_daily_quota_exhausted,
+        model_rpm_limit,
         research_property,
         is_disallowed_property_type,
         should_skip_synthesis,
@@ -467,6 +475,54 @@ class TestDailyQuotaDetection(unittest.TestCase):
         self.assertIn(rochester_row["address"], found)
         self.assertIn(syracuse_row["address"], found)
         self.assertGreaterEqual(len(listings), 2)
+
+
+class TestModelRpmLimits(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self._state_path = Path(self._tmpdir.name) / "rpm.json"
+        self._limiter = SharedModelRateLimiter(self._state_path, window_sec=60.0)
+        self._enforce_patch = patch(
+            "engine._rpm_enforcement_enabled", return_value=True
+        )
+        self._enforce_patch.start()
+
+    def tearDown(self) -> None:
+        self._enforce_patch.stop()
+        self._tmpdir.cleanup()
+
+    def test_model_rpm_limits(self) -> None:
+        self.assertEqual(model_rpm_limit("gemini-2.5-flash"), 5)
+        self.assertEqual(model_rpm_limit("gemini-2.5-flash-lite"), 10)
+        self.assertEqual(model_rpm_limit("gemma-4-26b-a4b-it"), DEFAULT_MODEL_RPM)
+        self.assertEqual(model_rpm_limit("gemma-4-31b-it"), DEFAULT_MODEL_RPM)
+
+    def test_flash_rpm_window_blocks_immediate_extra_call(self) -> None:
+        for _ in range(5):
+            self.assertIsNone(self._limiter.try_acquire("gemini-2.5-flash"))
+        wait_sec = self._limiter.try_acquire("gemini-2.5-flash")
+        self.assertIsNotNone(wait_sec)
+        self.assertGreater(wait_sec or 0.0, 0.0)
+
+    def test_shared_rpm_across_pipelines(self) -> None:
+        other = SharedModelRateLimiter(self._state_path, window_sec=60.0)
+        for _ in range(15):
+            self._limiter.try_acquire("gemma-4-31b-it")
+        wait_sec = other.try_acquire("gemma-4-31b-it")
+        self.assertIsNotNone(wait_sec)
+
+    def test_generate_with_retry_uses_shared_rpm(self) -> None:
+        from engine import generate_with_retry
+
+        with patch("engine.get_shared_model_rate_limiter", return_value=self._limiter):
+            with patch("engine.get_session") as mock_session:
+                mock_session.return_value.client.models.generate_content.return_value = (
+                    type("Resp", (), {"text": "ok"})()
+                )
+                for _ in range(5):
+                    generate_with_retry("gemini-2.5-flash", "prompt")
+                wait_sec = self._limiter.try_acquire("gemini-2.5-flash")
+        self.assertIsNotNone(wait_sec)
 
 
 class TestSearchGrounding(unittest.TestCase):
@@ -1351,6 +1407,56 @@ class TestScannedAddressDetection(unittest.TestCase):
         ):
             self.assertTrue(is_property_already_scanned("10 Park Ave, Rochester, NY"))
             self.assertFalse(is_property_already_scanned("99 New Rd, Syracuse, NY"))
+
+    def test_is_property_harvest_complete_requires_year_built(self):
+        from unittest.mock import patch
+
+        from knowledge_base import (
+            get_harvest_complete_addresses,
+            is_property_harvest_complete,
+        )
+
+        rows = {
+            "10 park ave, rochester, ny": {
+                "address": "10 Park Ave, Rochester, NY",
+                "year_built": 1985,
+            },
+            "20 oak st, rochester, ny": {
+                "address": "20 Oak St, Rochester, NY",
+            },
+        }
+        with patch("knowledge_base.get_kb_raw_data", return_value=rows):
+            self.assertTrue(is_property_harvest_complete("10 Park Ave, Rochester, NY"))
+            self.assertFalse(is_property_harvest_complete("20 Oak St, Rochester, NY"))
+            self.assertEqual(
+                get_harvest_complete_addresses(),
+                {"10 park ave, rochester, ny"},
+            )
+
+    def test_backfill_missing_year_built_catalog_upserts_when_found(self):
+        from unittest.mock import patch
+
+        from knowledge_base import backfill_missing_year_built_catalog
+
+        row = {"address": "20 Oak St, Rochester, NY", "price": 200000}
+        with (
+            patch("knowledge_base.get_admin_uid", return_value="00000000-0000-0000-0000-000000000001"),
+            patch("knowledge_base._fetch_canonical_properties", return_value=[row]),
+            patch(
+                "engine.backfill_year_built_if_needed",
+                return_value={**row, "year_built": 1962, "year": 1962},
+            ),
+            patch("knowledge_base.save_canonical_property", return_value=object()) as save_mock,
+            patch("knowledge_base.invalidate_kb_cache") as invalidate_mock,
+        ):
+            results = backfill_missing_year_built_catalog(
+                user_id="00000000-0000-0000-0000-000000000001"
+            )
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["status"], "backfilled")
+        self.assertEqual(results[0]["year_built"], 1962)
+        save_mock.assert_called_once()
+        invalidate_mock.assert_called_once()
 
     def test_lookup_property_uses_normalized_address(self):
         from unittest.mock import patch

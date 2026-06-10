@@ -500,6 +500,66 @@ def is_property_already_scanned(address: str, user_id: str | None = None) -> boo
     return normalize_address_key(address) in get_scanned_addresses(user_id)
 
 
+def get_harvest_complete_addresses(user_id: str | None = None) -> set[str]:
+    """Normalized KB addresses with a trustworthy year_built (harvester skips these)."""
+    from engine import parse_year_built
+
+    return {
+        key
+        for key, row in get_kb_raw_data(user_id).items()
+        if parse_year_built(row) is not None
+    }
+
+
+def is_property_harvest_complete(address: str, user_id: str | None = None) -> bool:
+    """True when the address is in the KB and has a valid year_built."""
+    if not address or not str(address).strip():
+        return False
+    row = get_kb_raw_data(user_id).get(normalize_address_key(address))
+    if not row:
+        return False
+    from engine import parse_year_built
+
+    return parse_year_built(row) is not None
+
+
+def backfill_missing_year_built_catalog(
+    user_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """Re-research year_built for canonical rows missing it; upsert when found."""
+    from engine import backfill_year_built_if_needed, parse_year_built
+
+    uid = _resolve_user_id(user_id) or get_admin_uid()
+    if not uid:
+        log.warning("year_built_backfill_skipped", reason="no_user_id")
+        return []
+
+    results: list[dict[str, Any]] = []
+    for row in _fetch_canonical_properties():
+        if parse_year_built(row) is not None:
+            continue
+        address = str(row.get("address") or "").strip()
+        if not address:
+            continue
+        updated = backfill_year_built_if_needed(dict(row), address)
+        year = parse_year_built(updated)
+        if year is None:
+            results.append({"address": address, "status": "still_missing"})
+            log.info("year_built_backfill_miss", address=address)
+            continue
+        response = save_canonical_property(updated, uid, show_errors=False)
+        if response is None:
+            results.append({"address": address, "status": "save_failed"})
+            continue
+        results.append(
+            {"address": address, "status": "backfilled", "year_built": year}
+        )
+        log.info("year_built_backfill_success", address=address, year_built=year)
+    if results:
+        invalidate_kb_cache()
+    return results
+
+
 def get_ai_baseline_rent(record: dict[str, Any]) -> float:
     """AI-suggested monthly rent (falls back to saved rent for legacy rows)."""
     if record.get("original_ai_rent") is not None:
@@ -1786,6 +1846,9 @@ __all__ = [
     "get_kb_address_options",
     "search_kb_addresses",
     "is_property_already_scanned",
+    "get_harvest_complete_addresses",
+    "is_property_harvest_complete",
+    "backfill_missing_year_built_catalog",
     "get_ai_baseline_rent",
     "get_ai_baseline_maint",
     "get_official_rent",

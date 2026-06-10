@@ -8,10 +8,10 @@ import random
 import re
 import threading
 import time
-from collections import defaultdict, deque
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
-from collections.abc import Callable
+from pathlib import Path
 from typing import Any, cast
 from urllib.parse import urlparse
 
@@ -97,7 +97,14 @@ GEOCODING_MODEL_CHAIN: tuple[str, ...] = (
     "gemini-2.5-flash-lite",
 )
 GEOCODING_FALLBACK_MODEL = GEOCODING_MODEL_CHAIN[-1]
-# Daily grounding budgets (RPD) — favor search scouts over map lookups.
+# Per-model generate_content RPM caps (shared harvester + outreach + UI).
+DEFAULT_MODEL_RPM = 15
+MODEL_RPM_LIMITS: dict[str, int] = {
+    "gemini-2.5-flash": 5,
+    "gemini-2.5-flash-lite": 10,
+}
+MODEL_RPM_STATE_PATH = Path(__file__).resolve().parent / ".gemini_model_rpm.json"
+# Daily grounding budgets — favor search scouts over map lookups.
 MAP_GROUNDING_DAILY_BUDGET = 500
 SEARCH_GROUNDING_DAILY_BUDGET = 1500
 GEOCODE_SEARCH_MAX_REMOTE_CALLS = 6
@@ -246,10 +253,10 @@ BACKOFF_MAX_SEC = 60.0
 BACKOFF_MULTIPLIER = 2.0
 # Upper bound for fixed sleeps; prefer retry_delay_seconds() for retries.
 RATE_LIMIT_BACKOFF_SEC = BACKOFF_MAX_SEC
-# Harvester parallel pipeline: 15 RPM account cap; run slightly under to avoid 429s.
+# Account-wide RPM reference; per-model caps live in MODEL_RPM_LIMITS.
 HARVESTER_RPM_CAP = 15
-HARVESTER_RPM_PER_MODEL = 13
-DISCOVERY_RPM_PER_MODEL = 13
+HARVESTER_RPM_PER_MODEL = DEFAULT_MODEL_RPM
+DISCOVERY_RPM_PER_MODEL = DEFAULT_MODEL_RPM
 HARVESTER_RPM_WINDOW_SEC = 60.0
 
 
@@ -316,58 +323,154 @@ def retry_delay_seconds(
     return random.uniform(0.0, exp_cap)
 
 
+def model_rpm_limit(model: str) -> int:
+    """Hosted Gemini requests-per-minute cap for this model slug."""
+    slug = _MODEL_API_SLUGS.get(model, model)
+    return MODEL_RPM_LIMITS.get(slug, DEFAULT_MODEL_RPM)
+
+
+def _rpm_enforcement_enabled() -> bool:
+    if os.getenv("GEMINI_RPM_DISABLE", "").strip().lower() in ("1", "true", "yes"):
+        return False
+    if os.getenv("PYTEST_CURRENT_TEST"):
+        return False
+    return True
+
+
+class SharedModelRateLimiter:
+    """Cross-process sliding-window RPM limiter with per-model caps."""
+
+    def __init__(
+        self,
+        state_path: Path = MODEL_RPM_STATE_PATH,
+        window_sec: float = HARVESTER_RPM_WINDOW_SEC,
+    ) -> None:
+        self._state_path = state_path
+        self._lock_path = state_path.with_suffix(".lock")
+        self._window_sec = window_sec
+
+    def _with_cross_process_lock(self, fn: Callable[[], Any]) -> Any:
+        for _ in range(100):
+            try:
+                fd = os.open(self._lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.close(fd)
+                try:
+                    return fn()
+                finally:
+                    self._lock_path.unlink(missing_ok=True)
+            except FileExistsError:
+                time.sleep(0.05)
+        raise TimeoutError(f"Could not acquire model RPM lock: {self._lock_path}")
+
+    def _read_state(self) -> dict[str, list[float]]:
+        if not self._state_path.is_file():
+            return {}
+        try:
+            payload = json.loads(self._state_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return {}
+        if not isinstance(payload, dict):
+            return {}
+        return {
+            str(key): [float(value) for value in values]
+            for key, values in payload.items()
+            if isinstance(values, list)
+        }
+
+    def _write_state(self, payload: dict[str, list[float]]) -> None:
+        tmp = self._state_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(payload), encoding="utf-8")
+        os.replace(tmp, self._state_path)
+
+    def _prune(self, timestamps: list[float], now: float) -> list[float]:
+        return [stamp for stamp in timestamps if now - stamp < self._window_sec]
+
+    def try_acquire(self, model: str) -> float | None:
+        """Return seconds to wait, or None when a slot was acquired."""
+        if not _rpm_enforcement_enabled():
+            return None
+        slug = _MODEL_API_SLUGS.get(model, model)
+        rpm = model_rpm_limit(slug)
+
+        def _inner() -> float | None:
+            now = time.time()
+            state = self._read_state()
+            window = self._prune(
+                [float(value) for value in state.get(slug, [])],
+                now,
+            )
+            if len(window) < rpm:
+                window.append(now)
+                state[slug] = window
+                self._write_state(state)
+                return None
+            return max(0.0, self._window_sec - (now - window[0]))
+
+        return cast(float | None, self._with_cross_process_lock(_inner))
+
+    def acquire(self, model: str) -> None:
+        while True:
+            wait_sec = self.try_acquire(model)
+            if wait_sec is None:
+                return
+            time.sleep(max(wait_sec, 0.05))
+
+
+_shared_model_rate_limiter: SharedModelRateLimiter | None = None
+_shared_model_rate_limiter_lock = threading.Lock()
+
+
+def get_shared_model_rate_limiter() -> SharedModelRateLimiter:
+    global _shared_model_rate_limiter
+    with _shared_model_rate_limiter_lock:
+        if _shared_model_rate_limiter is None:
+            custom = os.getenv("GEMINI_RPM_STATE_PATH", "").strip()
+            path = Path(custom) if custom else MODEL_RPM_STATE_PATH
+            _shared_model_rate_limiter = SharedModelRateLimiter(path)
+        return _shared_model_rate_limiter
+
+
+def acquire_model_rpm(model: str) -> None:
+    """Block until a per-model RPM slot is available (shared across CLI jobs)."""
+    get_shared_model_rate_limiter().acquire(model)
+
+
+async def acquire_model_rpm_async(model: str) -> None:
+    """Async wrapper around the shared per-model RPM limiter."""
+    limiter = get_shared_model_rate_limiter()
+    while True:
+        wait_sec = await asyncio.to_thread(limiter.try_acquire, model)
+        if wait_sec is None:
+            return
+        await asyncio.sleep(max(wait_sec, 0.05))
+
+
 class ModelRateLimiter:
-    """Sliding-window limiter: at most N API calls per model per minute."""
+    """Async limiter — delegates to shared per-model RPM budget."""
 
     def __init__(
         self,
         requests_per_minute: int = HARVESTER_RPM_PER_MODEL,
         window_sec: float = HARVESTER_RPM_WINDOW_SEC,
     ) -> None:
-        self._rpm = requests_per_minute
-        self._window_sec = window_sec
-        self._timestamps: dict[str, deque[float]] = defaultdict(deque)
-        self._locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+        _ = (requests_per_minute, window_sec)
 
     async def acquire(self, model: str) -> None:
-        async with self._locks[model]:
-            while True:
-                now = time.monotonic()
-                window = self._timestamps[model]
-                while window and now - window[0] >= self._window_sec:
-                    window.popleft()
-                if len(window) < self._rpm:
-                    window.append(now)
-                    return
-                wait_sec = self._window_sec - (now - window[0])
-                await asyncio.sleep(max(wait_sec, 0.05))
+        await acquire_model_rpm_async(model)
 
 
 class SyncModelRateLimiter:
-    """Thread-safe sliding-window limiter for parallel sync discovery workers."""
+    """Sync limiter — delegates to shared per-model RPM budget."""
 
     def __init__(
         self,
         requests_per_minute: int = DISCOVERY_RPM_PER_MODEL,
         window_sec: float = HARVESTER_RPM_WINDOW_SEC,
     ) -> None:
-        self._rpm = requests_per_minute
-        self._window_sec = window_sec
-        self._timestamps: dict[str, deque[float]] = defaultdict(deque)
-        self._locks: dict[str, threading.Lock] = defaultdict(threading.Lock)
+        _ = (requests_per_minute, window_sec)
 
     def acquire(self, model: str) -> None:
-        with self._locks[model]:
-            while True:
-                now = time.monotonic()
-                window = self._timestamps[model]
-                while window and now - window[0] >= self._window_sec:
-                    window.popleft()
-                if len(window) < self._rpm:
-                    window.append(now)
-                    return
-                wait_sec = self._window_sec - (now - window[0])
-                time.sleep(max(wait_sec, 0.05))
+        acquire_model_rpm(model)
 
 
 def _log_retry(
@@ -607,6 +710,7 @@ def generate_with_retry(
 
     for attempt in range(max_retries):
         try:
+            acquire_model_rpm(model)
             response = active.client.models.generate_content(
                 model=model,
                 contents=contents,
@@ -720,6 +824,8 @@ def _generate_with_grounding_retry(
         try:
             if rate_limiter is not None:
                 rate_limiter.acquire(model)
+            else:
+                acquire_model_rpm(model)
             response = active.client.models.generate_content(
                 model=model,
                 contents=contents,
@@ -815,6 +921,8 @@ async def generate_with_retry_async(
         try:
             if rate_limiter is not None:
                 await rate_limiter.acquire(model)
+            else:
+                await acquire_model_rpm_async(model)
             response = await active.client.aio.models.generate_content(
                 model=model,
                 contents=contents,
@@ -1297,6 +1405,8 @@ def _generate_with_map_grounding_retry(
         try:
             if rate_limiter is not None:
                 rate_limiter.acquire(model)
+            else:
+                acquire_model_rpm(model)
             response = active.client.models.generate_content(
                 model=model,
                 contents=contents,
@@ -1795,6 +1905,9 @@ def _normalize_discovery_item(item: Any) -> dict[str, Any] | None:
     if -90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0 and (lat != 0.0 or lon != 0.0):
         listing["latitude"] = lat
         listing["longitude"] = lon
+    year_built = parse_year_built(item)
+    if year_built is not None and not _is_suspicious_default_year_built(year_built):
+        listing["year_built"] = year_built
     return listing
 
 
@@ -2031,11 +2144,18 @@ def _discovery_prompt(
             exclude_block += f"\n  - ... and {len(exclude_addresses) - len(sample)} more"
 
     market_keys = ", ".join(f'"{name}"' for name, _, _ in HOT_MARKETS)
+    newer_inventory_note = (
+        "Buyer preference: prioritize the newest available inventory in every search — "
+        "buyers are far more likely to purchase move-in-ready, newer construction than "
+        "dated stock. On Zillow/Redfin/Realtor, apply year-built filters and sort by "
+        "newest listings when the site allows."
+    )
     priority_note = (
         "Search priority: fill Upstate NY first (Rochester, Syracuse, Buffalo, Albany), "
         "then Philadelphia, Pittsburgh, Orlando, Tampa, and Miami–Fort Lauderdale, then "
-        "Charlotte, Raleigh, and Charleston. Strongly favor newer construction and "
-        "conventional site-built homes over manufactured/mobile housing."
+        "Charlotte, Raleigh, and Charleston. "
+        f"{newer_inventory_note} "
+        "Strongly favor conventional site-built homes over manufactured/mobile housing."
     )
     if split_region and region_market_needs:
         region_markets = {name for name, _ in region_market_needs}
@@ -2100,12 +2220,14 @@ Return ONLY a JSON array (no markdown, no commentary). Example:
     "address": "123 Main St, Henrietta, NY 14623",
     "city": "Rochester",
     "list_price": 189000,
+    "year_built": 2004,
 {maps_example_fields}    "listing_url": "https://www.zillow.com/homedetails/123-Main-St-Henrietta-NY-14623/12345678_zpid/"
   }},
   {{
     "address": "456 Oak Ave, Penfield, NY 14526",
     "city": "Rochester",
     "list_price": 175000,
+    "year_built": 1998,
 {maps_example_fields}    "listing_url": "https://www.redfin.com/NY/Penfield/456-Oak-Ave-14526/home/12345678"
   }}
 ]
@@ -2126,9 +2248,12 @@ Rules:
   or HUD-code housing. Skip "Manufactured" / "Mobile" listing filters entirely; on Zillow/Redfin/
   Realtor use property-type filters for Single Family, Townhouse, and small Multi-Family only.
 - EXCLUDE apartment buildings and any multifamily with 5+ units.
-- Strongly prefer homes built in {MIN_PREFERRED_YEAR_BUILT} or later when year built is visible.
-  When year built is shown, deprioritize pre-{MIN_PREFERRED_YEAR_BUILT} homes unless inventory is
-  very thin. Upstate NY (Rochester, Syracuse, Buffalo, Albany) should skew newest-available.
+- INVENTORY AGE (buyer preference): return the newest homes you can verify. Prefer listings
+  built in {MIN_PREFERRED_YEAR_BUILT} or later; when year built is visible, deprioritize
+  pre-{MIN_PREFERRED_YEAR_BUILT} homes unless no newer inventory exists in that metro.
+  Between two similar listings at similar price, always choose the newer build.
+  Upstate NY (Rochester, Syracuse, Buffalo, Albany) should skew newest-available.
+- Include year_built (4-digit) when shown on the listing page; omit the field if unknown.
 - Use real street addresses with city/town, state, and ZIP (5-digit ZIP required).
 - list_price must be the active asking price as a plain number (no $ or commas).
 - city must be the parent metro key: one of {market_keys} (NOT the suburb name).

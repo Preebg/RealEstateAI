@@ -13,6 +13,9 @@ property_kb.json
 .streamlit/cache/
 .streamlit/oauth_pkce_pending.json
 .gmail_oauth_token.json
+.gemini_model_rpm.json
+.gemini_model_rpm.lock
+.gemini_model_rpm.tmp
 harvester_scheduled.log
 reports/
 poised-epigram-493119-g0-64095d0f749b.json
