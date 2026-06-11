@@ -261,9 +261,9 @@ def evaluate_offer_success(
     list_price: float,
 ) -> dict[str, Any]:
     """
-    Estimate deal success: how favorable is this offer vs comp-implied market value.
+    Estimate deal success: likelihood the offer is accepted vs comp-implied market value.
 
-    Higher scores mean the offer is at or below market value (better buy).
+    Higher scores mean the offer is at or above market value (stronger close probability).
     """
     if market_value <= 0:
         market_value = list_price
@@ -278,37 +278,43 @@ def evaluate_offer_success(
     offer_vs_market_pct = round((offer_amount - market_value) / market_value * 100, 1)
     ratio = offer_amount / market_value
 
-    if ratio <= 0.90:
+    if ratio >= 1.15:
         success = 95.0
-    elif ratio <= 1.0:
-        success = 95.0 - (ratio - 0.90) / 0.10 * 15.0
-    elif ratio <= 1.05:
-        success = 80.0 - (ratio - 1.0) / 0.05 * 30.0
-    elif ratio <= 1.15:
-        success = 50.0 - (ratio - 1.05) / 0.10 * 35.0
+    elif ratio >= 1.05:
+        success = 95.0 - (1.15 - ratio) / 0.10 * 15.0
+    elif ratio >= 1.0:
+        success = 80.0 - (1.05 - ratio) / 0.05 * 30.0
+    elif ratio >= 0.90:
+        success = 50.0 - (1.0 - ratio) / 0.10 * 35.0
     else:
-        success = max(5.0, 15.0 - (ratio - 1.15) * 50.0)
+        success = max(5.0, 15.0 - (0.90 - ratio) * 50.0)
 
-    if list_price > 0 and offer_amount <= list_price and market_value > list_price:
-        discount_pct = (market_value - list_price) / market_value * 100
-        success = min(98.0, success + discount_pct * 0.4)
+    if list_price > 0 and offer_amount >= list_price:
+        above_ask_pct = (offer_amount - list_price) / list_price * 100
+        success = min(98.0, success + min(above_ask_pct * 0.3, 8.0))
+    elif list_price > 0 and offer_amount < list_price:
+        below_ask_pct = (list_price - offer_amount) / list_price * 100
+        success = max(5.0, success - below_ask_pct * 0.4)
 
     if offer_vs_market_pct <= -5:
         message = (
             f"Offer is {abs(offer_vs_market_pct):.1f}% below comp-implied market value "
-            "— strong deal potential."
+            "— seller may push back or reject."
         )
     elif offer_vs_market_pct <= 0:
-        message = "Offer is at or slightly below comp-implied market value."
+        message = (
+            "Offer is at or slightly below comp-implied market value "
+            "— moderate acceptance potential."
+        )
     elif offer_vs_market_pct <= 5:
         message = (
             f"Offer is {offer_vs_market_pct:.1f}% above comp-implied value "
-            "— moderate risk of overpaying."
+            "— strong acceptance potential."
         )
     else:
         message = (
             f"Offer is {offer_vs_market_pct:.1f}% above comp-implied value "
-            "— likely overpaying."
+            "— very likely to be accepted."
         )
 
     return {

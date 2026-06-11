@@ -167,8 +167,8 @@ def _render_sales_comps_section(
             "Deal Success",
             f"{success_pct:.1f}%",
             help=(
-                "How favorable your offer is vs comp-implied market value. "
-                "Higher = better buy (offer at or below market)."
+                "Likelihood your offer is accepted vs comp-implied market value. "
+                "Higher = closer to or above market."
             ),
         )
     else:
@@ -200,7 +200,7 @@ def _render_sales_comps_section(
             3. **Market value** — With at least 2 comps, comp-implied value becomes the
                property's market value and predicted value.
             4. **Deal success** — Your sidebar offer is scored against comp-implied value;
-               offers at or below market score higher.
+               offers at or above market score higher (better acceptance odds).
             """
             )
         )

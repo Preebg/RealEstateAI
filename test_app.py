@@ -2713,15 +2713,15 @@ class TestCompsAnalysis(unittest.TestCase):
         self.assertEqual(property_data["predicted_value"], 215000)
         self.assertIn("Market value set", property_data["prediction_reasoning"])
 
-    def test_evaluate_offer_success_favors_below_market(self):
+    def test_evaluate_offer_success_favors_at_or_above_market(self):
         from comps_analysis import evaluate_offer_success
 
         at_market = evaluate_offer_success(200_000, 200_000, 175_000)
         below_market = evaluate_offer_success(180_000, 200_000, 175_000)
         above_market = evaluate_offer_success(220_000, 200_000, 175_000)
 
-        self.assertGreater(below_market["success_pct"], at_market["success_pct"])
-        self.assertGreater(at_market["success_pct"], above_market["success_pct"])
+        self.assertGreater(above_market["success_pct"], at_market["success_pct"])
+        self.assertGreater(at_market["success_pct"], below_market["success_pct"])
 
     def test_resolve_market_value_prefers_comps(self):
         from comps_analysis import resolve_market_value
