@@ -1,5 +1,7 @@
 import streamlit as st
 
+import app_nav  # noqa: F401 — navigation module registration
+
 from authenticate import render_auth_page, render_auth_sidebar
 from components.address_search import render_property_address_input
 from components.property_analysis_display import render_individual_search_analysis_fragment

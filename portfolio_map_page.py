@@ -25,7 +25,12 @@ from knowledge_base import (
     parse_zipcode_from_address,
 )
 from market_pulse import render_market_pulse
-from app_nav import navigate_to_individual_search
+from app_nav import (
+    INDIVIDUAL_SEARCH_PAGE,
+    INDIVIDUAL_SEARCH_SCRIPT,
+    MAP_OPEN_ADDRESS_KEY,
+    NAV_TARGET_KEY,
+)
 from security_utils import escape_html
 from ui_theme import render_callout_info, render_map_roi_legend, render_page_hero
 from viewer_timezone import (
@@ -34,6 +39,15 @@ from viewer_timezone import (
     parse_property_timestamp,
     viewer_timezone_is_resolved,
 )
+
+
+def _open_individual_search(address: str | None = None) -> None:
+    """Navigate to Individual Search — must run in this module (not app_nav) for Streamlit reruns."""
+    if address and str(address).strip():
+        st.session_state[MAP_OPEN_ADDRESS_KEY] = str(address).strip()
+    st.session_state[NAV_TARGET_KEY] = INDIVIDUAL_SEARCH_PAGE
+    st.switch_page(INDIVIDUAL_SEARCH_SCRIPT)
+
 
 # ---------------------------------------------------------------------------
 # Market fallbacks — city centers with deterministic per-address jitter
@@ -1407,7 +1421,7 @@ def render_portfolio_map_page() -> None:
             unsafe_allow_html=True,
         )
         if st.button("Search a property", type="primary", key="map_empty_cta"):
-            navigate_to_individual_search()
+            _open_individual_search()
         return
 
     price_min, price_max = _numeric_column_bounds(
@@ -1615,7 +1629,7 @@ def render_portfolio_map_page() -> None:
                         use_container_width=True,
                         key="map_open_search",
                     ):
-                        navigate_to_individual_search(selected_address)
+                        _open_individual_search(selected_address)
                 with clear_col:
                     if st.button("Clear", use_container_width=True, key="map_clear_selection"):
                         st.session_state["map_selected_address"] = None

@@ -1622,8 +1622,13 @@ def render_user_saved_properties_sidebar() -> None:
     if not in_streamlit_app() or st is None:
         return
 
+    from app_nav import (
+        INDIVIDUAL_SEARCH_PAGE,
+        INDIVIDUAL_SEARCH_SCRIPT,
+        MAP_OPEN_ADDRESS_KEY,
+        NAV_TARGET_KEY,
+    )
     from portfolio_map_page import invalidate_portfolio_cache
-    from property_nav import navigate_to_individual_search
 
     user = get_logged_in_user()
     if not user:
@@ -1654,7 +1659,11 @@ def render_user_saved_properties_sidebar() -> None:
                 if st.button(
                     label, key=f"saved_load_{key_suffix}", use_container_width=True
                 ):
-                    navigate_to_individual_search(addr)
+                    cleaned = str(addr or "").strip()
+                    if cleaned:
+                        st.session_state[MAP_OPEN_ADDRESS_KEY] = cleaned
+                    st.session_state[NAV_TARGET_KEY] = INDIVIDUAL_SEARCH_PAGE
+                    st.switch_page(INDIVIDUAL_SEARCH_SCRIPT)
             with remove_col:
                 if st.button(
                     "✕",

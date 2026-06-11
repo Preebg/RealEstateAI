@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import streamlit as st
 
+import app_nav  # noqa: F401 — keep in sys.modules for Streamlit reruns
 import components.property_analysis_display  # noqa: F401 — fragment/widget module registration
+import property_nav  # noqa: F401
 
 from authenticate import render_auth_page
 from app_nav import INDIVIDUAL_SEARCH_PAGE, MAP_OPEN_ADDRESS_KEY, consume_nav_target
