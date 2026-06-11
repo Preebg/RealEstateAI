@@ -2306,6 +2306,74 @@ class TestPortfolioMapFilters(unittest.TestCase):
         self.assertEqual(int(df.iloc[0]["year_built"]), 1992)
         self.assertEqual(df.iloc[0]["location_score"], 6.5)
 
+    def test_build_portfolio_dataframe_includes_added_at(self):
+        from datetime import datetime, timezone
+
+        from portfolio_map_page import build_portfolio_dataframe
+
+        props = [
+            {
+                "address": "10 State St, Rochester, NY 14607",
+                "price": 180000,
+                "timestamp": "2025-06-11T22:53:00+00:00",
+            }
+        ]
+        df = build_portfolio_dataframe(props)
+        added_at = df.iloc[0]["added_at"]
+        self.assertEqual(added_at, datetime(2025, 6, 11, 22, 53, tzinfo=timezone.utc))
+
+
+class TestUserTimezone(unittest.TestCase):
+    def test_format_added_at_same_day(self):
+        from datetime import datetime, timezone
+        from zoneinfo import ZoneInfo
+
+        from user_timezone import format_added_at
+
+        utc_dt = datetime(2025, 6, 11, 22, 53, tzinfo=timezone.utc)
+        now = datetime(2025, 6, 11, 12, 0, tzinfo=ZoneInfo("America/New_York"))
+        formatted = format_added_at(
+            utc_dt,
+            ZoneInfo("America/New_York"),
+            now=now,
+        )
+        self.assertEqual(formatted, "6:53 PM")
+
+    def test_format_added_at_with_date(self):
+        from datetime import datetime, timezone
+        from zoneinfo import ZoneInfo
+
+        from user_timezone import format_added_at
+
+        utc_dt = datetime(2025, 5, 10, 14, 30, tzinfo=timezone.utc)
+        now = datetime(2025, 6, 11, 12, 0, tzinfo=ZoneInfo("America/New_York"))
+        formatted = format_added_at(
+            utc_dt,
+            ZoneInfo("America/New_York"),
+            now=now,
+        )
+        self.assertEqual(formatted, "May 10, 10:30 AM")
+
+    def test_sort_portfolio_newest_added(self):
+        from datetime import datetime, timezone
+
+        import pandas as pd
+
+        from portfolio_map_page import sort_portfolio
+
+        df = pd.DataFrame(
+            {
+                "address": ["older", "newer"],
+                "added_at": [
+                    datetime(2025, 1, 1, tzinfo=timezone.utc),
+                    datetime(2025, 6, 1, tzinfo=timezone.utc),
+                ],
+                "price": [100000, 200000],
+            }
+        )
+        sorted_df = sort_portfolio(df, "added_at")
+        self.assertEqual(sorted_df.iloc[0]["address"], "newer")
+
 
 class TestDeferredAnalysis(unittest.TestCase):
     def test_build_deferred_task_queue_orders_work(self):

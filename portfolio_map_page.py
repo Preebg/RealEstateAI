@@ -28,6 +28,12 @@ from market_pulse import render_market_pulse
 from app_nav import navigate_to_individual_search
 from security_utils import escape_html
 from ui_theme import render_callout_info, render_map_roi_legend, render_page_hero
+from user_timezone import (
+    ensure_user_timezone,
+    format_added_at,
+    parse_property_timestamp,
+    user_timezone_is_resolved,
+)
 
 # ---------------------------------------------------------------------------
 # Market fallbacks — city centers with deterministic per-address jitter
@@ -270,6 +276,7 @@ DEFAULT_LOAN_TERM = 30
 DEFAULT_CLOSING_COSTS_PCT = 3.0
 
 SORT_OPTIONS: dict[str, str] = {
+    "Newest added": "added_at",
     "Highest One-Year ROI": "one_year_roi",
     "Highest Quantum Alignment": "quantum_success",
     "Highest Total Value": "price",
@@ -457,6 +464,8 @@ def build_portfolio_dataframe(properties: list[dict[str, Any]]) -> pd.DataFrame:
             lat_val = None
             lon_val = None
 
+        added_at = parse_property_timestamp(prop.get("timestamp"))
+
         records.append(
             {
                 "address": address,
@@ -474,6 +483,7 @@ def build_portfolio_dataframe(properties: list[dict[str, Any]]) -> pd.DataFrame:
                 "location_score": location_score,
                 "lat": lat_val,
                 "lon": lon_val,
+                "added_at": added_at,
                 "environmental_risk": prop.get("environmental_risk"),
                 "geocode_confidence": prop.get("geocode_confidence"),
             }
@@ -495,6 +505,7 @@ def build_portfolio_dataframe(properties: list[dict[str, Any]]) -> pd.DataFrame:
                 "location_score",
                 "lat",
                 "lon",
+                "added_at",
                 "color",
             ]
         )
@@ -1146,6 +1157,8 @@ def sort_portfolio(df: pd.DataFrame, sort_key: str) -> pd.DataFrame:
     if df.empty:
         return df
 
+    if sort_key == "added_at":
+        return df.sort_values("added_at", ascending=False, kind="mergesort", na_position="last")
     if sort_key == "quantum_success":
         # Highest quantum alignment first (descending score)
         return df.sort_values("quantum_success", ascending=False, kind="mergesort")
@@ -1379,6 +1392,7 @@ def render_portfolio_map_page() -> None:
         st.divider()
         render_market_pulse()
 
+    user_tz = ensure_user_timezone()
     portfolio_df = load_geocoded_portfolio_dataframe()
 
     if portfolio_df.empty:
@@ -1630,19 +1644,31 @@ def render_portfolio_map_page() -> None:
             "Zoom in on a metro area to filter this ledger to properties on screen. "
             "Click a row to focus it on the map."
         )
-    display_df = ledger_df[
-        [
-            "address",
-            "category",
-            "price",
-            "rent",
-            "monthly_cash_flow",
-            "one_year_roi",
-            "quantum_success",
-        ]
-    ].rename(
+    if user_timezone_is_resolved():
+        st.caption("Added times are shown in your local timezone.")
+    ledger_columns = [
+        "address",
+        "added_at",
+        "category",
+        "price",
+        "rent",
+        "monthly_cash_flow",
+        "one_year_roi",
+        "quantum_success",
+    ]
+    display_df = ledger_df[ledger_columns].copy()
+    if user_timezone_is_resolved():
+        display_df["added_at"] = display_df["added_at"].apply(
+            lambda value: format_added_at(value, user_tz)
+            if value is not None and pd.notna(value)
+            else "—"
+        )
+    else:
+        display_df["added_at"] = "…"
+    display_df = display_df.rename(
         columns={
             "address": "Address",
+            "added_at": "Added",
             "category": "Category",
             "price": "Price",
             "rent": "Monthly rent",
@@ -1664,6 +1690,9 @@ def render_portfolio_map_page() -> None:
         column_config={
             "Address": st.column_config.TextColumn(
                 help="Click the row to show this property on the map.",
+            ),
+            "Added": st.column_config.TextColumn(
+                help="When this property was added to the catalog (your local time).",
             ),
             "Price": st.column_config.NumberColumn(format="$%d"),
             "Monthly rent": st.column_config.NumberColumn(format="$%d"),
