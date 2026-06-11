@@ -562,15 +562,44 @@ def backfill_missing_year_built_catalog(
 
 def get_ai_baseline_rent(record: dict[str, Any]) -> float:
     """AI-suggested monthly rent (falls back to saved rent for legacy rows)."""
+    from finance import resolve_monthly_rent
+
     if record.get("original_ai_rent") is not None:
         try:
-            return float(record["original_ai_rent"])
+            baseline = float(record["original_ai_rent"])
+            if baseline > 0:
+                return baseline
         except (TypeError, ValueError):
             pass
     try:
-        return float(record.get("rent") or 0)
+        rent = float(record.get("rent") or 0)
+        if rent > 0:
+            return rent
     except (TypeError, ValueError):
+        pass
+    return resolve_monthly_rent(record)
+
+
+def backfill_property_rent(
+    property_data: dict[str, Any],
+    *,
+    research: dict[str, Any] | None = None,
+) -> float:
+    """Ensure property_data carries a positive monthly rent when estimable."""
+    from finance import resolve_monthly_rent
+
+    resolved = resolve_monthly_rent(property_data, research=research)
+    if resolved <= 0:
         return 0.0
+
+    if _safe_property_float(property_data.get("rent")) <= 0:
+        property_data["rent"] = resolved
+
+    ai_rent = property_data.get("original_ai_rent")
+    if ai_rent is None or _safe_property_float(ai_rent) <= 0:
+        property_data["original_ai_rent"] = resolved
+
+    return resolved
 
 
 def get_ai_baseline_maint(record: dict[str, Any]) -> float:
@@ -880,6 +909,7 @@ def _normalize_record_numerics(record: dict[str, Any]) -> dict[str, Any]:
     from comps_analysis import ensure_comps_analysis_field
 
     ensure_comps_analysis_field(normalized)
+    backfill_property_rent(normalized)
     return normalized
 
 
@@ -1233,6 +1263,8 @@ def save_user_property_override(
     for key in ("rent", "maint_percent", "vacancy_rate", "management_fee"):
         if key in override_data and override_data[key] is not None:
             value = float(override_data[key])
+            if key == "rent" and value <= 0:
+                continue
             if key in ("vacancy_rate", "management_fee"):
                 value = normalize_percent_rate(value)
             elif key == "maint_percent":
@@ -1672,9 +1704,10 @@ def save_harvest_property(
     payload.setdefault("from_kb", True)
     payload.setdefault("property_category", payload.get("property_label", ""))
 
+    backfill_property_rent(payload)
     ai_rent = payload.pop("rent", None)
     ai_maint = payload.pop("maint_percent", None)
-    if ai_rent is not None:
+    if ai_rent is not None and _safe_property_float(ai_rent) > 0:
         payload["original_ai_rent"] = ai_rent
     if ai_maint is not None:
         payload["original_ai_maint"] = ai_maint

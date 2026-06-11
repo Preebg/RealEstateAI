@@ -161,22 +161,32 @@ def evaluate_rent_comps_against_subject(
     }
 
 
+def _comp_implied_rent(rent_comps_analysis: dict[str, Any]) -> float:
+    suggested = safe_float(rent_comps_analysis.get("comp_suggested_rent"))
+    if suggested <= 0:
+        suggested = safe_float(rent_comps_analysis.get("median_monthly_rent"))
+    return suggested
+
+
 def apply_rent_comps_adjustment(
     property_data: dict[str, Any],
     rent_comps_analysis: dict[str, Any],
 ) -> bool:
-    """Raise rent baseline when comps show material upside vs listing/AI rent."""
-    if not rent_comps_analysis.get("is_underrented"):
-        return False
-
-    suggested = safe_float(rent_comps_analysis.get("comp_suggested_rent"))
-    if suggested <= 0:
-        suggested = safe_float(rent_comps_analysis.get("median_monthly_rent"))
+    """Fill missing rent from comps or raise rent when comps show material upside."""
+    suggested = _comp_implied_rent(rent_comps_analysis)
     if suggested <= 0:
         return False
 
     current = safe_float(property_data.get("rent"))
     if current <= 0:
+        current = safe_float(property_data.get("original_ai_rent"))
+    if current <= 0:
+        property_data["rent"] = round(suggested)
+        property_data["original_ai_rent"] = round(suggested)
+        property_data["rent_comps_adjusted"] = True
+        return True
+
+    if not rent_comps_analysis.get("is_underrented"):
         return False
 
     uplift_pct = (suggested - current) / current * 100

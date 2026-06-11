@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import streamlit as st
 
+import components.property_analysis_display  # noqa: F401 — fragment/widget module registration
+
 from authenticate import render_auth_page
 from app_nav import INDIVIDUAL_SEARCH_PAGE, MAP_OPEN_ADDRESS_KEY, consume_nav_target
 from legal import APP_NAME, render_legal_page, requested_legal_path

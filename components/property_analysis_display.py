@@ -673,3 +673,88 @@ def render_analysis_results(
             )
         else:
             st.caption("PDF export unlocks after quantum alignment scores finish computing.")
+
+
+@st.fragment
+def render_individual_search_analysis_fragment(
+    *,
+    guest_mode: bool,
+    address: str,
+    property_info: dict[str, Any],
+    assumptions: dict[str, float],
+    finance: dict[str, Any],
+) -> None:
+    """
+    Fragment-scoped Individual Search results (metrics, save, crash sim).
+
+    Must live in this module so Streamlit fragment reruns resolve widget metadata
+    (avoids KeyError: 'components.property_analysis_display' on cross-module fragments).
+    """
+    from components.property_assumptions_sidebar import render_hitl_save_section
+    from knowledge_base import get_property_id_by_address
+    from services.deferred_analysis import (
+        pending_tasks,
+        render_deferred_progress_fragment,
+        store_deferred_finance_context,
+        sync_quantum_recompute_queue,
+    )
+    from services.property_analysis_flow import resolve_quantum_risk
+
+    total_confidence_pct = property_info.get("total_confidence_pct")
+    location_score = safe_float(property_info.get("location_score"))
+    appreciation_forecast = safe_float(property_info.get("appreciation_forecast"))
+    forecast_rate = safe_float(property_info.get("forecast_rate"))
+    sources = property_info.get("sources", [])
+    from_kb = property_info.get("from_kb", False)
+    property_id = property_info.get("id") or get_property_id_by_address(address)
+    branding_label = property_info.get("property_label", "Balanced")
+
+    sync_quantum_recompute_queue(
+        property_info,
+        monthly_net_cash_flow=finance["monthly_net_cash_flow"],
+        forecast_rate=forecast_rate,
+        location_score=location_score,
+    )
+    store_deferred_finance_context(
+        monthly_net_cash_flow=finance["monthly_net_cash_flow"],
+        forecast_rate=forecast_rate,
+        location_score=location_score,
+    )
+    st.session_state.property_data = property_info
+
+    if pending_tasks():
+        render_deferred_progress_fragment()
+
+    quantum_risk = resolve_quantum_risk(property_info)
+
+    render_analysis_results(
+        guest_mode=guest_mode,
+        address=address,
+        property_info=property_info,
+        property_id=property_id,
+        from_kb=from_kb,
+        quantum_risk=quantum_risk,
+        assumptions=assumptions,
+        finance=finance,
+        loan_params={
+            "down_payment": assumptions["down_payment_pct"],
+            "interest_rate": assumptions["interest_rate"],
+            "loan_term": assumptions["loan_term"],
+            "down_payment_label": assumptions.get("down_payment_label"),
+        },
+        total_confidence_pct=total_confidence_pct,
+    )
+
+    render_hitl_save_section(
+        guest_mode=guest_mode,
+        property_info=property_info,
+        address=address,
+        property_id=property_id,
+        from_kb=from_kb,
+        sources=sources,
+        assumptions=assumptions,
+        location_score=location_score,
+        appreciation_forecast=appreciation_forecast,
+        branding_label=branding_label,
+        get_pretty_label=get_pretty_label,
+    )

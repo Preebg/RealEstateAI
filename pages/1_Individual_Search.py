@@ -2,7 +2,7 @@ import streamlit as st
 
 from authenticate import render_auth_page, render_auth_sidebar
 from components.address_search import render_property_address_input
-from components.property_analysis_display import get_pretty_label, render_analysis_results
+from components.property_analysis_display import render_individual_search_analysis_fragment
 from components.property_assumptions_sidebar import (
     render_assumption_sliders,
     render_closing_costs_caption,
@@ -13,7 +13,6 @@ from engine import backfill_year_built_if_needed, safe_float
 from knowledge_base import (
     get_effective_display_maint,
     get_effective_display_rent,
-    get_property_id_by_address,
     render_user_saved_properties_sidebar,
 )
 from market_pulse import render_market_pulse
@@ -21,16 +20,11 @@ from property_nav import consume_map_property_selection, load_property_from_kb
 from services.deferred_analysis import (
     clear_deferred_analysis_state,
     ensure_deferred_task_queue,
-    pending_tasks,
-    render_deferred_progress_fragment,
     set_active_analysis_address,
-    store_deferred_finance_context,
     restore_individual_search_address_input,
-    sync_quantum_recompute_queue,
 )
 from services.property_analysis_flow import (
     initialize_hitl_baselines,
-    resolve_quantum_risk,
     run_finance_analysis,
     run_initial_property_analysis,
 )
@@ -111,79 +105,6 @@ if st.button("Analyze Property", disabled=_guest_mode):
 elif _guest_mode and not st.session_state.property_data:
     st.caption("Open a property from the **Portfolio Map** or use the link your friend shared.")
 
-@st.fragment
-def _render_property_analysis_fragment(
-    *,
-    guest_mode: bool,
-    address: str,
-) -> None:
-    """Main analysis UI — fragment reruns for in-page widgets (crash sim, save, etc.)."""
-    property_info = st.session_state.get("property_data")
-    assumptions = st.session_state.get("individual_search_assumptions")
-    finance = st.session_state.get("individual_search_finance")
-    if not property_info or not assumptions or not finance:
-        return
-
-    total_confidence_pct = property_info.get("total_confidence_pct")
-    location_score = safe_float(property_info.get("location_score"))
-    appreciation_forecast = safe_float(property_info.get("appreciation_forecast"))
-    forecast_rate = safe_float(property_info.get("forecast_rate"))
-    sources = property_info.get("sources", [])
-    from_kb = property_info.get("from_kb", False)
-    property_id = property_info.get("id") or get_property_id_by_address(address)
-    branding_label = property_info.get("property_label", "Balanced")
-
-    sync_quantum_recompute_queue(
-        property_info,
-        monthly_net_cash_flow=finance["monthly_net_cash_flow"],
-        forecast_rate=forecast_rate,
-        location_score=location_score,
-    )
-    store_deferred_finance_context(
-        monthly_net_cash_flow=finance["monthly_net_cash_flow"],
-        forecast_rate=forecast_rate,
-        location_score=location_score,
-    )
-    st.session_state.property_data = property_info
-
-    if pending_tasks():
-        render_deferred_progress_fragment()
-
-    quantum_risk = resolve_quantum_risk(property_info)
-
-    render_analysis_results(
-        guest_mode=guest_mode,
-        address=address,
-        property_info=property_info,
-        property_id=property_id,
-        from_kb=from_kb,
-        quantum_risk=quantum_risk,
-        assumptions=assumptions,
-        finance=finance,
-        loan_params={
-            "down_payment": assumptions["down_payment_pct"],
-            "interest_rate": assumptions["interest_rate"],
-            "loan_term": assumptions["loan_term"],
-            "down_payment_label": assumptions.get("down_payment_label"),
-        },
-        total_confidence_pct=total_confidence_pct,
-    )
-
-    render_hitl_save_section(
-        guest_mode=guest_mode,
-        property_info=property_info,
-        address=address,
-        property_id=property_id,
-        from_kb=from_kb,
-        sources=sources,
-        assumptions=assumptions,
-        location_score=location_score,
-        appreciation_forecast=appreciation_forecast,
-        branding_label=branding_label,
-        get_pretty_label=get_pretty_label,
-    )
-
-
 if st.session_state.property_data:
     ensure_deferred_task_queue(
         st.session_state.property_data,
@@ -232,7 +153,10 @@ if st.session_state.property_data:
         render_closing_costs_caption(finance["user_closing_costs_total"])
         st.write(f"💸 Total Cash Required: **${finance['total_investment']:,.2f}**")
 
-    _render_property_analysis_fragment(
+    render_individual_search_analysis_fragment(
         guest_mode=_guest_mode,
         address=address,
+        property_info=property_info,
+        assumptions=assumptions,
+        finance=finance,
     )

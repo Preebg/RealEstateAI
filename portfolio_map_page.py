@@ -28,11 +28,11 @@ from market_pulse import render_market_pulse
 from app_nav import navigate_to_individual_search
 from security_utils import escape_html
 from ui_theme import render_callout_info, render_map_roi_legend, render_page_hero
-from user_timezone import (
-    ensure_user_timezone,
+from viewer_timezone import (
+    ensure_viewer_timezone,
     format_added_at,
     parse_property_timestamp,
-    user_timezone_is_resolved,
+    viewer_timezone_is_resolved,
 )
 
 # ---------------------------------------------------------------------------
@@ -1392,7 +1392,7 @@ def render_portfolio_map_page() -> None:
         st.divider()
         render_market_pulse()
 
-    user_tz = ensure_user_timezone()
+    user_tz = ensure_viewer_timezone()
     portfolio_df = load_geocoded_portfolio_dataframe()
 
     if portfolio_df.empty:
@@ -1644,7 +1644,7 @@ def render_portfolio_map_page() -> None:
             "Zoom in on a metro area to filter this ledger to properties on screen. "
             "Click a row to focus it on the map."
         )
-    if user_timezone_is_resolved():
+    if viewer_timezone_is_resolved():
         st.caption("Added times are shown in your local timezone.")
     ledger_columns = [
         "address",
@@ -1657,7 +1657,7 @@ def render_portfolio_map_page() -> None:
         "quantum_success",
     ]
     display_df = ledger_df[ledger_columns].copy()
-    if user_timezone_is_resolved():
+    if viewer_timezone_is_resolved():
         display_df["added_at"] = display_df["added_at"].apply(
             lambda value: format_added_at(value, user_tz)
             if value is not None and pd.notna(value)

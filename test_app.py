@@ -1217,6 +1217,63 @@ class TestInsuranceNormalization(unittest.TestCase):
         self.assertAlmostEqual(data["insurance"], 70.0)
 
 
+class TestRentResolution(unittest.TestCase):
+    def test_resolve_monthly_rent_uses_one_percent_rule(self):
+        from finance import resolve_monthly_rent
+
+        self.assertAlmostEqual(
+            resolve_monthly_rent({"price": 250_000, "rent": 0}),
+            2_500.0,
+        )
+
+    def test_resolve_monthly_rent_prefers_listing_rent(self):
+        from finance import resolve_monthly_rent
+
+        self.assertAlmostEqual(
+            resolve_monthly_rent(
+                {"price": 250_000, "rent": 0},
+                research={"stated_gross_monthly_rent": 1_850},
+            ),
+            1_850.0,
+        )
+
+    def test_resolve_monthly_rent_uses_rent_comps(self):
+        from finance import resolve_monthly_rent
+
+        self.assertAlmostEqual(
+            resolve_monthly_rent(
+                {
+                    "price": 250_000,
+                    "rent": 0,
+                    "rent_comps_analysis": {"median_monthly_rent": 1_700},
+                }
+            ),
+            1_700.0,
+        )
+
+    def test_backfill_property_rent_sets_ai_baseline(self):
+        from knowledge_base import backfill_property_rent, get_ai_baseline_rent
+
+        record = {"price": 200_000, "rent": 0, "original_ai_rent": 0}
+        backfill_property_rent(record)
+        self.assertAlmostEqual(record["rent"], 2_000.0)
+        self.assertAlmostEqual(record["original_ai_rent"], 2_000.0)
+        self.assertAlmostEqual(get_ai_baseline_rent(record), 2_000.0)
+
+    def test_apply_rent_comps_fills_missing_rent(self):
+        from rent_comps_analysis import apply_rent_comps_adjustment
+
+        property_data = {"rent": 0, "square_footage": 1200}
+        rent_comps = {
+            "comp_suggested_rent": 1_650,
+            "median_monthly_rent": 1_600,
+            "is_underrented": False,
+        }
+        self.assertTrue(apply_rent_comps_adjustment(property_data, rent_comps))
+        self.assertEqual(property_data["rent"], 1650)
+        self.assertEqual(property_data["original_ai_rent"], 1650)
+
+
 class TestTaxRateNormalization(unittest.TestCase):
     def test_converts_decimal_tax_rate_to_percent(self):
         from finance import normalize_tax_rate_percent
@@ -2350,12 +2407,12 @@ class TestPortfolioMapFilters(unittest.TestCase):
         self.assertEqual(added_at, datetime(2025, 6, 11, 22, 53, tzinfo=timezone.utc))
 
 
-class TestUserTimezone(unittest.TestCase):
+class TestViewerTimezone(unittest.TestCase):
     def test_format_added_at_same_day(self):
         from datetime import datetime, timezone
         from zoneinfo import ZoneInfo
 
-        from user_timezone import format_added_at
+        from viewer_timezone import format_added_at
 
         utc_dt = datetime(2025, 6, 11, 22, 53, tzinfo=timezone.utc)
         now = datetime(2025, 6, 11, 12, 0, tzinfo=ZoneInfo("America/New_York"))
@@ -2370,7 +2427,7 @@ class TestUserTimezone(unittest.TestCase):
         from datetime import datetime, timezone
         from zoneinfo import ZoneInfo
 
-        from user_timezone import format_added_at
+        from viewer_timezone import format_added_at
 
         utc_dt = datetime(2025, 5, 10, 14, 30, tzinfo=timezone.utc)
         now = datetime(2025, 6, 11, 12, 0, tzinfo=ZoneInfo("America/New_York"))

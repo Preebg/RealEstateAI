@@ -24,6 +24,7 @@ from finance import (
     normalize_monthly_insurance,
     normalize_percent_rate,
     normalize_tax_rate_percent,
+    resolve_monthly_rent,
 )
 from comps_analysis import (
     apply_comp_implied_market_value,
@@ -37,7 +38,7 @@ from rent_comps_analysis import (
     normalize_rent_comps_payload,
 )
 from data_provenance import attach_data_provenance
-from knowledge_base import get_kb_context, lookup_property
+from knowledge_base import backfill_property_rent, get_kb_context, lookup_property
 from quantum_portfolio import (
     ALIGNMENT_SCORE_KEYS,
     PortfolioInputs,
@@ -3632,9 +3633,13 @@ def _synthesis_fallback_payload(research: dict[str, Any]) -> dict[str, Any]:
     price = safe_float(research.get("price"))
     taxes = safe_float(research.get("taxes"))
     fallback_year = _research_year_built(research)
+    fallback_rent = resolve_monthly_rent(
+        {"price": price, "stated_gross_monthly_rent": research.get("stated_gross_monthly_rent")},
+        research=research,
+    )
     payload: dict[str, Any] = {
         "price": price,
-        "rent": 0.0,
+        "rent": fallback_rent,
         "tax_rate": (taxes / price * 100) if price > 0 else 0.0,
         "hoa": safe_float(research.get("hoa")),
         "insurance": 100.0,
@@ -3675,6 +3680,7 @@ def _finalize_synthesis_payload(
     )
     _apply_research_year_built(data, research)
     _sanitize_synthesis_numerics(data)
+    backfill_property_rent(data, research=research)
     canonicalize_year_built_fields(data)
     enriched = enrich_with_forecast(data)
     if geospatial:
@@ -4228,6 +4234,10 @@ def get_initial_analysis(address: str) -> tuple[dict[str, Any], bool, str | None
         )
 
     _sanitize_synthesis_numerics(extracted)
+    research_dict = _extract_json(research_results) if research_results else None
+    if not isinstance(research_dict, dict):
+        research_dict = None
+    backfill_property_rent(extracted, research=research_dict)
     canonicalize_year_built_fields(extracted)
     return extracted, False, research_results
 
@@ -4287,6 +4297,10 @@ def get_final_analysis(
                     },
                 )
 
+    research_dict = _extract_json(research_results) if research_results else None
+    if not isinstance(research_dict, dict):
+        research_dict = None
+    backfill_property_rent(property_data, research=research_dict)
     enriched = enrich_with_forecast(property_data)
     return attach_data_provenance(
         ensure_comps_analysis_field(enriched),

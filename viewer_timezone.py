@@ -6,8 +6,9 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-USER_TIMEZONE_SESSION_KEY = "user_timezone"
-USER_TIMEZONE_QUERY_PARAM = "tz"
+# Underscore prefix avoids Streamlit session-state collisions with module names.
+VIEWER_TIMEZONE_SESSION_KEY = "_viewer_timezone"
+VIEWER_TIMEZONE_QUERY_PARAM = "tz"
 DEFAULT_TIMEZONE = "UTC"
 
 
@@ -72,6 +73,15 @@ def format_added_at(
     return f"{local.strftime('%b')} {local.day}, {local.year}, {time_str}"
 
 
+def _clear_query_param(name: str) -> None:
+    try:
+        import streamlit as st
+    except ImportError:
+        return
+    if name in st.query_params:
+        del st.query_params[name]
+
+
 def get_user_zoneinfo() -> ZoneInfo:
     """Return the user's timezone from Streamlit session state, or UTC."""
     try:
@@ -79,22 +89,22 @@ def get_user_zoneinfo() -> ZoneInfo:
     except ImportError:
         return ZoneInfo(DEFAULT_TIMEZONE)
 
-    stored = st.session_state.get(USER_TIMEZONE_SESSION_KEY)
+    stored = st.session_state.get(VIEWER_TIMEZONE_SESSION_KEY)
     if stored:
         return ZoneInfo(validate_timezone_name(str(stored)))
     return ZoneInfo(DEFAULT_TIMEZONE)
 
 
-def user_timezone_is_resolved() -> bool:
+def viewer_timezone_is_resolved() -> bool:
     """True once the browser timezone has been stored in session state."""
     try:
         import streamlit as st
     except ImportError:
         return False
-    return USER_TIMEZONE_SESSION_KEY in st.session_state
+    return bool(st.session_state.get(VIEWER_TIMEZONE_SESSION_KEY))
 
 
-def ensure_user_timezone() -> ZoneInfo:
+def ensure_viewer_timezone() -> ZoneInfo:
     """
     Resolve the viewer's IANA timezone once per session.
 
@@ -107,23 +117,22 @@ def ensure_user_timezone() -> ZoneInfo:
     except ImportError:
         return ZoneInfo(DEFAULT_TIMEZONE)
 
-    stored = st.session_state.get(USER_TIMEZONE_SESSION_KEY)
+    stored = st.session_state.get(VIEWER_TIMEZONE_SESSION_KEY)
     if stored:
         return ZoneInfo(validate_timezone_name(str(stored)))
 
-    query_tz = st.query_params.get(USER_TIMEZONE_QUERY_PARAM)
+    query_tz = st.query_params.get(VIEWER_TIMEZONE_QUERY_PARAM)
     if query_tz:
         tz_name = validate_timezone_name(query_tz)
-        st.session_state[USER_TIMEZONE_SESSION_KEY] = tz_name
-        if USER_TIMEZONE_QUERY_PARAM in st.query_params:
-            del st.query_params[USER_TIMEZONE_QUERY_PARAM]
+        st.session_state[VIEWER_TIMEZONE_SESSION_KEY] = tz_name
+        _clear_query_param(VIEWER_TIMEZONE_QUERY_PARAM)
         return ZoneInfo(tz_name)
 
     components.html(
         f"""
         <script>
         (function() {{
-            const param = {USER_TIMEZONE_QUERY_PARAM!r};
+            const param = {VIEWER_TIMEZONE_QUERY_PARAM!r};
             const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
             const url = new URL(window.parent.location.href);
             if (url.searchParams.get(param) !== tz) {{

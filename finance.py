@@ -1,6 +1,6 @@
 import math
 import random
-from typing import TypedDict
+from typing import Any, TypedDict
 
 # Historical metro home-price CAGR (decimal annual rate), keyed like engine.HOT_MARKETS.
 METRO_HISTORICAL_CAGR: dict[str, float] = {
@@ -42,6 +42,63 @@ RATE_SAMPLE_CEILING = 0.15
 
 # Values above this threshold are treated as annual premiums and converted to monthly.
 MONTHLY_INSURANCE_ANNUAL_THRESHOLD = 400.0
+
+# Quick monthly rent estimate when listing/AI rent is missing (1% rule).
+DEFAULT_RENT_TO_PRICE_RATIO = 0.01
+
+
+def _positive_currency(value: Any) -> float:
+    """Parse a numeric field and return it only when strictly positive."""
+    if value is None or value == "":
+        return 0.0
+    try:
+        if isinstance(value, str):
+            cleaned = value.replace("$", "").replace(",", "").strip()
+            parsed = float(cleaned) if cleaned else 0.0
+        else:
+            parsed = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return parsed if parsed > 0 else 0.0
+
+
+def resolve_monthly_rent(
+    property_data: dict[str, Any],
+    *,
+    research: dict[str, Any] | None = None,
+) -> float:
+    """
+    Resolve a positive monthly gross rent from property facts.
+
+    Priority: saved rent → AI baseline → listing research → rental comps → 1% rule.
+    """
+    for key in ("rent", "original_ai_rent"):
+        candidate = _positive_currency(property_data.get(key))
+        if candidate > 0:
+            return round(candidate, 2)
+
+    research_data = research if isinstance(research, dict) else {}
+    stated = _positive_currency(
+        property_data.get("stated_gross_monthly_rent")
+        or research_data.get("stated_gross_monthly_rent")
+    )
+    if stated > 0:
+        return round(stated, 2)
+
+    rent_comps = property_data.get("rent_comps_analysis")
+    if isinstance(rent_comps, dict):
+        for key in ("comp_suggested_rent", "median_monthly_rent"):
+            candidate = _positive_currency(rent_comps.get(key))
+            if candidate > 0:
+                return round(candidate, 2)
+
+    price = _positive_currency(property_data.get("price")) or _positive_currency(
+        property_data.get("predicted_value")
+    )
+    if price > 0:
+        return round(price * DEFAULT_RENT_TO_PRICE_RATIO, 2)
+
+    return 0.0
 
 # Vacancy / management fees are stored as percent (e.g. 6 = 6%, minimum ~1%).
 PERCENT_FEE_MIN = 1.0
