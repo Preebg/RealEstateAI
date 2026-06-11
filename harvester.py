@@ -4,7 +4,6 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
-import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -645,8 +644,9 @@ async def run_harvester_pipeline_async(admin_user_id: str) -> dict[str, Any]:
     Stage 3 (Geocode): gemini-2.5-flash/lite Maps + search scout
     Stage 4 (Synthesis): gemini-3.1-flash-lite-preview -> gemini-3.5-flash -> gemma-4-26b-a4b-it
 
-    Discovery overlaps with downstream stages: each verified listing is researched as soon
-    as it is found. Discovery is one combined all-market call per model tier (per-model RPM).
+    Stage 1 discovery completes before Stage 2 research begins. Synthesis still pipelines
+    per property as each research job finishes. Discovery is one combined all-market call
+    per model tier (per-model RPM).
     """
     global _active_discovery_model, _active_research_model, _active_synthesis_model
     _active_discovery_model = engine.DISCOVERY_MODEL
@@ -702,61 +702,23 @@ async def run_harvester_pipeline_async(admin_user_id: str) -> dict[str, Any]:
     model_state = _HarvesterModelState(synthesis_model=engine.SYNTHESIS_MODEL)
     synthesis_tasks: list[asyncio.Task[None]] = []
     research_tasks: list[asyncio.Task[None]] = []
-    scheduled_keys: set[str] = set()
-    schedule_lock = threading.Lock()
-    loop = asyncio.get_running_loop()
-
-    async def _schedule_listing_for_research(listing: dict[str, Any]) -> None:
-        address = str(listing.get("address", "")).strip()
-        addr_key = normalize_address_key(address)
-        if not addr_key or addr_key in scanned_keys:
-            return
-        async with report_lock:
-            report["discovered"] += 1
-        research_tasks.append(
-            asyncio.create_task(
-                _research_and_schedule_synthesis(
-                    listing,
-                    admin_user_id,
-                    report,
-                    report_lock,
-                    model_state,
-                    rate_limiter,
-                    session,
-                    synthesis_tasks,
-                    geospatial_budget=geospatial_budget,
-                ),
-                name=f"research:{address or 'unknown'}",
-            )
-        )
-
-    def on_listing_found(listing: dict[str, Any]) -> None:
-        addr_key = normalize_address_key(str(listing.get("address", "")))
-        if not addr_key or addr_key in scanned_keys:
-            return
-        with schedule_lock:
-            if addr_key in scheduled_keys:
-                return
-            scheduled_keys.add(addr_key)
-        asyncio.run_coroutine_threadsafe(
-            _schedule_listing_for_research(listing),
-            loop,
-        )
 
     print("=" * 60)
     print("ACCURACY WORKFLOW - discovery -> research -> property value -> synthesis")
-    print(
-        "Note: [research] may appear while [discovery] is still running — "
-        "listings are pipelined as soon as discovery verifies each address."
-    )
     print("=" * 60)
+
+    print(
+        f"[discovery] Stage 1 START — hot-market search "
+        f"(≤{engine.MAX_DISCOVERY_LISTINGS} listings under "
+        f"${engine.MAX_DISCOVERY_PRICE:,})...",
+        flush=True,
+    )
 
     def _run_discovery() -> list[dict[str, Any]]:
         # discover_hot_market_listings walks DISCOVERY_MODEL_CHAIN on RPD/empty:
         # gemini-2.5-flash -> gemini-2.5-flash-lite -> gemma-4-26b-a4b-it
         return engine.discover_hot_market_listings(
             exclude_addresses=scanned_addresses,
-            on_listing_found=on_listing_found,
         )
 
     listings = await asyncio.to_thread(_run_discovery)
@@ -770,11 +732,14 @@ async def run_harvester_pipeline_async(admin_user_id: str) -> dict[str, Any]:
             for listing in listings
             if normalize_address_key(str(listing.get("address", ""))) not in scanned_keys
         ]
-    print(f"Found {len(listings)} listings under ${engine.MAX_DISCOVERY_PRICE:,}")
+    report["discovered"] = len(listings)
+    print(
+        f"[discovery] Stage 1 DONE — {len(listings)} new listings under "
+        f"${engine.MAX_DISCOVERY_PRICE:,} (model: {_active_discovery_model})",
+        flush=True,
+    )
 
-    if research_tasks:
-        await asyncio.gather(*research_tasks)
-    elif not listings:
+    if not listings:
         print("No listings discovered. Exiting.")
         print(
             "Tip: 503/empty grounded responses are usually transient. "
@@ -782,6 +747,37 @@ async def run_harvester_pipeline_async(admin_user_id: str) -> dict[str, Any]:
             "and falls back to the Gemma discovery model automatically."
         )
         return report
+
+    print(
+        f"[research] Stage 2 START — {len(listings)} listings via "
+        f"{engine.RESEARCH_MODEL}...",
+        flush=True,
+    )
+    for listing in listings:
+        address = str(listing.get("address", "")).strip() or "(missing address)"
+        research_tasks.append(
+            asyncio.create_task(
+                _research_and_schedule_synthesis(
+                    listing,
+                    admin_user_id,
+                    report,
+                    report_lock,
+                    model_state,
+                    rate_limiter,
+                    session,
+                    synthesis_tasks,
+                    geospatial_budget=geospatial_budget,
+                ),
+                name=f"research:{address}",
+            )
+        )
+    await asyncio.gather(*research_tasks)
+    print(
+        f"[research] Stage 2 DONE — researched {report['researched']}, "
+        f"skipped {len(report['skipped'])}, "
+        f"already scanned {len(report['already_scanned'])}",
+        flush=True,
+    )
 
     if synthesis_tasks:
         await asyncio.gather(*synthesis_tasks)
@@ -857,7 +853,7 @@ def _render_streamlit_app() -> None:
     st.caption(
         "Upstate NY (priority: Rochester, Syracuse, Buffalo, Albany) → Philadelphia, "
         "Pittsburgh, Orlando, Tampa, Miami → Charlotte, Raleigh, Charleston • "
-        "Discovery overlaps research → synthesis (each address researched as soon as found; "
+        "Discovery → research → synthesis (sequential stages; "
         f"≤{engine.HARVESTER_RPM_PER_MODEL} API calls/min per model)"
     )
 
@@ -881,9 +877,8 @@ def _render_streamlit_app() -> None:
 
     st.info(
         f"Discovery uses Search Grounding (≤{engine.MAX_DISCOVERY_LISTINGS} listings under "
-        f"${engine.MAX_DISCOVERY_PRICE:,}, suburbs included). Each verified address is sent "
-        f"to research immediately as discovery returns verified rows — "
-        f"then to synthesis as soon as research finishes "
+        f"${engine.MAX_DISCOVERY_PRICE:,}, suburbs included). After discovery finishes, "
+        f"all listings move to research, then synthesis as each research job completes "
         f"(rate-limited to {engine.HARVESTER_RPM_PER_MODEL} calls/min per model). "
         f"Synthesis skips Poor condition or price > ${engine.MAX_SYNTHESIS_PRICE:,}."
     )

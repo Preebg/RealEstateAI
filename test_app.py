@@ -511,7 +511,7 @@ class TestModelRpmLimits(unittest.TestCase):
 
     def test_shared_rpm_across_pipelines(self) -> None:
         other = SharedModelRateLimiter(self._state_path, window_sec=60.0)
-        for _ in range(15):
+        for _ in range(13):
             self._limiter.try_acquire("gemma-4-31b-it")
         wait_sec = other.try_acquire("gemma-4-31b-it")
         self.assertIsNotNone(wait_sec)

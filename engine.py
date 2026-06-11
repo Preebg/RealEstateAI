@@ -99,10 +99,12 @@ GEOCODING_MODEL_CHAIN: tuple[str, ...] = (
 )
 GEOCODING_FALLBACK_MODEL = GEOCODING_MODEL_CHAIN[-1]
 # Per-model generate_content RPM caps (shared harvester + outreach + UI).
-DEFAULT_MODEL_RPM = 15
+DEFAULT_MODEL_RPM = 13
 MODEL_RPM_LIMITS: dict[str, int] = {
     "gemini-2.5-flash": 5,
     "gemini-2.5-flash-lite": 10,
+    "gemma-4-26b-a4b-it": 13,
+    "gemma-4-31b-it": 13,
 }
 MODEL_RPM_STATE_PATH = Path(__file__).resolve().parent / ".gemini_model_rpm.json"
 # Daily grounding budgets — favor search scouts over map lookups.
@@ -255,7 +257,7 @@ BACKOFF_MULTIPLIER = 2.0
 # Upper bound for fixed sleeps; prefer retry_delay_seconds() for retries.
 RATE_LIMIT_BACKOFF_SEC = BACKOFF_MAX_SEC
 # Account-wide RPM reference; per-model caps live in MODEL_RPM_LIMITS.
-HARVESTER_RPM_CAP = 15
+HARVESTER_RPM_CAP = 13
 HARVESTER_RPM_PER_MODEL = DEFAULT_MODEL_RPM
 DISCOVERY_RPM_PER_MODEL = DEFAULT_MODEL_RPM
 HARVESTER_RPM_WINDOW_SEC = 60.0
@@ -2860,6 +2862,11 @@ def discover_hot_market_listings(
     """
     models_to_try = _discovery_models_to_try(model)
     discovery_rate_limiter = SyncModelRateLimiter(requests_per_minute=DISCOVERY_RPM_PER_MODEL)
+    chain_label = " -> ".join(models_to_try)
+    _discovery_log(
+        f"[discovery] Model chain: {chain_label} "
+        f"(target {MAX_DISCOVERY_LISTINGS} listings, exclude {len(exclude_addresses or [])} KB rows)"
+    )
     last_raw = ""
     for tier_idx, active_model in enumerate(models_to_try):
         try:
