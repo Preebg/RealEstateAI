@@ -212,6 +212,9 @@ MAX_DISCOVERY_LISTINGS = sum(
     base_target * DISCOVERY_TARGET_SCALE
     for _, _, base_target in HOT_MARKETS
 )
+# Hard floor for combined all-market discovery (model often stops at 6–13 without this).
+MIN_DISCOVERY_LISTINGS = 18
+DISCOVERY_PROMPT_TARGET = 20
 
 
 def _scaled_market_target(market_name: str) -> int:
@@ -1463,7 +1466,7 @@ Return ONLY JSON:
 
 Rules:
 - latitude/longitude must be decimal degrees for the property parcel or building centroid.
-- If you cannot resolve coordinates, return latitude 0 and longitude 0 with confidence "low".
+- If you cannot resolve coordinates, omit latitude and longitude entirely (do not return 0).
 - Do not guess city-center coordinates."""
 
 
@@ -1498,7 +1501,7 @@ Return ONLY JSON:
 Rules:
 - score is 0 (lowest risk) to 10 (highest risk).
 - latitude/longitude must be the property location, not a city center.
-- If Maps cannot resolve the parcel, return latitude 0, longitude 0, confidence "low"."""
+- If Maps cannot resolve the parcel, omit latitude and longitude entirely (do not return 0)."""
 
 
 def _normalize_geospatial_payload(
@@ -1603,9 +1606,9 @@ def attach_geospatial_to_property(
     updated = dict(property_data)
     lat = geospatial.get("latitude")
     lon = geospatial.get("longitude")
-    if lat is not None and lon is not None:
-        updated["latitude"] = lat
-        updated["longitude"] = lon
+    if _has_precise_coordinates(lat, lon):
+        updated["latitude"] = safe_float(lat)
+        updated["longitude"] = safe_float(lon)
 
     for meta_key in (
         "geocode_confidence",
@@ -1741,6 +1744,27 @@ def run_geospatial_enrichment(
             break
 
     merged = _merge_geospatial_results(address, scout_result, maps_result)
+    if not _has_precise_coordinates(merged.get("latitude"), merged.get("longitude")):
+        catch_lat, catch_lon = _resolve_missing_coordinates_with_grounding_sync(
+            address,
+            session=session,
+        )
+        if catch_lat is not None and catch_lon is not None:
+            merged["latitude"] = catch_lat
+            merged["longitude"] = catch_lon
+            merged["geocode_confidence"] = "medium"
+            merged["geocode_source"] = "geocode_grounding_catch"
+            merged["geocode_model"] = COORDINATE_CATCH_MODEL
+        elif not _has_precise_coordinates(merged.get("latitude"), merged.get("longitude")):
+            local_lat, local_lon = _local_coordinate_fallback(
+                address,
+                market_city=market_city,
+            )
+            if local_lat is not None and local_lon is not None:
+                merged["latitude"] = local_lat
+                merged["longitude"] = local_lon
+                merged["geocode_confidence"] = "low"
+                merged["geocode_source"] = "local_fallback"
     if merged["latitude"] is None and last_error is not None:
         merged["geocode_error"] = str(last_error)
     return merged
@@ -2156,7 +2180,11 @@ def _discovery_prompt(
             markets_desc = ", ".join(
                 f"{count} in {location}" for _, location, count in HOT_MARKETS
             )
-            scope = f"residential properties CURRENTLY FOR SALE: {markets_desc}"
+            scope = (
+                f"at least {MIN_DISCOVERY_LISTINGS} distinct residential properties "
+                f"(target {DISCOVERY_PROMPT_TARGET}–{MAX_DISCOVERY_LISTINGS}) CURRENTLY FOR SALE "
+                f"across these hot markets: {markets_desc}"
+            )
 
     exclude_block = ""
     if exclude_addresses:
@@ -2216,11 +2244,24 @@ def _discovery_prompt(
                 "exclude manufactured/mobile homes entirely."
             )
 
-    return_count_rule = (
-        f"You MUST return {ask_total} distinct listings when possible."
-        if split_region or split_market
-        else f"You MUST return {MAX_DISCOVERY_LISTINGS} distinct listings when possible."
-    )
+    if split_region or split_market:
+        return_count_rule = (
+            f"You MUST return {ask_total} distinct listings — do not return fewer."
+        )
+    elif total_needed and total_needed > 0:
+        return_count_rule = (
+            f"You MUST return {total_needed} additional distinct listings in this response "
+            f"— do not return fewer. Search new listing pages; do not repeat addresses "
+            f"from the exclude list."
+        )
+    else:
+        return_count_rule = (
+            f"You MUST return a JSON array with AT LEAST {MIN_DISCOVERY_LISTINGS} objects "
+            f"(aim for {DISCOVERY_PROMPT_TARGET}–{MAX_DISCOVERY_LISTINGS}). "
+            f"Short arrays of 6, 10, or 13 listings are unacceptable — keep running "
+            f"additional Zillow/Redfin/Realtor searches until you have verified "
+            f"at least {MIN_DISCOVERY_LISTINGS} distinct active listings."
+        )
 
     maps_coords_rule = ""
     maps_example_fields = ""
@@ -2232,6 +2273,14 @@ def _discovery_prompt(
         maps_example_fields = (
             '    "latitude": 43.12345,\n'
             '    "longitude": -77.54321,\n'
+        )
+
+    count_floor_rule = ""
+    if not split_region and not split_market and not (total_needed and total_needed > 0):
+        count_floor_rule = (
+            f"- MINIMUM ARRAY LENGTH: {MIN_DISCOVERY_LISTINGS} verified listings in the JSON "
+            f"array (target {DISCOVERY_PROMPT_TARGET}+). The example below shows only 2 rows "
+            f"for format — your response must include many more.\n"
         )
 
     return f"""You are a real estate discovery agent for US hot rental markets.
@@ -2268,7 +2317,7 @@ Rules:
   count as Rochester; Cicero/Clay/Liverpool/North Syracuse count as Syracuse; Amherst/Cheektowaga
   count as Buffalo; Colonie/Guilderland count as Albany).
 - {return_count_rule} Do not stop early.
-- ONLY include: conventional site-built single-family detached homes, townhomes/townhouses,
+{count_floor_rule}- ONLY include: conventional site-built single-family detached homes, townhomes/townhouses,
   and small multifamily (duplex, triplex, or fourplex — at most 4 units total).
 - NEVER include manufactured homes, mobile homes, modular homes, trailers, park-model homes,
   or HUD-code housing. Skip "Manufactured" / "Mobile" listing filters entirely; on Zillow/Redfin/
@@ -2791,20 +2840,17 @@ def _discover_listings_for_model(
     if len(deduped) >= MAX_DISCOVERY_LISTINGS:
         return deduped, last_raw
 
-    remaining = MAX_DISCOVERY_LISTINGS - len(deduped)
-    if remaining <= 0:
-        return deduped, last_raw
-
     if deduped:
         _log.info(
             "discovery_partial_combined",
             model=model,
             count=len(deduped),
             target=MAX_DISCOVERY_LISTINGS,
+            minimum=MIN_DISCOVERY_LISTINGS,
         )
         _discovery_log(
             f"[discovery] Combined search returned {len(deduped)}/{MAX_DISCOVERY_LISTINGS} "
-            f"on {model}; one global top-up for {remaining} more..."
+            f"(minimum {MIN_DISCOVERY_LISTINGS}) on {model}; running global top-up(s)..."
         )
     else:
         _log.warning(
@@ -2814,31 +2860,67 @@ def _discover_listings_for_model(
         )
         _discovery_log(
             f"[discovery] Combined search returned 0 listings on {model}; "
-            f"retrying once for up to {MAX_DISCOVERY_LISTINGS}..."
+            f"retrying for at least {MIN_DISCOVERY_LISTINGS}..."
         )
 
-    found_addrs = [str(item.get("address", "")) for item in deduped]
-    merged_exclude = list(exclude_addresses or []) + found_addrs
-    topup_listings, topup_raw = _run_discovery_attempt(
-        model=model,
-        max_price=max_price,
-        exclude_addresses=merged_exclude,
-        total_needed=remaining,
-        rate_limiter=rate_limiter,
-    )
-    last_raw = topup_raw or last_raw
-    before = len(deduped)
-    deduped = _extend_discovery_listings(
-        deduped,
-        topup_listings,
-        max_price=max_price,
-        on_listing_found=on_listing_found,
-        discovery_model=model,
-    )
-    _discovery_log(
-        f"[discovery] Global top-up: +{len(deduped) - before} new "
-        f"(total {len(deduped)}/{MAX_DISCOVERY_LISTINGS})"
-    )
+    for topup_round in range(1, DISCOVERY_TOPUP_MAX_ROUNDS + 1):
+        if len(deduped) >= MAX_DISCOVERY_LISTINGS:
+            break
+        if len(deduped) >= MIN_DISCOVERY_LISTINGS and len(deduped) >= DISCOVERY_PROMPT_TARGET:
+            break
+
+        remaining = max(
+            MAX_DISCOVERY_LISTINGS - len(deduped),
+            MIN_DISCOVERY_LISTINGS - len(deduped),
+        )
+        found_addrs = [str(item.get("address", "")) for item in deduped]
+        merged_exclude = list(exclude_addresses or []) + found_addrs
+        _discovery_log(
+            f"[discovery] Global top-up {topup_round}/{DISCOVERY_TOPUP_MAX_ROUNDS}: "
+            f"need {remaining} more (have {len(deduped)}, "
+            f"minimum {MIN_DISCOVERY_LISTINGS})..."
+        )
+        topup_listings, topup_raw = _run_discovery_attempt(
+            model=model,
+            max_price=max_price,
+            exclude_addresses=merged_exclude,
+            total_needed=remaining,
+            rate_limiter=rate_limiter,
+        )
+        last_raw = topup_raw or last_raw
+        before = len(deduped)
+        deduped = _extend_discovery_listings(
+            deduped,
+            topup_listings,
+            max_price=max_price,
+            on_listing_found=on_listing_found,
+            discovery_model=model,
+        )
+        added = len(deduped) - before
+        _discovery_log(
+            f"[discovery] Global top-up {topup_round}: +{added} new "
+            f"(total {len(deduped)}/{MAX_DISCOVERY_LISTINGS})"
+        )
+        if added == 0:
+            break
+
+    if len(deduped) < MIN_DISCOVERY_LISTINGS:
+        _discovery_log(
+            f"[discovery] Still below minimum ({len(deduped)}/{MIN_DISCOVERY_LISTINGS}); "
+            f"running regional discovery pass..."
+        )
+        regional, regional_raw = _discover_listings_per_market(
+            model=model,
+            max_price=max_price,
+            exclude_addresses=exclude_addresses,
+            seed_listings=deduped,
+            on_listing_found=on_listing_found,
+            rate_limiter=rate_limiter,
+        )
+        last_raw = regional_raw or last_raw
+        if len(regional) > len(deduped):
+            deduped = regional
+
     return deduped, last_raw
 
 
@@ -3047,12 +3129,57 @@ def _needs_coordinate_catch(
     lon: Any,
 ) -> bool:
     """
-    Run synthesis coordinate catch when Maps-grounded discovery was not used
-    and coordinates are still missing.
+    Run synthesis coordinate catch when coordinates are missing or null-island.
+
+    Maps-grounded discovery often omits lat/lon in JSON even when Maps tools ran,
+    so missing coords always warrant a catch pass — not only for Gemma discovery.
     """
+    _ = discovery_model
+    return not _has_precise_coordinates(lat, lon)
+
+
+def _local_coordinate_fallback(
+    address: str,
+    *,
+    market_city: str | None = None,
+    zip_code: str | None = None,
+) -> tuple[float | None, float | None]:
+    """ZIP centroid / market-center fallback when grounding agents fail."""
+    from knowledge_base import parse_zipcode_from_address
+    from portfolio_map_page import resolve_coordinates_local
+
+    normalized = str(address or "").strip()
+    if not normalized:
+        return None, None
+    zip_val = str(zip_code or parse_zipcode_from_address(normalized) or "").strip()
+    return resolve_coordinates_local(normalized, zip_val, str(market_city or ""))
+
+
+def sanitize_property_coordinates(payload: dict[str, Any]) -> None:
+    """Strip null-island sentinels and apply local fallback before DB writes."""
+    lat = payload.get("latitude")
+    lon = payload.get("longitude")
     if _has_precise_coordinates(lat, lon):
-        return False
-    return not _discovery_model_provides_map_coords(discovery_model)
+        payload["latitude"] = safe_float(lat)
+        payload["longitude"] = safe_float(lon)
+        return
+
+    payload.pop("latitude", None)
+    payload.pop("longitude", None)
+    if payload.get("geocode_source") in {None, "", "unresolved"}:
+        address = str(payload.get("address") or "").strip()
+        if not address:
+            return
+        local_lat, local_lon = _local_coordinate_fallback(
+            address,
+            market_city=str(payload.get("market_city") or ""),
+            zip_code=str(payload.get("zip_code") or "") or None,
+        )
+        if local_lat is not None and local_lon is not None:
+            payload["latitude"] = local_lat
+            payload["longitude"] = local_lon
+            payload.setdefault("geocode_confidence", "low")
+            payload.setdefault("geocode_source", "local_fallback")
 
 
 def _normalize_strategy_label(label: str) -> str:
@@ -4128,7 +4255,10 @@ def get_final_analysis(
         except Exception as exc:
             _log.warning("comps_fetch_failed", address=address, error=str(exc))
 
-    if property_data.get("latitude") is None or property_data.get("longitude") is None:
+    if not _has_precise_coordinates(
+        property_data.get("latitude"),
+        property_data.get("longitude"),
+    ):
         try:
             geospatial = run_geospatial_enrichment(
                 address,
@@ -4137,6 +4267,25 @@ def get_final_analysis(
             property_data = attach_geospatial_to_property(property_data, geospatial)
         except Exception as exc:
             _log.warning("geospatial_enrichment_failed", address=address, error=str(exc))
+        if not _has_precise_coordinates(
+            property_data.get("latitude"),
+            property_data.get("longitude"),
+        ):
+            local_lat, local_lon = _local_coordinate_fallback(
+                address,
+                market_city=str(property_data.get("market_city") or ""),
+                zip_code=str(property_data.get("zip_code") or "") or None,
+            )
+            if local_lat is not None and local_lon is not None:
+                property_data = attach_geospatial_to_property(
+                    property_data,
+                    {
+                        "latitude": local_lat,
+                        "longitude": local_lon,
+                        "geocode_confidence": "low",
+                        "geocode_source": "local_fallback",
+                    },
+                )
 
     enriched = enrich_with_forecast(property_data)
     return attach_data_provenance(

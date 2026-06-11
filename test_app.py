@@ -637,8 +637,11 @@ class TestGeospatialEnrichment(unittest.TestCase):
         self.assertFalse(
             _needs_coordinate_catch(DISCOVERY_MODEL, 43.1, -77.6),
         )
-        self.assertFalse(
+        self.assertTrue(
             _needs_coordinate_catch(DISCOVERY_MODEL, None, None),
+        )
+        self.assertTrue(
+            _needs_coordinate_catch(DISCOVERY_MODEL, 0.0, 0.0),
         )
         self.assertTrue(
             _needs_coordinate_catch(DISCOVERY_FALLBACK_MODEL, None, None),
@@ -702,6 +705,30 @@ class TestGeospatialEnrichment(unittest.TestCase):
             },
         )
         self.assertLess(updated["location_score"], 8.0)
+
+    def test_attach_geospatial_ignores_null_island(self):
+        from engine import attach_geospatial_to_property
+
+        updated = attach_geospatial_to_property(
+            {"location_score": 8.0},
+            {"latitude": 0.0, "longitude": 0.0, "geocode_confidence": "low"},
+        )
+        self.assertNotIn("latitude", updated)
+        self.assertNotIn("longitude", updated)
+
+    def test_sanitize_property_coordinates_strips_null_island_and_falls_back(self):
+        from engine import sanitize_property_coordinates
+
+        payload = {
+            "address": "210 Everclay Dr, Rochester, NY 14618",
+            "market_city": "Rochester",
+            "latitude": 0.0,
+            "longitude": 0.0,
+        }
+        sanitize_property_coordinates(payload)
+        self.assertNotEqual(payload.get("latitude"), 0.0)
+        self.assertNotEqual(payload.get("longitude"), 0.0)
+        self.assertEqual(payload.get("geocode_source"), "local_fallback")
 
     def test_attach_coordinates_prefers_stored_coords(self):
         from portfolio_map_page import attach_coordinates
@@ -834,7 +861,7 @@ class TestDiscoveryParsing(unittest.TestCase):
 
         self.assertEqual(len(listings), 1)
         self.assertEqual(listings[0]["city"], "Rochester")
-        self.assertEqual(calls["count"], 2)
+        self.assertGreaterEqual(calls["count"], 2)
 
     def test_plan_redistributes_unfilled_rochester_slots(self):
         from engine import (
@@ -925,7 +952,7 @@ class TestDiscoveryParsing(unittest.TestCase):
 
         rochester_count = sum(1 for item in listings if item["city"] == "Rochester")
         self.assertEqual(rochester_count, 3)
-        self.assertEqual(calls["count"], 2)
+        self.assertGreaterEqual(calls["count"], 2)
         self.assertGreater(len(listings), 3)
 
     def test_plan_region_collapses_carolinas_markets(self):

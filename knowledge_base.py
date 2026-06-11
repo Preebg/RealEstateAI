@@ -942,10 +942,12 @@ def _prepare_canonical_payload(property_data: dict[str, Any], user_id: str) -> d
             "monthly_net_cash_flow",
             "insurance",
             "hoa",
-            "latitude",
-            "longitude",
         ],
     )
+
+    from engine import sanitize_property_coordinates
+
+    sanitize_property_coordinates(payload)
 
     if payload.get("insurance") is not None:
         payload["insurance"] = normalize_monthly_insurance(float(payload["insurance"]))

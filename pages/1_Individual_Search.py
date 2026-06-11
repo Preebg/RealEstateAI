@@ -1,5 +1,3 @@
-from typing import Any
-
 import streamlit as st
 
 from authenticate import render_auth_page, render_auth_sidebar
@@ -114,24 +112,19 @@ elif _guest_mode and not st.session_state.property_data:
     st.caption("Open a property from the **Portfolio Map** or use the link your friend shared.")
 
 @st.fragment
-def _render_property_underwriting(
+def _render_property_analysis_fragment(
     *,
     guest_mode: bool,
     address: str,
-    property_info: dict[str, Any],
 ) -> None:
-    """Assumption sliders, finance metrics, and analysis — fragment-scoped reruns."""
+    """Main analysis UI — fragment reruns for in-page widgets (crash sim, save, etc.)."""
+    property_info = st.session_state.get("property_data")
+    assumptions = st.session_state.get("individual_search_assumptions")
+    finance = st.session_state.get("individual_search_finance")
+    if not property_info or not assumptions or not finance:
+        return
+
     total_confidence_pct = property_info.get("total_confidence_pct")
-
-    price = safe_float(property_info.get("price"))
-    monthly_rent = get_effective_display_rent(property_info)
-    tax_rate = safe_float(property_info.get("tax_rate"))
-    monthly_HOA = safe_float(property_info.get("hoa"))
-    monthly_insurance = safe_float(property_info.get("insurance"))
-    ai_maint_percent = get_effective_display_maint(property_info)
-
-    initialize_hitl_baselines(property_info, monthly_rent, ai_maint_percent)
-
     location_score = safe_float(property_info.get("location_score"))
     appreciation_forecast = safe_float(property_info.get("appreciation_forecast"))
     forecast_rate = safe_float(property_info.get("forecast_rate"))
@@ -139,28 +132,6 @@ def _render_property_underwriting(
     from_kb = property_info.get("from_kb", False)
     property_id = property_info.get("id") or get_property_id_by_address(address)
     branding_label = property_info.get("property_label", "Balanced")
-
-    with st.sidebar:
-        assumptions = render_assumption_sliders(property_info)
-
-    purchase_price = safe_float(assumptions.get("offer_amount")) or price
-    finance = run_finance_analysis(
-        price=purchase_price,
-        down_payment_pct=assumptions["down_payment_pct"],
-        interest_rate=assumptions["interest_rate"],
-        loan_term=int(assumptions["loan_term"]),
-        closing_costs_pct=assumptions["user_closing_costs_pct"],
-        tax_rate=tax_rate,
-        monthly_insurance=monthly_insurance,
-        monthly_hoa=monthly_HOA,
-        maint_percent=assumptions["final_maint_percent"],
-        monthly_rent=assumptions["final_monthly_rent"],
-        vacancy_reserve_pct=assumptions["user_vacancy_reserve"],
-        management_fee_pct=assumptions["user_management_fee"],
-    )
-    with st.sidebar:
-        render_closing_costs_caption(finance["user_closing_costs_total"])
-        st.write(f"💸 Total Cash Required: **${finance['total_investment']:,.2f}**")
 
     sync_quantum_recompute_queue(
         property_info,
@@ -228,8 +199,40 @@ if st.session_state.property_data:
     property_info = ensure_data_provenance(property_info)
     st.session_state.property_data = property_info
 
-    _render_property_underwriting(
+    price = safe_float(property_info.get("price"))
+    monthly_rent = get_effective_display_rent(property_info)
+    tax_rate = safe_float(property_info.get("tax_rate"))
+    monthly_HOA = safe_float(property_info.get("hoa"))
+    monthly_insurance = safe_float(property_info.get("insurance"))
+    ai_maint_percent = get_effective_display_maint(property_info)
+    initialize_hitl_baselines(property_info, monthly_rent, ai_maint_percent)
+
+    with st.sidebar:
+        assumptions = render_assumption_sliders(property_info)
+        st.session_state["individual_search_assumptions"] = assumptions
+
+    purchase_price = safe_float(assumptions.get("offer_amount")) or price
+    finance = run_finance_analysis(
+        price=purchase_price,
+        down_payment_pct=assumptions["down_payment_pct"],
+        interest_rate=assumptions["interest_rate"],
+        loan_term=int(assumptions["loan_term"]),
+        closing_costs_pct=assumptions["user_closing_costs_pct"],
+        tax_rate=tax_rate,
+        monthly_insurance=monthly_insurance,
+        monthly_hoa=monthly_HOA,
+        maint_percent=assumptions["final_maint_percent"],
+        monthly_rent=assumptions["final_monthly_rent"],
+        vacancy_reserve_pct=assumptions["user_vacancy_reserve"],
+        management_fee_pct=assumptions["user_management_fee"],
+    )
+    st.session_state["individual_search_finance"] = finance
+
+    with st.sidebar:
+        render_closing_costs_caption(finance["user_closing_costs_total"])
+        st.write(f"💸 Total Cash Required: **${finance['total_investment']:,.2f}**")
+
+    _render_property_analysis_fragment(
         guest_mode=_guest_mode,
         address=address,
-        property_info=property_info,
     )

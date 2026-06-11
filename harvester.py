@@ -460,10 +460,16 @@ async def _synthesize_listing(
     enriched_research = dict(job.research)
     if geospatial.get("environmental_risk"):
         enriched_research["environmental_risk"] = geospatial["environmental_risk"]
-    if geospatial.get("latitude") is not None:
+    if engine._has_precise_coordinates(
+        geospatial.get("latitude"),
+        geospatial.get("longitude"),
+    ):
         enriched_research["latitude"] = geospatial["latitude"]
         enriched_research["longitude"] = geospatial["longitude"]
-    if geospatial.get("latitude") is not None:
+    if engine._has_precise_coordinates(
+        geospatial.get("latitude"),
+        geospatial.get("longitude"),
+    ):
         print(
             f"  [geocode] DONE {address} — "
             f"{geospatial['latitude']:.5f}, {geospatial['longitude']:.5f} "

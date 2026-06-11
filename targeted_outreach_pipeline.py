@@ -10,7 +10,7 @@ Run on your harvester machine (long-running; needs local Gmail OAuth once):
     python targeted_outreach_pipeline.py --limit 10
 
 Credentials: st.secrets / .streamlit/secrets.toml
-(GEMINI_API_KEY, Supabase, Google OAuth, SUPABASE_SERVICE_ROLE_KEY for property share links).
+(GEMINI_API_KEY, SUPABASE_SERVICE_ROLE_KEY, Google OAuth; service role required to read/update catalog).
 
 Gemini calls share the same per-model RPM limiter as the harvester (see engine.MODEL_RPM_LIMITS).
 """
@@ -36,7 +36,7 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
-from supabase import Client, create_client
+from supabase import Client
 
 from engine import (
     PROPERTY_VALUE_TRIGGERED_MODEL,
@@ -465,9 +465,16 @@ def build_property_pdf_bytes(row: dict[str, Any]) -> bytes:
 
 
 def get_supabase_client() -> Client:
-    url = _require_secret("SUPABASE_URL")
-    key = _require_secret("SUPABASE_ANON_KEY", "SUPABASE_KEY")
-    return create_client(url, key)
+    """Service-role client — shared catalog rows are hidden from the anon key by RLS."""
+    from authenticate import get_service_client
+
+    client = get_service_client()
+    if client is not None:
+        return client
+    raise RuntimeError(
+        "SUPABASE_SERVICE_ROLE_KEY is required for targeted outreach.\n"
+        f"Add it to {SECRETS_PATH} (Supabase Dashboard → Project Settings → API → service_role)."
+    )
 
 
 def fetch_outreach_candidates(supabase: Client, *, limit: int | None = None) -> list[dict[str, Any]]:
