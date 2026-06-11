@@ -1629,6 +1629,29 @@ def attach_geospatial_to_property(
     return updated
 
 
+def geospatial_from_cached_coords(research: dict[str, Any]) -> dict[str, Any] | None:
+    """
+    Build a geospatial payload when discovery/research already resolved coordinates.
+
+    Avoids redundant gemini-2.5-flash geocode calls (major RPD drain during harvest).
+    """
+    lat = research.get("latitude")
+    lon = research.get("longitude")
+    if not _has_precise_coordinates(lat, lon):
+        return None
+    discovery_model = research.get("discovery_model")
+    from_maps = _discovery_model_provides_map_coords(
+        str(discovery_model) if discovery_model else None
+    )
+    return {
+        "latitude": safe_float(lat),
+        "longitude": safe_float(lon),
+        "geocode_confidence": "high" if from_maps else "medium",
+        "geocode_source": "discovery_maps" if from_maps else "cached_coords",
+        "geocode_model": str(discovery_model) if discovery_model else None,
+    }
+
+
 def run_geospatial_enrichment(
     address: str,
     *,

@@ -16,7 +16,6 @@ import engine
 from app_logging import configure_logging, report_error
 from finance import analyze_investment
 from knowledge_base import (
-    backfill_missing_year_built_catalog,
     delete_unreliable_property,
     get_admin_uid,
     get_harvest_complete_addresses,
@@ -444,14 +443,21 @@ async def _synthesize_listing(
     market_city = job.market_city
     print(f"  [synthesis] START {address} ({market_city})")
 
-    print(f"  [geocode] START {address} — Maps + Search grounding agents")
-    geospatial = await engine.run_geospatial_enrichment_async(
-        address,
-        market_city=market_city,
-        budget=geospatial_budget,
-        rate_limiter=rate_limiter,
-        session=session,
-    )
+    geospatial = engine.geospatial_from_cached_coords(job.research)
+    if geospatial is not None:
+        print(
+            f"  [geocode] SKIP {address} — reusing discovery/research coordinates "
+            f"({geospatial['latitude']:.5f}, {geospatial['longitude']:.5f})"
+        )
+    else:
+        print(f"  [geocode] START {address} — Maps + Search grounding agents")
+        geospatial = await engine.run_geospatial_enrichment_async(
+            address,
+            market_city=market_city,
+            budget=geospatial_budget,
+            rate_limiter=rate_limiter,
+            session=session,
+        )
     enriched_research = dict(job.research)
     if geospatial.get("environmental_risk"):
         enriched_research["environmental_risk"] = geospatial["environmental_risk"]
@@ -675,42 +681,6 @@ async def run_harvester_pipeline_async(admin_user_id: str) -> dict[str, Any]:
             print(f"  - ... and {len(purged) - 5} more")
         log.info("harvest_unreliable_purge_complete", purged=len(purged))
 
-    year_backfill_results = await asyncio.to_thread(
-        backfill_missing_year_built_catalog, admin_user_id
-    )
-    if year_backfill_results:
-        backfilled = [
-            entry for entry in year_backfill_results if entry.get("status") == "backfilled"
-        ]
-        still_missing = [
-            entry
-            for entry in year_backfill_results
-            if entry.get("status") == "still_missing"
-        ]
-        report["year_built_backfilled"] = backfilled
-        report["year_built_still_missing"] = still_missing
-        if backfilled:
-            print(
-                f"Backfilled year_built for {len(backfilled)} existing catalog "
-                f"properties ({len(still_missing)} still unknown)."
-            )
-            for entry in backfilled[:5]:
-                print(
-                    f"  - {entry['address']} -> {entry.get('year_built')}"
-                )
-            if len(backfilled) > 5:
-                print(f"  - ... and {len(backfilled) - 5} more")
-            log.info(
-                "harvest_year_built_backfill_complete",
-                backfilled=len(backfilled),
-                still_missing=len(still_missing),
-            )
-        elif still_missing:
-            print(
-                f"Attempted year_built backfill for {len(still_missing)} "
-                "catalog properties; none resolved."
-            )
-
     complete_keys = get_harvest_complete_addresses(admin_user_id)
     scanned_keys = set(complete_keys)
     kb_raw = get_kb_raw_data(admin_user_id)
@@ -775,6 +745,10 @@ async def run_harvester_pipeline_async(admin_user_id: str) -> dict[str, Any]:
 
     print("=" * 60)
     print("ACCURACY WORKFLOW - discovery -> research -> property value -> synthesis")
+    print(
+        "Note: [research] may appear while [discovery] is still running — "
+        "listings are pipelined as soon as discovery verifies each address."
+    )
     print("=" * 60)
 
     def _run_discovery() -> list[dict[str, Any]]:
