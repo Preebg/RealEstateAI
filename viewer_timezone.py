@@ -1,16 +1,15 @@
-"""Browser timezone detection and local-time formatting for catalog timestamps."""
+"""Viewer timezone detection and UTC catalog timestamp formatting."""
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone, tzinfo
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-# Underscore prefix avoids Streamlit session-state collisions with module names.
-VIEWER_TIMEZONE_SESSION_KEY = "_viewer_timezone"
-VIEWER_TIMEZONE_OFFSET_KEY = "_viewer_tz_offset_min"
-VIEWER_TIMEZONE_QUERY_PARAM = "tz"
-VIEWER_TIMEZONE_OFFSET_QUERY_PARAM = "tz_offset"
+# Essential cookie — stores IANA timezone for session continuity (no tracking).
+VIEWER_TIMEZONE_COOKIE_NAME = "q_scout_essential_tz"
+VIEWER_TIMEZONE_COOKIE_SYNCED_KEY = "_viewer_tz_cookie_synced"
 DEFAULT_TIMEZONE = "UTC"
 
 
@@ -50,11 +49,11 @@ def parse_property_timestamp(value: Any) -> datetime | None:
 
 def timezone_from_offset_minutes(offset_minutes: int) -> tzinfo:
     """
-    Build a fixed offset tzinfo from JavaScript ``getTimezoneOffset()`` minutes.
+    Build a fixed offset from Streamlit/JS ``timezone_offset`` minutes.
 
-    JS returns (UTC - local) in minutes, so Eastern (UTC-4) is 240.
+    Positive values mean the local zone is behind UTC (US Eastern ≈ 240).
     """
-    return timezone(timedelta(minutes=-int(offset_minutes)))
+    return timezone(-timedelta(minutes=int(offset_minutes)))
 
 
 def _format_12h_time(dt: datetime) -> str:
@@ -86,142 +85,120 @@ def format_added_at(
     return f"{local.strftime('%b')} {local.day}, {local.year}, {time_str}"
 
 
-def _clear_query_param(name: str) -> None:
-    try:
-        import streamlit as st
-    except ImportError:
-        return
-    if name in st.query_params:
-        del st.query_params[name]
+def resolve_viewer_timezone(
+    *,
+    context_tz: str | None = None,
+    context_offset: int | None = None,
+    cookie_tz: str | None = None,
+) -> tzinfo:
+    """Resolve viewer tz from browser context, essential cookie, then UTC."""
+    if context_tz:
+        return ZoneInfo(validate_timezone_name(context_tz))
 
+    if cookie_tz:
+        return ZoneInfo(validate_timezone_name(cookie_tz))
 
-def _query_param_value(name: str) -> str | None:
-    try:
-        import streamlit as st
-    except ImportError:
-        return None
-    value = st.query_params.get(name)
-    if value is None:
-        return None
-    if isinstance(value, list):
-        return str(value[0]) if value else None
-    return str(value)
-
-
-def _store_viewer_timezone_from_query() -> tzinfo | None:
-    try:
-        import streamlit as st
-    except ImportError:
-        return None
-
-    query_tz = _query_param_value(VIEWER_TIMEZONE_QUERY_PARAM)
-    if query_tz:
-        tz_name = validate_timezone_name(query_tz)
-        st.session_state[VIEWER_TIMEZONE_SESSION_KEY] = tz_name
-        _clear_query_param(VIEWER_TIMEZONE_QUERY_PARAM)
-        return ZoneInfo(tz_name)
-
-    offset_raw = _query_param_value(VIEWER_TIMEZONE_OFFSET_QUERY_PARAM)
-    if offset_raw:
+    if context_offset is not None:
         try:
-            offset_minutes = int(offset_raw)
-        except ValueError:
-            offset_minutes = None
-        if offset_minutes is not None:
-            st.session_state[VIEWER_TIMEZONE_OFFSET_KEY] = offset_minutes
-            _clear_query_param(VIEWER_TIMEZONE_OFFSET_QUERY_PARAM)
-            return timezone_from_offset_minutes(offset_minutes)
-    return None
+            return timezone_from_offset_minutes(int(context_offset))
+        except (TypeError, ValueError):
+            pass
+
+    return ZoneInfo(DEFAULT_TIMEZONE)
 
 
 def get_viewer_timezone() -> tzinfo:
-    """Return the viewer timezone from session state, or UTC."""
+    """
+    Return the viewer's timezone.
+
+    Uses Streamlit 1.36+ ``st.context.timezone`` (sent by the browser each run),
+    then the essential timezone cookie, then ``st.context.timezone_offset``.
+    """
     try:
         import streamlit as st
     except ImportError:
         return ZoneInfo(DEFAULT_TIMEZONE)
 
-    stored = st.session_state.get(VIEWER_TIMEZONE_SESSION_KEY)
-    if stored:
-        return ZoneInfo(validate_timezone_name(str(stored)))
+    cookie_tz: str | None = None
+    try:
+        cookies = st.context.cookies
+        if VIEWER_TIMEZONE_COOKIE_NAME in cookies:
+            cookie_tz = str(cookies[VIEWER_TIMEZONE_COOKIE_NAME])
+    except (AttributeError, KeyError, TypeError, ValueError):
+        cookie_tz = None
 
-    offset_minutes = st.session_state.get(VIEWER_TIMEZONE_OFFSET_KEY)
-    if offset_minutes is not None:
-        try:
-            return timezone_from_offset_minutes(int(offset_minutes))
-        except (TypeError, ValueError):
-            pass
-    return ZoneInfo(DEFAULT_TIMEZONE)
+    context_tz = getattr(st.context, "timezone", None)
+    context_offset = getattr(st.context, "timezone_offset", None)
+
+    return resolve_viewer_timezone(
+        context_tz=str(context_tz) if context_tz else None,
+        context_offset=context_offset,
+        cookie_tz=cookie_tz,
+    )
 
 
 def viewer_timezone_is_local() -> bool:
-    """True when a browser-provided timezone is stored (not the UTC fallback)."""
+    """True when the browser provided a non-UTC timezone."""
     try:
         import streamlit as st
     except ImportError:
         return False
-    return bool(
-        st.session_state.get(VIEWER_TIMEZONE_SESSION_KEY)
-        or st.session_state.get(VIEWER_TIMEZONE_OFFSET_KEY) is not None
-    )
+
+    context_tz = getattr(st.context, "timezone", None)
+    if context_tz and validate_timezone_name(str(context_tz)) != DEFAULT_TIMEZONE:
+        return True
+
+    try:
+        cookies = st.context.cookies
+        if VIEWER_TIMEZONE_COOKIE_NAME in cookies:
+            return validate_timezone_name(cookies[VIEWER_TIMEZONE_COOKIE_NAME]) != DEFAULT_TIMEZONE
+    except (AttributeError, KeyError, TypeError, ValueError):
+        pass
+
+    return getattr(st.context, "timezone_offset", None) is not None
 
 
-def ensure_viewer_timezone() -> tzinfo:
+def sync_essential_timezone_cookie() -> None:
     """
-    Resolve the viewer's timezone once per session.
+    Persist the browser IANA timezone in an essential cookie (one script per session).
 
-    On first load, injects a small script that sets ``tz`` / ``tz_offset`` query
-    params from the browser; the next rerun stores them in session state.
+    The cookie lets later requests recover timezone if context is briefly unavailable.
     """
     try:
+        import streamlit as st
         import streamlit.components.v1 as components
     except ImportError:
-        return ZoneInfo(DEFAULT_TIMEZONE)
+        return
 
-    stored_tz = get_viewer_timezone()
-    if viewer_timezone_is_local():
-        return stored_tz
+    if st.session_state.get(VIEWER_TIMEZONE_COOKIE_SYNCED_KEY):
+        return
 
-    detected = _store_viewer_timezone_from_query()
-    if detected is not None:
-        return detected
-
+    context_tz = getattr(st.context, "timezone", None)
+    cookie_name = VIEWER_TIMEZONE_COOKIE_NAME
     components.html(
         f"""
         <script>
         (function() {{
-            const tzParam = {VIEWER_TIMEZONE_QUERY_PARAM!r};
-            const offsetParam = {VIEWER_TIMEZONE_OFFSET_QUERY_PARAM!r};
-            const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
-            const offset = String(new Date().getTimezoneOffset());
-            const targets = [window.top, window.parent, window];
-            let targetWindow = window;
-            for (const candidate of targets) {{
-                try {{
-                    if (candidate && candidate.location) {{
-                        targetWindow = candidate;
-                        break;
-                    }}
-                }} catch (err) {{
-                    /* cross-origin frame */
-                }}
+            const cookieName = {json.dumps(cookie_name)};
+            const contextTz = {json.dumps(str(context_tz) if context_tz else "")};
+            const tz = contextTz || Intl.DateTimeFormat().resolvedOptions().timeZone;
+            if (!tz) {{
+                return;
             }}
-            const url = new URL(targetWindow.location.href);
-            let changed = false;
-            if (url.searchParams.get(tzParam) !== tz) {{
-                url.searchParams.set(tzParam, tz);
-                changed = true;
-            }}
-            if (url.searchParams.get(offsetParam) !== offset) {{
-                url.searchParams.set(offsetParam, offset);
-                changed = true;
-            }}
-            if (changed) {{
-                targetWindow.location.replace(url.toString());
-            }}
+            const targetDoc = window.parent?.document || document;
+            const secure = (window.parent?.location?.protocol || location.protocol) === "https:"
+                ? "; Secure" : "";
+            targetDoc.cookie = `${{cookieName}}=${{encodeURIComponent(tz)}}`
+                + "; path=/; max-age=31536000; SameSite=Lax" + secure;
         }})();
         </script>
         """,
         height=0,
     )
-    return ZoneInfo(DEFAULT_TIMEZONE)
+    st.session_state[VIEWER_TIMEZONE_COOKIE_SYNCED_KEY] = True
+
+
+def ensure_viewer_timezone() -> tzinfo:
+    """Load viewer timezone and sync the essential cookie."""
+    sync_essential_timezone_cookie()
+    return get_viewer_timezone()

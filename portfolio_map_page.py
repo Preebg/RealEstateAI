@@ -645,8 +645,13 @@ def attach_coordinates(df: pd.DataFrame) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def _build_portfolio_dataframe_cached(properties_json: str) -> pd.DataFrame:
+def _build_portfolio_dataframe_cached(
+    properties_json: str,
+    *,
+    _ledger_cache_version: int = 3,
+) -> pd.DataFrame:
     """Cache analyzed metrics separately from geocoding (invalidates on KB writes)."""
+    _ = _ledger_cache_version
     properties = json.loads(properties_json)
     return build_portfolio_dataframe(properties)
 
@@ -1586,7 +1591,7 @@ def render_portfolio_map_page() -> None:
     if "map_selected_address" not in st.session_state:
         st.session_state["map_selected_address"] = None
 
-    _apply_ledger_selection_to_map(st.session_state.get("property_ledger_v2"), map_df)
+    _apply_ledger_selection_to_map(st.session_state.get("property_ledger_v3"), map_df)
 
     selected_address = st.session_state.get("map_selected_address")
     clicked_address, map_viewport = _render_portfolio_map_fragment(
@@ -1673,11 +1678,16 @@ def render_portfolio_map_page() -> None:
         "quantum_success",
     ]
     display_df = ledger_df[ledger_columns].copy()
-    display_df["added_at"] = display_df["added_at"].apply(
-        lambda value: format_added_at(value, user_tz)
-        if value is not None and pd.notna(value)
-        else "—"
-    )
+
+    def _format_ledger_added(value: Any) -> str:
+        if value is None or (isinstance(value, float) and pd.isna(value)):
+            return "—"
+        parsed = parse_property_timestamp(value)
+        if parsed is None:
+            return "—"
+        return format_added_at(parsed, user_tz)
+
+    display_df["added_at"] = display_df["added_at"].map(_format_ledger_added)
     display_df = display_df.rename(
         columns={
             "address": "Address",
@@ -1697,7 +1707,7 @@ def render_portfolio_map_page() -> None:
         display_df,
         use_container_width=True,
         hide_index=True,
-        key="property_ledger_v2",
+        key="property_ledger_v3",
         on_select="rerun",
         selection_mode="single-row",
         column_config={

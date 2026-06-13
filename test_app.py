@@ -2617,6 +2617,22 @@ class TestViewerTimezone(unittest.TestCase):
         now = datetime(2025, 6, 11, 12, 0, tzinfo=eastern)
         self.assertEqual(format_added_at(utc_dt, eastern, now=now), "6:53 PM")
 
+    def test_resolve_viewer_timezone_prefers_context(self):
+        from zoneinfo import ZoneInfo
+
+        from viewer_timezone import resolve_viewer_timezone
+
+        tz = resolve_viewer_timezone(context_tz="America/Chicago")
+        self.assertEqual(tz, ZoneInfo("America/Chicago"))
+
+    def test_resolve_viewer_timezone_cookie_fallback(self):
+        from zoneinfo import ZoneInfo
+
+        from viewer_timezone import resolve_viewer_timezone
+
+        tz = resolve_viewer_timezone(cookie_tz="America/Denver")
+        self.assertEqual(tz, ZoneInfo("America/Denver"))
+
 
 class TestDeferredAnalysis(unittest.TestCase):
     def test_build_deferred_task_queue_orders_work(self):
