@@ -7,7 +7,9 @@ venv/
 .cursor/
 .agents/
 scripts/
-supabase/
+supabase/*
+!supabase/migrations/
+!supabase/migrations/**
 # Turnkey email digest (deferred — requires domain + Resend)
 turnkey.py
 components/turnkey_recommendations.py
@@ -29,5 +31,6 @@ docs/QUANTUM_METHOD.md
 docs/DATA_PIPELINE.md
 ARCHITECTURE.md
 README.md
+!supabase/migrations/README.md
 mypy.ini
 data/

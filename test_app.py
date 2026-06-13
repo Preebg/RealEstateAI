@@ -2277,6 +2277,49 @@ class TestPropertyAge(unittest.TestCase):
         )
         self.assertIsNone(payload.get("year_built"))
 
+    def test_prepare_canonical_payload_persists_listing_media(self):
+        from knowledge_base import _prepare_canonical_payload
+
+        payload = _prepare_canonical_payload(
+            {
+                "address": "10 Park Ave, Rochester, NY 14607",
+                "price": 210000,
+                "primary_image_url": " https://cdn.example/hero.jpg ",
+                "image_urls": (
+                    "https://cdn.example/hero.jpg",
+                    "https://cdn.example/2.jpg",
+                ),
+                "listing_url": "https://www.redfin.com/NY/Rochester/10-Park-Ave/home/1",
+                "days_on_market": "45",
+                "view_count": None,
+                "listing_status": "For Sale",
+            },
+            "00000000-0000-0000-0000-000000000001",
+        )
+        self.assertEqual(payload["primary_image_url"], "https://cdn.example/hero.jpg")
+        self.assertEqual(
+            payload["image_urls"],
+            ["https://cdn.example/hero.jpg", "https://cdn.example/2.jpg"],
+        )
+        self.assertEqual(payload["listing_url"], "https://www.redfin.com/NY/Rochester/10-Park-Ave/home/1")
+        self.assertEqual(payload["days_on_market"], 45)
+        self.assertNotIn("view_count", payload)
+        self.assertEqual(payload["listing_status"], "For Sale")
+
+    def test_normalize_record_numerics_parses_image_urls_json_string(self):
+        from knowledge_base import _normalize_record_numerics
+
+        normalized = _normalize_record_numerics(
+            {
+                "image_urls": '["https://cdn.example/a.jpg","https://cdn.example/b.jpg"]',
+                "price": 200000,
+            }
+        )
+        self.assertEqual(
+            normalized["image_urls"],
+            ["https://cdn.example/a.jpg", "https://cdn.example/b.jpg"],
+        )
+
     def test_normalize_research_payload_rejects_placeholder_year_built(self):
         from engine import _normalize_research_payload
 

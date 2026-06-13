@@ -1,6 +1,7 @@
 # knowledge_base.py
 from __future__ import annotations
 
+import json
 import os
 import re
 from typing import Any
@@ -369,6 +370,9 @@ CANONICAL_PROPERTY_COLUMNS = (
     "primary_image_url",
     "image_urls",
     "listing_url",
+    "days_on_market",
+    "view_count",
+    "listing_status",
 )
 
 
@@ -912,6 +916,9 @@ def _normalize_record_numerics(record: dict[str, Any]) -> dict[str, Any]:
     from comps_analysis import ensure_comps_analysis_field
 
     ensure_comps_analysis_field(normalized)
+    image_urls = _normalize_image_urls(normalized.get("image_urls"))
+    if image_urls is not None:
+        normalized["image_urls"] = image_urls
     backfill_property_rent(normalized)
     return normalized
 
@@ -932,6 +939,85 @@ def is_rent_outlier(
     threshold_pct: float = RENT_OUTLIER_DEVIATION_PCT,
 ) -> bool:
     return compute_rent_deviation_pct(ai_rent, user_rent) > threshold_pct
+
+
+def _coerce_optional_int(value: Any) -> int | None:
+    """Parse optional integer listing metadata; None when absent or invalid."""
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_image_urls(value: Any) -> list[str] | None:
+    """Normalize image URL collections for Supabase jsonb storage."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return None
+        if stripped.startswith("["):
+            try:
+                parsed = json.loads(stripped)
+            except json.JSONDecodeError:
+                parsed = [stripped]
+        else:
+            parsed = [url.strip() for url in stripped.split(",") if url.strip()]
+    elif isinstance(value, (list, tuple, set)):
+        parsed = list(value)
+    else:
+        return None
+
+    urls: list[str] = []
+    seen: set[str] = set()
+    for item in parsed:
+        url = str(item or "").strip()
+        if url and url not in seen:
+            seen.add(url)
+            urls.append(url)
+    return urls or None
+
+
+def _normalize_listing_media_payload(payload: dict[str, Any]) -> None:
+    """Normalize scraper listing media/metadata before Supabase upsert."""
+    primary_image = str(payload.get("primary_image_url", "") or "").strip()
+    if primary_image:
+        payload["primary_image_url"] = primary_image
+    else:
+        payload.pop("primary_image_url", None)
+
+    image_urls = _normalize_image_urls(payload.get("image_urls"))
+    if image_urls:
+        payload["image_urls"] = image_urls
+    else:
+        payload.pop("image_urls", None)
+
+    listing_url = str(payload.get("listing_url", "") or "").strip()
+    if listing_url:
+        payload["listing_url"] = listing_url
+    else:
+        payload.pop("listing_url", None)
+
+    listing_status = str(payload.get("listing_status", "") or "").strip()
+    if listing_status:
+        payload["listing_status"] = listing_status
+    else:
+        payload.pop("listing_status", None)
+
+    days_on_market = _coerce_optional_int(payload.get("days_on_market"))
+    if days_on_market is not None:
+        payload["days_on_market"] = days_on_market
+    else:
+        payload.pop("days_on_market", None)
+
+    view_count = _coerce_optional_int(payload.get("view_count"))
+    if view_count is not None:
+        payload["view_count"] = view_count
+    else:
+        payload.pop("view_count", None)
 
 
 def _clean_numeric(payload: dict[str, Any], keys: list[str]) -> None:
@@ -1001,6 +1087,7 @@ def _prepare_canonical_payload(property_data: dict[str, Any], user_id: str) -> d
 
     _apply_zipcode_from_address(payload)
     _apply_state_code_from_address(payload)
+    _normalize_listing_media_payload(payload)
 
     comps = payload.get("comps_analysis")
     if isinstance(comps, dict) and not comps.get("comparable_properties"):

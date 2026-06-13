@@ -3969,6 +3969,7 @@ def _finalize_synthesis_payload(
         "listing_url",
         "days_on_market",
         "view_count",
+        "listing_status",
     ):
         if research.get(passthrough_key) not in (None, "", []):
             data[passthrough_key] = research[passthrough_key]
