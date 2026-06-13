@@ -366,6 +366,9 @@ CANONICAL_PROPERTY_COLUMNS = (
     "maps_place_id",
     "maps_uri",
     "environmental_risk",
+    "primary_image_url",
+    "image_urls",
+    "listing_url",
 )
 
 

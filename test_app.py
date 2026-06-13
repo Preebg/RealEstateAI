@@ -3294,5 +3294,249 @@ class TestOutreachAppUrls(unittest.TestCase):
         self.assertNotIn("realestateanalyzer", payload)
 
 
+class TestDiscoveryScraper(unittest.TestCase):
+    _GIS_FIXTURE = {
+        "homes": [
+            {
+                "propertyId": 12345678,
+                "url": "/NY/Rochester/10-Park-Ave-14607/home/12345678",
+                "streetLine": {"value": "10 Park Ave"},
+                "city": "Rochester",
+                "state": "NY",
+                "zip": "14607",
+                "price": {"value": 210000},
+                "photos": {"value": "https://ssl.cdn-redfin.com/photo/1.jpg"},
+            }
+        ]
+    }
+
+    _DETAIL_FIXTURE = {
+        "payload": {
+            "initialInfo": {
+                "addressSectionInfo": {
+                    "streetAddress": "10 Park Ave, Rochester, NY 14607",
+                    "url": "/NY/Rochester/10-Park-Ave-14607/home/12345678",
+                }
+            },
+            "aboveTheFold": {
+                "addressSectionInfo": {
+                    "price": {"value": 210000},
+                    "status": {"value": "Active"},
+                    "timeOnRedfin": {"value": 12},
+                    "listingViewCount": {"value": 87},
+                    "propertyType": {"value": "Single Family"},
+                    "sqFt": {"value": 1450},
+                    "yearBuilt": {"value": 1968},
+                    "hoaDues": {"value": 0},
+                    "latLong": {"value": {"latitude": 43.15, "longitude": -77.61}},
+                    "mediaBrowserInfo": {
+                        "photos": [
+                            {"photoUrl": "https://ssl.cdn-redfin.com/photo/1.jpg"},
+                            {"photoUrl": "https://ssl.cdn-redfin.com/photo/2.jpg"},
+                        ]
+                    },
+                }
+            },
+            "belowTheFold": {
+                "publicRemarks": "Turnkey rental rents for $1,850/mo with long-term tenant.",
+                "taxAnnualAmount": {"value": 4200},
+            },
+        }
+    }
+
+    def test_parse_redfin_gis_seed(self):
+        from discovery.parsers.redfin_gis import parse_redfin_gis_payload
+
+        seeds = parse_redfin_gis_payload(
+            self._GIS_FIXTURE,
+            market_city="Rochester",
+            max_price=250_000,
+        )
+        self.assertEqual(len(seeds), 1)
+        seed = seeds[0]
+        self.assertEqual(seed.city, "Rochester")
+        self.assertEqual(seed.external_id, "12345678")
+        self.assertIn("redfin.com", seed.listing_url)
+        self.assertEqual(seed.list_price, 210000.0)
+
+    def test_parse_redfin_detail_payload(self):
+        from discovery.models import ListingSeed
+        from discovery.parsers.redfin_detail import parse_redfin_detail_payload
+
+        seed = ListingSeed(
+            address="10 Park Ave, Rochester, NY 14607",
+            city="Rochester",
+            list_price=210000,
+            listing_url="https://www.redfin.com/NY/Rochester/10-Park-Ave-14607/home/12345678",
+            source="redfin",
+            external_id="12345678",
+        )
+        scraped = parse_redfin_detail_payload(self._DETAIL_FIXTURE, seed=seed)
+        self.assertEqual(scraped.listing_status, "For Sale")
+        self.assertEqual(scraped.days_on_market, 12)
+        self.assertEqual(scraped.view_count, 87)
+        self.assertEqual(len(scraped.image_urls), 2)
+        self.assertEqual(scraped.stated_gross_monthly_rent, 1850.0)
+        self.assertIn("Turnkey rental", scraped.listing_description)
+
+    def test_scraped_to_research_dict_shape(self):
+        from discovery.models import ScrapedListing
+        from discovery.normalize import scraped_to_research_dict
+
+        scraped = ScrapedListing(
+            address="10 Park Ave, Rochester, NY 14607",
+            city="Rochester",
+            list_price=210000,
+            listing_url="https://www.redfin.com/NY/Rochester/10-Park-Ave-14607/home/12345678",
+            source="redfin",
+            external_id="12345678",
+            listing_status="For Sale",
+            days_on_market=12,
+            view_count=87,
+            listing_description="Charming bungalow near parks.",
+            primary_image_url="https://ssl.cdn-redfin.com/photo/1.jpg",
+            image_urls=("https://ssl.cdn-redfin.com/photo/1.jpg",),
+            taxes_annual=4200.0,
+            hoa_monthly=0.0,
+            year_built=1968,
+            square_footage=1450,
+            property_type="Single Family",
+            latitude=43.15,
+            longitude=-77.61,
+            stated_gross_monthly_rent=1850.0,
+            listing_rent_notes="Monthly rent mentioned in listing: $1,850/mo",
+            property_condition="Good",
+            scraped_at="2026-06-13T12:00:00+00:00",
+        )
+        research = scraped_to_research_dict(scraped, market_city="Rochester")
+        self.assertEqual(research["price"], 210000.0)
+        self.assertEqual(research["taxes"], 4200.0)
+        self.assertEqual(research["discovery_model"], "scraper")
+        self.assertEqual(research["vacancy_rate"], 6.0)
+        self.assertEqual(research["management_fee"], 10.0)
+        self.assertEqual(research["primary_image_url"], scraped.primary_image_url)
+        self.assertEqual(research["listing_description"], scraped.listing_description)
+
+    def test_sqlite_repository_round_trip(self):
+        from discovery.models import ListingSeed, ScrapedListing
+        from discovery.repository import SqliteDiscoveryRepository
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = SqliteDiscoveryRepository(Path(tmp) / "capigen.db")
+            seed = ListingSeed(
+                address="10 Park Ave, Rochester, NY 14607",
+                city="Rochester",
+                list_price=210000,
+                listing_url="https://www.redfin.com/NY/Rochester/10-Park-Ave-14607/home/12345678",
+                source="redfin",
+                external_id="12345678",
+            )
+            row_id = repo.upsert_seed(seed)
+            scraped = ScrapedListing(
+                address=seed.address,
+                city=seed.city,
+                list_price=seed.list_price,
+                listing_url=seed.listing_url,
+                source=seed.source,
+                external_id=seed.external_id,
+                listing_status="For Sale",
+                days_on_market=5,
+                view_count=None,
+                listing_description="Updated kitchen.",
+                primary_image_url="https://ssl.cdn-redfin.com/photo/1.jpg",
+                image_urls=("https://ssl.cdn-redfin.com/photo/1.jpg",),
+                taxes_annual=4000.0,
+                hoa_monthly=0.0,
+                year_built=1970,
+                square_footage=1400,
+                property_type="Single Family",
+                latitude=43.15,
+                longitude=-77.61,
+                stated_gross_monthly_rent=0.0,
+                listing_rent_notes="",
+                property_condition="Good",
+                scraped_at="2026-06-13T12:00:00+00:00",
+            )
+            repo.mark_enriched(row_id, scraped)
+            loaded = repo.get_enriched_by_external_id("redfin", "12345678")
+            self.assertIsNotNone(loaded)
+            assert loaded is not None
+            self.assertEqual(loaded.listing_description, "Updated kitchen.")
+            self.assertIsNone(loaded.view_count)
+
+    def test_orchestrator_run_with_mocked_http(self):
+        import asyncio
+
+        from discovery.models import ListingSeed
+        from discovery.orchestrator import DiscoveryOrchestrator
+        from discovery.repository import SqliteDiscoveryRepository
+
+        seed = ListingSeed(
+            address="10 Park Ave, Rochester, NY 14607",
+            city="Rochester",
+            list_price=210000,
+            listing_url="https://www.redfin.com/NY/Rochester/10-Park-Ave-14607/home/12345678",
+            source="redfin",
+            external_id="12345678",
+            thumbnail_url="https://ssl.cdn-redfin.com/photo/1.jpg",
+        )
+
+        class FakeSource:
+            source_name = "redfin"
+
+            async def search_market(self, market_city, *, max_price, limit):
+                if market_city == "Rochester":
+                    return [seed]
+                return []
+
+            async def fetch_detail(self, listing_seed):
+                from discovery.parsers.redfin_detail import parse_redfin_detail_payload
+
+                return parse_redfin_detail_payload(
+                    TestDiscoveryScraper._DETAIL_FIXTURE,
+                    seed=listing_seed,
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = SqliteDiscoveryRepository(Path(tmp) / "capigen.db")
+
+            async def _run() -> list[dict]:
+                orchestrator = DiscoveryOrchestrator(
+                    repository=repo,
+                    http_client=object(),
+                    sources=[FakeSource()],
+                )
+                try:
+                    return await orchestrator.run(
+                        exclude_keys=set(),
+                        max_price=250_000,
+                        per_market_limit=5,
+                        enrich=True,
+                    )
+                finally:
+                    await orchestrator.close()
+
+            listings = asyncio.run(_run())
+            rochester = [item for item in listings if item.get("city") == "Rochester"]
+            self.assertEqual(len(rochester), 1)
+            self.assertEqual(rochester[0]["discovery_model"], "scraper")
+            self.assertTrue(rochester[0].get("primary_image_url"))
+            self.assertTrue(rochester[0].get("listing_description"))
+
+    def test_synthesis_prompt_separates_listing_description(self):
+        from engine import _synthesis_prompt
+
+        research = {
+            "price": 210000,
+            "listing_description": "Gorgeous turnkey rental with granite counters.",
+            "stated_gross_monthly_rent": 1850,
+        }
+        with patch("engine.get_kb_context", return_value=""):
+            prompt = _synthesis_prompt(research, "Rochester")
+        self.assertIn("LISTING DESCRIPTION", prompt)
+        self.assertIn("Gorgeous turnkey rental", prompt)
+        self.assertNotIn('"listing_description"', prompt)
+
+
 if __name__ == "__main__":
     unittest.main()

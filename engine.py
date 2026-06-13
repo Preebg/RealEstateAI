@@ -3796,13 +3796,22 @@ def _synthesis_prompt(
     user_id: str | None = None,
 ) -> str:
     kb_context = get_kb_context(user_id)
+    research_payload = dict(research)
+    listing_description = str(research_payload.pop("listing_description", "") or "").strip()
+    description_block = ""
+    if listing_description:
+        description_block = f"""
+LISTING DESCRIPTION (agent/public remarks — paraphrase for summary; NEVER copy verbatim):
+{listing_description}
+"""
     return f"""You are an expert real estate underwriter for {market_city} hot market investments.
 
 CONTEXT FROM DATABASE:
 {kb_context}
 
 RESEARCH DATA (verified extraction):
-{json.dumps(research, indent=2)}
+{json.dumps(research_payload, indent=2)}
+{description_block}
 
 PROPERTY VALUE / COMPS (when present — from property value agent):
 {json.dumps(research.get("comps_analysis") or {}, indent=2)}
@@ -3934,6 +3943,15 @@ def _finalize_synthesis_payload(
     data["property_condition"] = data.get(
         "property_condition", research.get("property_condition")
     )
+    for passthrough_key in (
+        "primary_image_url",
+        "image_urls",
+        "listing_url",
+        "days_on_market",
+        "view_count",
+    ):
+        if research.get(passthrough_key) not in (None, "", []):
+            data[passthrough_key] = research[passthrough_key]
     _apply_research_year_built(data, research)
     _sanitize_synthesis_numerics(data)
     backfill_property_rent(data, research=research)

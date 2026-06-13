@@ -321,6 +321,10 @@ def render_analysis_results(
         )
     render_pending_share_clipboard_copy()
 
+    hero_image = str(property_info.get("primary_image_url") or "").strip()
+    if hero_image:
+        st.image(hero_image, caption="Listing preview", use_container_width=True)
+
     if total_confidence_pct is not None:
         st.markdown(
             '<p class="confidence-explainer">'

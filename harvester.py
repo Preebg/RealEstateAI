@@ -13,6 +13,8 @@ from google.genai import errors
 
 import engine
 from app_logging import configure_logging, report_error
+from discovery.normalize import listing_dict_to_scraped, scraped_to_research_dict
+from discovery.orchestrator import run_scraper_discovery_async
 from finance import analyze_investment
 from knowledge_base import (
     delete_unreliable_property,
@@ -37,9 +39,16 @@ INVESTMENT_PARAMS = {
 }
 
 # Active models for this run (updated when RPD fallback triggers).
-_active_discovery_model = engine.DISCOVERY_MODEL
+_active_discovery_model = "scraper"
 _active_research_model = engine.RESEARCH_MODEL
 _active_synthesis_model = engine.SYNTHESIS_MODEL
+
+HARVESTER_USE_SCRAPER = os.getenv("HARVESTER_USE_SCRAPER", "1").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+    "off",
+}
 
 
 @dataclass
@@ -298,15 +307,23 @@ async def _research_listing_with_fallback(
     rate_limiter: engine.ModelRateLimiter,
     session: engine.GenaiSession,
 ) -> dict[str, Any]:
-    """Stage 2 research — gemma-4-31b-it with search grounding."""
+    """Stage 2 research — local scraper payload or gemma research fallback."""
     _ = model_state  # research model is fixed; state kept for pipeline symmetry
-    research = await engine.research_property_async(
-        address,
-        discovery=listing,
-        model=engine.RESEARCH_MODEL,
-        rate_limiter=rate_limiter,
-        session=session,
-    )
+    if listing.get("discovery_model") == "scraper":
+        scraped = listing_dict_to_scraped(listing)
+        if scraped is None:
+            raise RuntimeError(f"Missing scraper payload for {address}")
+        research = scraped_to_research_dict(scraped, market_city=market_city)
+        research = engine._normalize_research_payload(address, research)
+        print(f"  [research] SCRAPER {address} — skipped Gemini research")
+    else:
+        research = await engine.research_property_async(
+            address,
+            discovery=listing,
+            model=engine.RESEARCH_MODEL,
+            rate_limiter=rate_limiter,
+            session=session,
+        )
     return await _run_property_value_stage(
         address,
         research,
@@ -645,8 +662,8 @@ async def run_harvester_pipeline_async(admin_user_id: str) -> dict[str, Any]:
     """
     Execute the full accuracy workflow harvester once per run.
 
-    Stage 1 (Discovery): gemini-2.5-flash -> flash-lite (Maps) -> gemma-4-26b-a4b-it
-    Stage 2 (Research): gemma-4-31b-it + search grounding
+    Stage 1 (Discovery): local Redfin scraper (httpx + selectolax) or Gemini fallback
+    Stage 2 (Research): scraper-enriched payload or gemma-4-31b-it + search grounding
     Stage 2.5 (Property Value): gemma-4-26b-a4b-it classifier; gemma-4-31b-it comps when
         strategy matches turnkey rental, cash flow, suburban core rental, buy and hold, etc.
     Stage 3 (Geocode): gemini-2.5-flash/lite Maps + search scout
@@ -658,7 +675,7 @@ async def run_harvester_pipeline_async(admin_user_id: str) -> dict[str, Any]:
     Discovery runs one regional agent at a time, then optional top-up rounds.
     """
     global _active_discovery_model, _active_research_model, _active_synthesis_model
-    _active_discovery_model = engine.DISCOVERY_MODEL
+    _active_discovery_model = "scraper" if HARVESTER_USE_SCRAPER else engine.DISCOVERY_MODEL
     _active_research_model = engine.RESEARCH_MODEL
     _active_synthesis_model = engine.SYNTHESIS_MODEL
 
@@ -718,24 +735,32 @@ async def run_harvester_pipeline_async(admin_user_id: str) -> dict[str, Any]:
     print("=" * 60)
 
     print(
-        f"[discovery] Stage 1 START — hot-market search "
+        f"[discovery] Stage 1 START — "
+        f"{'local Redfin scraper' if HARVESTER_USE_SCRAPER else 'hot-market LLM search'} "
         f"(≤{engine.MAX_DISCOVERY_LISTINGS} listings under "
         f"${engine.MAX_DISCOVERY_PRICE:,})...",
         flush=True,
     )
 
-    def _run_discovery() -> list[dict[str, Any]]:
-        # discover_hot_market_listings walks DISCOVERY_MODEL_CHAIN on RPD/empty:
-        # gemini-2.5-flash -> gemini-2.5-flash-lite -> gemma-4-26b-a4b-it
-        return engine.discover_hot_market_listings(
+    if HARVESTER_USE_SCRAPER:
+        listings = await run_scraper_discovery_async(
+            admin_user_id=admin_user_id,
             exclude_addresses=scanned_addresses,
         )
+    else:
 
-    listings = await asyncio.to_thread(_run_discovery)
-    if listings:
-        used_model = str(listings[0].get("discovery_model", "")).strip()
-        if used_model:
-            _active_discovery_model = used_model
+        def _run_discovery() -> list[dict[str, Any]]:
+            # discover_hot_market_listings walks DISCOVERY_MODEL_CHAIN on RPD/empty:
+            # gemini-2.5-flash -> gemini-2.5-flash-lite -> gemma-4-26b-a4b-it
+            return engine.discover_hot_market_listings(
+                exclude_addresses=scanned_addresses,
+            )
+
+        listings = await asyncio.to_thread(_run_discovery)
+        if listings:
+            used_model = str(listings[0].get("discovery_model", "")).strip()
+            if used_model:
+                _active_discovery_model = used_model
     if scanned_keys:
         listings = [
             listing
@@ -865,7 +890,7 @@ def _render_streamlit_app() -> None:
     st.caption(
         "Upstate NY (priority: Rochester, Syracuse, Buffalo, Albany) → Philadelphia, "
         "Pittsburgh, Orlando, Tampa, Miami → Charlotte, Raleigh, Charleston • "
-        "Discovery → research → synthesis (sequential discovery; "
+        "Discovery → research → synthesis (local scraper by default; "
         f"≤{engine.MAX_CONCURRENT_RESEARCH_AGENTS} concurrent research workers)"
     )
 
@@ -888,8 +913,9 @@ def _render_streamlit_app() -> None:
     col3.metric("Synthesis Model", _active_synthesis_model)
 
     st.info(
-        f"Discovery uses Search Grounding (≤{engine.MAX_DISCOVERY_LISTINGS} listings under "
-        f"${engine.MAX_DISCOVERY_PRICE:,}, suburbs included). After discovery finishes, "
+        f"Discovery uses the local Redfin scraper when enabled (≤{engine.MAX_DISCOVERY_LISTINGS} "
+        f"listings under ${engine.MAX_DISCOVERY_PRICE:,}, suburbs included). Set "
+        f"HARVESTER_USE_SCRAPER=0 to fall back to Gemini discovery. After discovery finishes, "
         f"research runs with up to {engine.MAX_CONCURRENT_RESEARCH_AGENTS} concurrent "
         f"workers (one property each); synthesis starts as each research job completes "
         f"(rate-limited to {engine.HARVESTER_RPM_PER_MODEL} calls/min per model). "

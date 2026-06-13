@@ -489,6 +489,7 @@ def build_portfolio_dataframe(properties: list[dict[str, Any]]) -> pd.DataFrame:
                 "price": price,
                 "rent": rent,
                 "monthly_cash_flow": monthly_cash_flow,
+                "primary_image_url": str(prop.get("primary_image_url") or "").strip(),
                 "one_year_roi": one_year_roi,
                 "quantum_success": quantum_success,
                 "market_city": str(market_city),
@@ -1012,8 +1013,17 @@ def _build_folium_map(
                 f"Environmental risk: {env_level}"
                 f"{f' ({env_score:.1f}/10)' if env_score is not None else ''}<br/>"
             )
+        hero_image = escape_html(str(getattr(row, "primary_image_url", "") or "").strip())
+        image_block = ""
+        if hero_image:
+            image_block = (
+                f"<img src='{hero_image}' alt='Listing preview' "
+                f"style='width:100%;max-height:140px;object-fit:cover;"
+                f"border-radius:8px;margin-bottom:8px;'/>"
+            )
         popup = (
             f"<div style='min-width:220px'>"
+            f"{image_block}"
             f"<b>{safe_address}</b><br/>"
             f"{safe_category}<br/>"
             f"Price: ${row.price:,.0f}<br/>"
