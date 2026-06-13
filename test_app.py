@@ -2549,6 +2549,60 @@ class TestPortfolioMapFilters(unittest.TestCase):
         added_at = df.iloc[0]["added_at"]
         self.assertEqual(added_at, datetime(2025, 6, 11, 22, 53, tzinfo=timezone.utc))
 
+    def test_build_portfolio_dataframe_includes_listing_metadata(self):
+        from portfolio_map_page import build_portfolio_dataframe
+
+        props = [
+            {
+                "address": "10 State St, Rochester, NY 14607",
+                "price": 180000,
+                "primary_image_url": "https://ssl.cdn-redfin.com/photo/1.jpg",
+                "listing_status": "For Sale",
+                "days_on_market": 12,
+                "view_count": 87,
+            }
+        ]
+        df = build_portfolio_dataframe(props)
+        row = df.iloc[0]
+        self.assertEqual(row["primary_image_url"], "https://ssl.cdn-redfin.com/photo/1.jpg")
+        self.assertEqual(row["listing_status"], "For Sale")
+        self.assertEqual(row["days_on_market"], 12)
+        self.assertEqual(row["view_count"], 87)
+
+
+class TestPropertyListingPreview(unittest.TestCase):
+    def test_build_listing_metadata_chips_all_fields(self):
+        from components.property_listing_preview import build_listing_metadata_chips
+
+        chips = build_listing_metadata_chips(
+            listing_status="For Sale",
+            days_on_market=12,
+            view_count=87,
+        )
+        self.assertEqual(chips, ["For Sale", "12 days on market", "87 views"])
+
+    def test_build_listing_metadata_chips_omits_null_view_count(self):
+        from components.property_listing_preview import build_listing_metadata_chips
+
+        chips = build_listing_metadata_chips(
+            listing_status="Pending",
+            days_on_market=1,
+            view_count=None,
+        )
+        self.assertEqual(chips, ["Pending", "1 day on market"])
+
+    def test_render_listing_metadata_chips_html_escapes_values(self):
+        from components.property_listing_preview import render_listing_metadata_chips_html
+
+        html = render_listing_metadata_chips_html(
+            listing_status='For Sale <script>alert("x")</script>',
+            days_on_market=3,
+            view_count=5,
+        )
+        self.assertIn("listing-chip-row", html)
+        self.assertNotIn("<script>", html)
+        self.assertIn("3 days on market", html)
+
 
 class TestViewerTimezone(unittest.TestCase):
     def test_format_added_at_same_day(self):

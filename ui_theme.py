@@ -417,6 +417,25 @@ def inject_app_css() -> None:
             opacity: 0.85;
         }
 
+        /* ── Listing metadata chips ── */
+        .listing-chip-row {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.35rem;
+            margin: 0.35rem 0 0.5rem 0;
+        }
+        .listing-chip {
+            display: inline-block;
+            font-size: 0.72rem;
+            font-weight: 600;
+            letter-spacing: 0.01em;
+            padding: 0.15rem 0.55rem;
+            border-radius: 999px;
+            background: rgba(var(--primary-rgb, 79, 70, 229), 0.12);
+            color: var(--text-color, __TEXT__);
+            border: 1px solid rgba(var(--primary-rgb, 79, 70, 229), 0.25);
+        }
+
         /* ── Confidence badges ── */
         .confidence-badge {
             display: inline-block;

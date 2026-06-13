@@ -369,6 +369,9 @@ CANONICAL_PROPERTY_COLUMNS = (
     "primary_image_url",
     "image_urls",
     "listing_url",
+    "listing_status",
+    "days_on_market",
+    "view_count",
 )
 
 
