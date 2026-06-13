@@ -16,6 +16,7 @@ from components.property_comps import (
     ensure_comps_analysis,
     render_property_comps_section,
 )
+from components.property_listing_preview import render_property_listing_preview
 from components.property_share import render_pending_share_clipboard_copy
 from services.deferred_analysis import is_task_pending
 from components.property_share import render_share_popover
@@ -321,9 +322,13 @@ def render_analysis_results(
         )
     render_pending_share_clipboard_copy()
 
-    hero_image = str(property_info.get("primary_image_url") or "").strip()
-    if hero_image:
-        st.image(hero_image, caption="Listing preview", use_container_width=True)
+    render_property_listing_preview(
+        address=address,
+        primary_image_url=str(property_info.get("primary_image_url") or "").strip() or None,
+        listing_status=str(property_info.get("listing_status") or "").strip() or None,
+        days_on_market=property_info.get("days_on_market"),
+        view_count=property_info.get("view_count"),
+    )
 
     if total_confidence_pct is not None:
         st.markdown(

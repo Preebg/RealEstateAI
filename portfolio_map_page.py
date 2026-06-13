@@ -14,6 +14,10 @@ import streamlit.components.v1 as components
 from streamlit_folium import st_folium
 
 from authenticate import render_auth_sidebar
+from components.property_listing_preview import (
+    render_listing_metadata_chips_html,
+    render_property_listing_preview,
+)
 from finance import analyze_investment, calculate_10yr_appreciation, calculate_one_year_roi
 from knowledge_base import (
     _fetch_canonical_properties,
@@ -412,6 +416,15 @@ def _resolve_monthly_cash_flow(prop: dict[str, Any], price: float, rent: float) 
     return analysis["monthly_net_cash_flow"]
 
 
+def _coerce_optional_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _resolve_one_year_roi(prop: dict[str, Any], price: float, rent: float) -> float:
     """
     One-year ROI: (projected 1yr value gain + annual cash flow) / (down payment + closing).
@@ -490,6 +503,9 @@ def build_portfolio_dataframe(properties: list[dict[str, Any]]) -> pd.DataFrame:
                 "rent": rent,
                 "monthly_cash_flow": monthly_cash_flow,
                 "primary_image_url": str(prop.get("primary_image_url") or "").strip(),
+                "listing_status": str(prop.get("listing_status") or "").strip(),
+                "days_on_market": _coerce_optional_int(prop.get("days_on_market")),
+                "view_count": _coerce_optional_int(prop.get("view_count")),
                 "one_year_roi": one_year_roi,
                 "quantum_success": quantum_success,
                 "market_city": str(market_city),
@@ -1021,9 +1037,15 @@ def _build_folium_map(
                 f"style='width:100%;max-height:140px;object-fit:cover;"
                 f"border-radius:8px;margin-bottom:8px;'/>"
             )
+        chips_block = render_listing_metadata_chips_html(
+            listing_status=str(getattr(row, "listing_status", "") or "").strip() or None,
+            days_on_market=getattr(row, "days_on_market", None),
+            view_count=getattr(row, "view_count", None),
+        )
         popup = (
             f"<div style='min-width:220px'>"
             f"{image_block}"
+            f"{chips_block}"
             f"<b>{safe_address}</b><br/>"
             f"{safe_category}<br/>"
             f"Price: ${row.price:,.0f}<br/>"
@@ -1628,6 +1650,13 @@ def render_portfolio_map_page() -> None:
             row = selected_row.iloc[0]
             with st.container(border=True):
                 st.markdown("##### Selected property")
+                render_property_listing_preview(
+                    address=str(row["address"]),
+                    primary_image_url=str(row.get("primary_image_url") or "").strip() or None,
+                    listing_status=str(row.get("listing_status") or "").strip() or None,
+                    days_on_market=row.get("days_on_market"),
+                    view_count=row.get("view_count"),
+                )
                 sel_col1, sel_col2, sel_col3, sel_col4, sel_col5 = st.columns(5)
                 sel_col1.metric("List price", f"${row['price']:,.0f}")
                 sel_col2.metric("Rent", f"${row['rent']:,.0f}/mo")
