@@ -8,6 +8,26 @@ from discovery.market_defaults import get_market_defaults
 from discovery.models import ListingSeed, ScrapedListing
 
 
+def enriched_to_discovery_listing(
+    row_id: int,
+    seed: ListingSeed,
+    scraped: ScrapedListing,
+) -> dict[str, Any]:
+    """Map a dequeued enriched queue row to the harvester listing shape."""
+    listing = seed_to_discovery_listing(seed)
+    listing["_queue_id"] = row_id
+    listing["listing_status"] = scraped.listing_status
+    listing["primary_image_url"] = scraped.primary_image_url
+    listing["image_urls"] = list(scraped.image_urls)
+    listing["listing_description"] = scraped.listing_description
+    listing["days_on_market"] = scraped.days_on_market
+    listing["view_count"] = scraped.view_count
+    listing["latitude"] = scraped.latitude
+    listing["longitude"] = scraped.longitude
+    listing["_scraped"] = scraped
+    return listing
+
+
 def seed_to_discovery_listing(seed: ListingSeed) -> dict[str, Any]:
     """Map a search seed to engine._normalize_discovery_item shape."""
     listing: dict[str, Any] = {

@@ -14,7 +14,8 @@ from google.genai import errors
 import engine
 from app_logging import configure_logging, report_error
 from discovery.normalize import listing_dict_to_scraped, scraped_to_research_dict
-from discovery.orchestrator import run_scraper_discovery_async
+from discovery.orchestrator import dequeue_enriched_listings_async
+from discovery.repository import DEFAULT_DB_PATH, SqliteDiscoveryRepository
 from finance import analyze_investment
 from knowledge_base import (
     delete_unreliable_property,
@@ -43,12 +44,17 @@ _active_discovery_model = "scraper"
 _active_research_model = engine.RESEARCH_MODEL
 _active_synthesis_model = engine.SYNTHESIS_MODEL
 
-HARVESTER_USE_SCRAPER = os.getenv("HARVESTER_USE_SCRAPER", "1").strip().lower() not in {
-    "0",
-    "false",
-    "no",
-    "off",
-}
+def resolve_discovery_backend() -> str:
+    """Return ``gemini`` (default) or ``scraper`` from DISCOVERY_BACKEND."""
+    backend = os.getenv("DISCOVERY_BACKEND", "").strip().lower()
+    if backend in ("gemini", "scraper"):
+        return backend
+    legacy = os.getenv("HARVESTER_USE_SCRAPER", "").strip().lower()
+    if legacy in ("1", "true", "yes", "on"):
+        return "scraper"
+    if legacy in ("0", "false", "no", "off"):
+        return "gemini"
+    return "gemini"
 
 
 @dataclass
@@ -56,6 +62,7 @@ class _SynthesisJob:
     address: str
     market_city: str
     research: dict[str, Any]
+    queue_id: int | None = None
 
 
 @dataclass
@@ -415,7 +422,13 @@ async def _research_listing(
         return None
 
     print(f"  [research] DONE {address}")
-    return _SynthesisJob(address=address, market_city=market_city, research=research)
+    queue_id = int(listing["_queue_id"]) if listing.get("_queue_id") else None
+    return _SynthesisJob(
+        address=address,
+        market_city=market_city,
+        research=research,
+        queue_id=queue_id,
+    )
 
 
 async def _synthesize_harvest_property_with_fallback(
@@ -441,6 +454,15 @@ async def _synthesize_harvest_property_with_fallback(
         session=session,
         geospatial=geospatial,
     )
+
+
+def _finalize_queue_save(queue_id: int, final_data: dict[str, Any]) -> None:
+    """Mark SQLite queue row completed and upsert property_mirror after Supabase save."""
+    repo = SqliteDiscoveryRepository(DEFAULT_DB_PATH)
+    repo.mark_completed(queue_id)
+    address_key = normalize_address_key(str(final_data.get("address", "")))
+    if address_key:
+        repo.mirror_property(address_key, final_data)
 
 
 async def _synthesize_listing(
@@ -569,6 +591,8 @@ async def _synthesize_listing(
         f"  [synthesis] SAVED {address} — "
         f"Quantum: {quantum:.1f}% | Cash Flow: ${cash_flow:,.2f}"
     )
+    if job.queue_id is not None:
+        await asyncio.to_thread(_finalize_queue_save, job.queue_id, final_data)
 
 
 async def _run_synthesis_safe(
@@ -675,7 +699,10 @@ async def run_harvester_pipeline_async(admin_user_id: str) -> dict[str, Any]:
     Discovery runs one regional agent at a time, then optional top-up rounds.
     """
     global _active_discovery_model, _active_research_model, _active_synthesis_model
-    _active_discovery_model = "scraper" if HARVESTER_USE_SCRAPER else engine.DISCOVERY_MODEL
+    discovery_backend = resolve_discovery_backend()
+    _active_discovery_model = (
+        "scraper" if discovery_backend == "scraper" else engine.DISCOVERY_MODEL
+    )
     _active_research_model = engine.RESEARCH_MODEL
     _active_synthesis_model = engine.SYNTHESIS_MODEL
 
@@ -736,14 +763,14 @@ async def run_harvester_pipeline_async(admin_user_id: str) -> dict[str, Any]:
 
     print(
         f"[discovery] Stage 1 START — "
-        f"{'local Redfin scraper' if HARVESTER_USE_SCRAPER else 'hot-market LLM search'} "
+        f"{'SQLite enriched queue' if discovery_backend == 'scraper' else 'hot-market LLM search'} "
         f"(≤{engine.MAX_DISCOVERY_LISTINGS} listings under "
         f"${engine.MAX_DISCOVERY_PRICE:,})...",
         flush=True,
     )
 
-    if HARVESTER_USE_SCRAPER:
-        listings = await run_scraper_discovery_async(
+    if discovery_backend == "scraper":
+        listings = await dequeue_enriched_listings_async(
             admin_user_id=admin_user_id,
             exclude_addresses=scanned_addresses,
         )
@@ -775,12 +802,16 @@ async def run_harvester_pipeline_async(admin_user_id: str) -> dict[str, Any]:
     )
 
     if not listings:
-        print("No listings discovered. Exiting.")
-        print(
-            "Tip: 503/empty grounded responses are usually transient. "
-            "Pull latest code and rerun; discovery now retries per market "
-            "and falls back to the Gemma discovery model automatically."
-        )
+        if discovery_backend == "scraper":
+            print("No enriched listings in SQLite queue. Exiting.")
+            print("Run python discovery_scraper.py --enrich-only first.")
+        else:
+            print("No listings discovered. Exiting.")
+            print(
+                "Tip: 503/empty grounded responses are usually transient. "
+                "Pull latest code and rerun; discovery now retries per market "
+                "and falls back to the Gemma discovery model automatically."
+            )
         return report
 
     print(
@@ -890,7 +921,8 @@ def _render_streamlit_app() -> None:
     st.caption(
         "Upstate NY (priority: Rochester, Syracuse, Buffalo, Albany) → Philadelphia, "
         "Pittsburgh, Orlando, Tampa, Miami → Charlotte, Raleigh, Charleston • "
-        "Discovery → research → synthesis (local scraper by default; "
+        "Discovery → research → synthesis "
+        f"(DISCOVERY_BACKEND={resolve_discovery_backend()}; "
         f"≤{engine.MAX_CONCURRENT_RESEARCH_AGENTS} concurrent research workers)"
     )
 
@@ -913,12 +945,13 @@ def _render_streamlit_app() -> None:
     col3.metric("Synthesis Model", _active_synthesis_model)
 
     st.info(
-        f"Discovery uses the local Redfin scraper when enabled (≤{engine.MAX_DISCOVERY_LISTINGS} "
-        f"listings under ${engine.MAX_DISCOVERY_PRICE:,}, suburbs included). Set "
-        f"HARVESTER_USE_SCRAPER=0 to fall back to Gemini discovery. After discovery finishes, "
-        f"research runs with up to {engine.MAX_CONCURRENT_RESEARCH_AGENTS} concurrent "
-        f"workers (one property each); synthesis starts as each research job completes "
-        f"(rate-limited to {engine.HARVESTER_RPM_PER_MODEL} calls/min per model). "
+        f"Set DISCOVERY_BACKEND=scraper to dequeue enriched rows from SQLite "
+        f"(run `python discovery_scraper.py --enrich-only` first). Default gemini uses "
+        f"LLM discovery (≤{engine.MAX_DISCOVERY_LISTINGS} listings under "
+        f"${engine.MAX_DISCOVERY_PRICE:,}). Research runs with up to "
+        f"{engine.MAX_CONCURRENT_RESEARCH_AGENTS} concurrent workers; synthesis starts "
+        f"as each research job completes (rate-limited to "
+        f"{engine.HARVESTER_RPM_PER_MODEL} calls/min per model). "
         f"Synthesis skips Poor condition or price > ${engine.MAX_SYNTHESIS_PRICE:,}."
     )
 

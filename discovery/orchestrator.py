@@ -7,7 +7,7 @@ from typing import Any
 
 from app_logging import configure_logging
 from discovery.models import ListingSeed, ScrapedListing
-from discovery.normalize import seed_to_discovery_listing
+from discovery.normalize import enriched_to_discovery_listing, seed_to_discovery_listing
 from discovery.repository import DEFAULT_DB_PATH, SqliteDiscoveryRepository
 from discovery.sources.redfin import RedfinListingSource
 from discovery.transport.http_client import ScraperHttpClient
@@ -170,16 +170,7 @@ class DiscoveryOrchestrator:
 
         if row_id:
             self._repo.mark_enriched(row_id, scraped)
-        listing.update(seed_to_discovery_listing(seed))
-        listing["listing_status"] = scraped.listing_status
-        listing["primary_image_url"] = scraped.primary_image_url
-        listing["image_urls"] = list(scraped.image_urls)
-        listing["listing_description"] = scraped.listing_description
-        listing["days_on_market"] = scraped.days_on_market
-        listing["view_count"] = scraped.view_count
-        listing["latitude"] = scraped.latitude
-        listing["longitude"] = scraped.longitude
-        listing["_scraped"] = scraped
+        listing.update(enriched_to_discovery_listing(row_id, seed, scraped))
         self._repo.mirror_property(
             normalize_address_key(scraped.address),
             scraped.to_dict(),
@@ -209,6 +200,66 @@ class DiscoveryOrchestrator:
         return None
 
 
+async def dequeue_enriched_listings_async(
+    *,
+    admin_user_id: str | None = None,
+    exclude_addresses: list[str] | None = None,
+    db_path: str | None = None,
+) -> list[dict[str, Any]]:
+    """Phase 2 Stage 1 — load enriched SQLite rows (no live scrape or Gemini)."""
+    from engine import MAX_DISCOVERY_LISTINGS
+
+    exclude_keys: set[str] = set()
+    if admin_user_id:
+        exclude_keys.update(get_harvest_complete_addresses(admin_user_id))
+    for address in exclude_addresses or []:
+        if str(address).strip():
+            exclude_keys.add(normalize_address_key(str(address)))
+
+    repo = SqliteDiscoveryRepository(db_path or DEFAULT_DB_PATH)
+    rows = repo.list_enriched_seeds(limit=MAX_DISCOVERY_LISTINGS * 3)
+    listings: list[dict[str, Any]] = []
+    for row_id, seed, scraped in rows:
+        key = normalize_address_key(seed.address)
+        if key in exclude_keys:
+            continue
+        listings.append(enriched_to_discovery_listing(row_id, seed, scraped))
+        if len(listings) >= MAX_DISCOVERY_LISTINGS:
+            break
+    return listings
+
+
+async def run_enrich_only_async(
+    *,
+    db_path: str | None = None,
+    limit: int = 500,
+) -> int:
+    """Fetch portal details for pending queue rows and mark them enriched."""
+    repo = SqliteDiscoveryRepository(db_path or DEFAULT_DB_PATH)
+    orchestrator = DiscoveryOrchestrator(repository=repo)
+    try:
+        pending = repo.get_pending_rows(limit=limit)
+        if not pending:
+            return 0
+        listings: list[dict[str, Any]] = []
+        for row in pending:
+            seed = ListingSeed(
+                address=str(row["address"]),
+                city=str(row["city"]),
+                list_price=float(row["list_price"]),
+                listing_url=str(row["listing_url"]),
+                source=str(row["source"]),
+                external_id=str(row["external_id"]),
+            )
+            listing = seed_to_discovery_listing(seed)
+            listing["_queue_id"] = int(row["id"])
+            listings.append(listing)
+        await orchestrator._enrich_listings(listings)
+        return sum(1 for listing in listings if listing.get("_scraped") is not None)
+    finally:
+        await orchestrator.close()
+
+
 async def run_scraper_discovery_async(
     *,
     admin_user_id: str | None = None,
@@ -216,8 +267,9 @@ async def run_scraper_discovery_async(
     max_price: float | None = None,
     db_path: str | None = None,
     per_market_limit: int = 25,
+    enrich: bool = True,
 ) -> list[dict[str, Any]]:
-    """Entry point used by harvester Stage 1 discovery."""
+    """Search HOT_MARKETS and optionally enrich; used by discovery_scraper.py."""
     from engine import MAX_DISCOVERY_PRICE
 
     exclude_keys: set[str] = set()
@@ -234,7 +286,7 @@ async def run_scraper_discovery_async(
             exclude_keys=exclude_keys,
             max_price=max_price or MAX_DISCOVERY_PRICE,
             per_market_limit=per_market_limit,
-            enrich=True,
+            enrich=enrich,
         )
     finally:
         await orchestrator.close()

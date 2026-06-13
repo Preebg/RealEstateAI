@@ -117,6 +117,10 @@ class SqliteDiscoveryRepository:
             )
             conn.commit()
 
+    def mark_completed(self, row_id: int) -> None:
+        """Mark a queue row harvested after Supabase save."""
+        self.mark_status(row_id, "completed")
+
     def get_pending_rows(self, *, limit: int) -> list[dict[str, Any]]:
         with self._connect() as conn:
             rows = conn.execute(
@@ -165,18 +169,22 @@ class SqliteDiscoveryRepository:
             )
             conn.commit()
 
-    def list_enriched_seeds(self, *, limit: int) -> list[tuple[ListingSeed, ScrapedListing]]:
+    def list_enriched_seeds(
+        self,
+        *,
+        limit: int,
+    ) -> list[tuple[int, ListingSeed, ScrapedListing]]:
         with self._connect() as conn:
             rows = conn.execute(
                 """
                 SELECT * FROM discovery_queue
                 WHERE status = 'enriched' AND raw_json IS NOT NULL
-                ORDER BY updated_at DESC
+                ORDER BY discovered_at ASC
                 LIMIT ?
                 """,
                 (max(limit, 1),),
             ).fetchall()
-        results: list[tuple[ListingSeed, ScrapedListing]] = []
+        results: list[tuple[int, ListingSeed, ScrapedListing]] = []
         for row in rows:
             scraped = ScrapedListing.from_dict(json.loads(str(row["raw_json"])))
             seed = ListingSeed(
@@ -188,7 +196,7 @@ class SqliteDiscoveryRepository:
                 external_id=str(row["external_id"]),
                 thumbnail_url=scraped.primary_image_url,
             )
-            results.append((seed, scraped))
+            results.append((int(row["id"]), seed, scraped))
         return results
 
 
