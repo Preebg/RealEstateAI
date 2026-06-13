@@ -9,6 +9,7 @@ import re
 import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import lru_cache
 from dataclasses import dataclass
 from datetime import date
@@ -2530,7 +2531,7 @@ def _sanitize_synthesis_numerics(data: dict[str, Any]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Harvester pipeline (3 stages — single grounded discovery call)
+# Harvester pipeline (3 stages — regional discovery agents)
 # ---------------------------------------------------------------------------
 
 _DISCOVERY_API_ERRORS = (
@@ -2611,32 +2612,57 @@ def _execute_region_discovery_plan(
     round_total: int | None = None,
     label: str = "region",
 ) -> list[_DiscoveryRegionResult]:
-    """Run regional discovery agents sequentially (one agent per geography)."""
+    """Run regional discovery agents in parallel when multiple geographies are planned."""
     if not plan:
         return []
 
     found_addrs = [str(item.get("address", "")) for item in split_listings]
     region_total = len(plan)
-    results: list[_DiscoveryRegionResult] = []
-    for region_idx, (region_key, market_needs) in enumerate(plan, start=1):
-        results.append(
-            _run_single_region_discovery(
-                region_key=region_key,
-                market_needs=market_needs,
-                model=model,
-                max_price=max_price,
-                exclude_addresses=exclude_addresses,
-                found_addrs=found_addrs,
-                rate_limiter=rate_limiter,
-                round_idx=round_idx,
-                round_total=round_total,
-                region_idx=region_idx,
-                region_total=region_total,
-                split_listings=split_listings,
-                label=label,
-            )
+
+    def _invoke(
+        region_idx: int,
+        region_key: str,
+        market_needs: list[tuple[str, int]],
+    ) -> _DiscoveryRegionResult:
+        return _run_single_region_discovery(
+            region_key=region_key,
+            market_needs=market_needs,
+            model=model,
+            max_price=max_price,
+            exclude_addresses=exclude_addresses,
+            found_addrs=found_addrs,
+            rate_limiter=rate_limiter,
+            round_idx=round_idx,
+            round_total=round_total,
+            region_idx=region_idx,
+            region_total=region_total,
+            split_listings=split_listings,
+            label=label,
         )
-    return results
+
+    if len(plan) == 1:
+        region_key, market_needs = plan[0]
+        return [_invoke(1, region_key, market_needs)]
+
+    results_by_region: dict[str, _DiscoveryRegionResult] = {}
+    with ThreadPoolExecutor(max_workers=len(plan)) as executor:
+        futures = {
+            executor.submit(_invoke, idx, region_key, market_needs): region_key
+            for idx, (region_key, market_needs) in enumerate(plan, start=1)
+        }
+        for future in as_completed(futures):
+            region_key, market_needs, region_listings, region_raw, elapsed = (
+                future.result()
+            )
+            results_by_region[region_key] = (
+                region_key,
+                market_needs,
+                region_listings,
+                region_raw,
+                elapsed,
+            )
+
+    return [results_by_region[region_key] for region_key, _ in plan]
 
 
 def _merge_discovery_region_results(
@@ -2710,10 +2736,11 @@ def _discover_listings_per_market(
             f"{region} ({sum(need for _, need in needs)})"
             for region, needs in plan
         )
+        run_mode = "in parallel" if len(plan) > 1 else "sequentially"
         _discovery_log(
             f"[discovery] Round {round_idx}/{DISCOVERY_TOPUP_MAX_ROUNDS}: "
-            f"running {len(plan)} regional discovery agent(s) sequentially: {region_summary} "
-            f"(≤{DISCOVERY_RPM_PER_MODEL} RPM)..."
+            f"running {len(plan)} regional discovery agent(s) {run_mode}: "
+            f"{region_summary} (≤{DISCOVERY_RPM_PER_MODEL} RPM)..."
         )
 
         results = _execute_region_discovery_plan(
@@ -2815,22 +2842,43 @@ def _discover_listings_for_model(
     on_listing_found: Callable[[dict[str, Any]], None] | None = None,
     rate_limiter: SyncModelRateLimiter | None = None,
 ) -> tuple[list[dict[str, Any]], str]:
-    """One combined all-market discovery call; optional single global top-up."""
+    """Regional-first discovery: parallel geography agents, then global top-up."""
     model = _resolve_discovery_model(model)
     use_maps = _model_supports_map_grounding(model)
     maps_note = "Search + Maps grounding" if use_maps else "Search grounding"
     _discovery_log(
-        f"[discovery] Combined all-market search on {model} "
+        f"[discovery] Regional-first discovery on {model} "
         f"({maps_note}, target {MAX_DISCOVERY_LISTINGS} listings, "
-        f"≤{DISCOVERY_MAX_REMOTE_CALLS} AFC calls)..."
+        f"{len(DISCOVERY_REGIONS)} parallel geography agents)..."
     )
 
-    listings, last_raw = _run_discovery_attempt(
+    deduped, last_raw = _discover_listings_per_market(
+        model=model,
+        max_price=max_price,
+        exclude_addresses=exclude_addresses,
+        on_listing_found=on_listing_found,
+        rate_limiter=rate_limiter,
+    )
+
+    if deduped:
+        return deduped, last_raw
+
+    _log.warning(
+        "discovery_empty_regional",
+        model=model,
+        raw_preview=last_raw[:400],
+    )
+    _discovery_log(
+        f"[discovery] Regional agents returned 0 listings on {model}; "
+        f"retrying with combined all-market search..."
+    )
+    listings, combined_raw = _run_discovery_attempt(
         model=model,
         max_price=max_price,
         exclude_addresses=exclude_addresses,
         rate_limiter=rate_limiter,
     )
+    last_raw = combined_raw or last_raw
     deduped = _extend_discovery_listings(
         [],
         listings,
@@ -2838,90 +2886,6 @@ def _discover_listings_for_model(
         on_listing_found=on_listing_found,
         discovery_model=model,
     )
-    if len(deduped) >= MAX_DISCOVERY_LISTINGS:
-        return deduped, last_raw
-
-    if deduped:
-        _log.info(
-            "discovery_partial_combined",
-            model=model,
-            count=len(deduped),
-            target=MAX_DISCOVERY_LISTINGS,
-            minimum=MIN_DISCOVERY_LISTINGS,
-        )
-        _discovery_log(
-            f"[discovery] Combined search returned {len(deduped)}/{MAX_DISCOVERY_LISTINGS} "
-            f"(minimum {MIN_DISCOVERY_LISTINGS}) on {model}; running global top-up(s)..."
-        )
-    else:
-        _log.warning(
-            "discovery_empty_combined",
-            model=model,
-            raw_preview=last_raw[:400],
-        )
-        _discovery_log(
-            f"[discovery] Combined search returned 0 listings on {model}; "
-            f"retrying for at least {MIN_DISCOVERY_LISTINGS}..."
-        )
-
-    for topup_round in range(1, DISCOVERY_TOPUP_MAX_ROUNDS + 1):
-        if len(deduped) >= MAX_DISCOVERY_LISTINGS:
-            break
-        if len(deduped) >= MIN_DISCOVERY_LISTINGS and len(deduped) >= DISCOVERY_PROMPT_TARGET:
-            break
-
-        remaining = max(
-            MAX_DISCOVERY_LISTINGS - len(deduped),
-            MIN_DISCOVERY_LISTINGS - len(deduped),
-        )
-        found_addrs = [str(item.get("address", "")) for item in deduped]
-        merged_exclude = list(exclude_addresses or []) + found_addrs
-        _discovery_log(
-            f"[discovery] Global top-up {topup_round}/{DISCOVERY_TOPUP_MAX_ROUNDS}: "
-            f"need {remaining} more (have {len(deduped)}, "
-            f"minimum {MIN_DISCOVERY_LISTINGS})..."
-        )
-        topup_listings, topup_raw = _run_discovery_attempt(
-            model=model,
-            max_price=max_price,
-            exclude_addresses=merged_exclude,
-            total_needed=remaining,
-            rate_limiter=rate_limiter,
-        )
-        last_raw = topup_raw or last_raw
-        before = len(deduped)
-        deduped = _extend_discovery_listings(
-            deduped,
-            topup_listings,
-            max_price=max_price,
-            on_listing_found=on_listing_found,
-            discovery_model=model,
-        )
-        added = len(deduped) - before
-        _discovery_log(
-            f"[discovery] Global top-up {topup_round}: +{added} new "
-            f"(total {len(deduped)}/{MAX_DISCOVERY_LISTINGS})"
-        )
-        if added == 0:
-            break
-
-    if len(deduped) < MIN_DISCOVERY_LISTINGS:
-        _discovery_log(
-            f"[discovery] Still below minimum ({len(deduped)}/{MIN_DISCOVERY_LISTINGS}); "
-            f"running regional discovery pass..."
-        )
-        regional, regional_raw = _discover_listings_per_market(
-            model=model,
-            max_price=max_price,
-            exclude_addresses=exclude_addresses,
-            seed_listings=deduped,
-            on_listing_found=on_listing_found,
-            rate_limiter=rate_limiter,
-        )
-        last_raw = regional_raw or last_raw
-        if len(regional) > len(deduped):
-            deduped = regional
-
     return deduped, last_raw
 
 
@@ -2940,8 +2904,8 @@ def discover_hot_market_listings(
     Gemini tiers also enable Maps grounding; Gemma is search-only.
     (tier 3 resolves to gemma-4-26b-a4b-it on the hosted API).
 
-    One combined all-market call per model tier (≤2 calls/tier: initial + optional
-    top-up). Gemini tiers enable Maps grounding on the same prompt.
+    Regional-first: up to four parallel geography agents per model tier, then
+    optional top-up rounds and a global sweep. Gemini tiers enable Maps grounding.
     """
     models_to_try = _discovery_models_to_try(model)
     discovery_rate_limiter = SyncModelRateLimiter(requests_per_minute=DISCOVERY_RPM_PER_MODEL)

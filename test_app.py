@@ -468,6 +468,8 @@ class TestDailyQuotaDetection(unittest.TestCase):
         def fake_attempt(**kwargs):
             if kwargs.get("total_needed") is not None:
                 return [], ""
+            if kwargs.get("split_region") or kwargs.get("split_market"):
+                return [rochester_row, syracuse_row], "regional"
             return [rochester_row, syracuse_row], "combined"
 
         with patch("engine._run_discovery_attempt", side_effect=fake_attempt):
@@ -841,7 +843,7 @@ class TestDiscoveryParsing(unittest.TestCase):
 
         def fake_generate(model, prompt, **kwargs):
             calls["count"] += 1
-            if calls["count"] == 1:
+            if calls["count"] <= 4:
                 return _discovery_generate_return("No parseable listings in this response.")
             return _discovery_generate_return(
                 json.dumps(
@@ -861,7 +863,7 @@ class TestDiscoveryParsing(unittest.TestCase):
 
         self.assertEqual(len(listings), 1)
         self.assertEqual(listings[0]["city"], "Rochester")
-        self.assertGreaterEqual(calls["count"], 2)
+        self.assertGreaterEqual(calls["count"], 5)
 
     def test_plan_redistributes_unfilled_rochester_slots(self):
         from engine import (
@@ -918,7 +920,7 @@ class TestDiscoveryParsing(unittest.TestCase):
 
         def fake_discovery_attempt(**kwargs):
             calls["count"] += 1
-            if kwargs.get("total_needed") is None:
+            if kwargs.get("split_region") == "Upstate NY":
                 payload = [
                     {
                         "address": f"{idx} Park Ave, Rochester, NY 1460{idx}",
@@ -931,21 +933,23 @@ class TestDiscoveryParsing(unittest.TestCase):
                     for idx in range(3)
                 ]
                 return payload, json.dumps(payload)
-            rows = [
-                {
-                    "address": "1 Oak St, Syracuse, NY 13039",
-                    "city": "Syracuse",
-                    "list_price": 195000,
-                    "listing_url": "https://www.zillow.com/homedetails/syracuse-1/",
-                },
-                {
-                    "address": "2 Pine Rd, Orlando, FL 32801",
-                    "city": "Orlando",
-                    "list_price": 210000,
-                    "listing_url": "https://www.zillow.com/homedetails/orlando-2/",
-                },
-            ]
-            return rows, json.dumps(rows)
+            if kwargs.get("total_needed"):
+                rows = [
+                    {
+                        "address": "1 Oak St, Syracuse, NY 13039",
+                        "city": "Syracuse",
+                        "list_price": 195000,
+                        "listing_url": "https://www.zillow.com/homedetails/syracuse-1/",
+                    },
+                    {
+                        "address": "2 Pine Rd, Orlando, FL 32801",
+                        "city": "Orlando",
+                        "list_price": 210000,
+                        "listing_url": "https://www.zillow.com/homedetails/orlando-2/",
+                    },
+                ]
+                return rows, json.dumps(rows)
+            return [], "[]"
 
         with patch("engine._run_discovery_attempt", side_effect=fake_discovery_attempt):
             listings = discover_hot_market_listings(model=DISCOVERY_MODEL)

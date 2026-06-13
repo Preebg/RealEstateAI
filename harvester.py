@@ -651,8 +651,8 @@ async def run_harvester_pipeline_async(admin_user_id: str) -> dict[str, Any]:
     Stage 4 (Synthesis): gemini-3.1-flash-lite-preview -> gemini-3.5-flash -> gemma-4-26b-a4b-it
 
     Stage 1 discovery completes before Stage 2 research begins. Synthesis still pipelines
-    per property as each research job finishes. Discovery is one combined all-market call
-    per model tier (per-model RPM).
+    per property as each research job finishes. Discovery runs up to four parallel regional
+    agents per model tier (per-model RPM), then optional top-up rounds.
     """
     global _active_discovery_model, _active_research_model, _active_synthesis_model
     _active_discovery_model = engine.DISCOVERY_MODEL
