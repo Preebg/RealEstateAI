@@ -1,0 +1,24 @@
+{
+  "homes": [
+    {
+      "propertyId": 12345678,
+      "url": "/NY/Rochester/10-Park-Ave-14607/home/12345678",
+      "streetLine": {"value": "10 Park Ave"},
+      "city": "Rochester",
+      "state": "NY",
+      "zip": "14607",
+      "price": {"value": 210000},
+      "photos": {"value": "https://ssl.cdn-redfin.com/photo/1.jpg"}
+    },
+    {
+      "propertyId": 12345678,
+      "url": "/NY/Rochester/10-Park-Ave-14607/home/12345678",
+      "streetLine": {"value": "10 Park Ave"},
+      "city": "Rochester",
+      "state": "NY",
+      "zip": "14607",
+      "price": {"value": 210000},
+      "photos": {"value": "https://ssl.cdn-redfin.com/photo/1.jpg"}
+    }
+  ]
+}

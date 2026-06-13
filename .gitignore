@@ -24,7 +24,9 @@ reports/
 poised-epigram-493119-g0-64095d0f749b.json
 .aider*
 # Local-only docs and test fixtures (not required at runtime on Streamlit Cloud)
-tests/
+tests/*
+!tests/fixtures/
+!tests/fixtures/**
 docs/QUANTUM_METHOD.md
 docs/DATA_PIPELINE.md
 ARCHITECTURE.md
