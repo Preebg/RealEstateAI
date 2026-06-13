@@ -1,7 +1,12 @@
+from __future__ import annotations
+
+from typing import Any
+
 import streamlit as st
 
 import app_nav  # noqa: F401 — navigation module registration
 
+from app_nav import consume_map_property_selection
 from authenticate import render_auth_page, render_auth_sidebar
 from components.address_search import render_property_address_input
 from components.property_analysis_display import render_individual_search_analysis_fragment
@@ -18,7 +23,6 @@ from knowledge_base import (
     render_user_saved_properties_sidebar,
 )
 from market_pulse import render_market_pulse
-from property_nav import consume_map_property_selection, load_property_from_kb
 from services.deferred_analysis import (
     clear_deferred_analysis_state,
     ensure_deferred_task_queue,
@@ -32,6 +36,18 @@ from services.property_analysis_flow import (
 )
 from ui_theme import render_callout_info, render_flow_steps, render_page_hero
 
+
+def _load_property_from_kb(address: str) -> dict[str, Any] | None:
+    """Hydrate a KB property for the analyzer UI — must live in this page module for Streamlit reruns."""
+    from engine import get_final_analysis
+    from knowledge_base import lookup_property
+
+    cached = lookup_property(address)
+    if not cached:
+        return None
+    return get_final_analysis(cached, address, None, skip_comps=True)
+
+
 if not render_auth_page():
     st.stop()
 
@@ -42,7 +58,7 @@ _guest_mode = is_guest_viewer()
 _map_address = consume_map_property_selection()
 if _map_address:
     set_active_analysis_address(_map_address)
-    _map_loaded = load_property_from_kb(_map_address)
+    _map_loaded = _load_property_from_kb(_map_address)
     if _map_loaded:
         _map_loaded["address"] = _map_address
         st.session_state["property_data"] = _map_loaded
