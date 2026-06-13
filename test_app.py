@@ -1,6 +1,7 @@
 import json
 import logging
 import math
+import os
 import tempfile
 import unittest
 from datetime import date
@@ -3522,6 +3523,128 @@ class TestDiscoveryScraper(unittest.TestCase):
             self.assertEqual(rochester[0]["discovery_model"], "scraper")
             self.assertTrue(rochester[0].get("primary_image_url"))
             self.assertTrue(rochester[0].get("listing_description"))
+
+    def test_mark_completed_and_list_enriched_includes_row_id(self):
+        from discovery.models import ListingSeed, ScrapedListing
+        from discovery.repository import SqliteDiscoveryRepository
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = SqliteDiscoveryRepository(Path(tmp) / "capigen.db")
+            seed = ListingSeed(
+                address="10 Park Ave, Rochester, NY 14607",
+                city="Rochester",
+                list_price=210000,
+                listing_url="https://www.redfin.com/NY/Rochester/10-Park-Ave-14607/home/12345678",
+                source="redfin",
+                external_id="12345678",
+            )
+            row_id = repo.upsert_seed(seed)
+            scraped = ScrapedListing(
+                address=seed.address,
+                city=seed.city,
+                list_price=seed.list_price,
+                listing_url=seed.listing_url,
+                source=seed.source,
+                external_id=seed.external_id,
+                listing_status="For Sale",
+                days_on_market=5,
+                view_count=None,
+                listing_description="Updated kitchen.",
+                primary_image_url="https://ssl.cdn-redfin.com/photo/1.jpg",
+                image_urls=("https://ssl.cdn-redfin.com/photo/1.jpg",),
+                taxes_annual=4000.0,
+                hoa_monthly=0.0,
+                year_built=1970,
+                square_footage=1400,
+                property_type="Single Family",
+                latitude=43.15,
+                longitude=-77.61,
+                stated_gross_monthly_rent=0.0,
+                listing_rent_notes="",
+                property_condition="Good",
+                scraped_at="2026-06-13T12:00:00+00:00",
+            )
+            repo.mark_enriched(row_id, scraped)
+            rows = repo.list_enriched_seeds(limit=10)
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0][0], row_id)
+            repo.mark_completed(row_id)
+            self.assertEqual(repo.list_enriched_seeds(limit=10), [])
+
+    def test_dequeue_enriched_listings_async(self):
+        import asyncio
+
+        from discovery.models import ListingSeed, ScrapedListing
+        from discovery.orchestrator import dequeue_enriched_listings_async
+        from discovery.repository import SqliteDiscoveryRepository
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "capigen.db"
+            repo = SqliteDiscoveryRepository(db_path)
+            seed = ListingSeed(
+                address="10 Park Ave, Rochester, NY 14607",
+                city="Rochester",
+                list_price=210000,
+                listing_url="https://www.redfin.com/NY/Rochester/10-Park-Ave-14607/home/12345678",
+                source="redfin",
+                external_id="12345678",
+            )
+            row_id = repo.upsert_seed(seed)
+            scraped = ScrapedListing(
+                address=seed.address,
+                city=seed.city,
+                list_price=seed.list_price,
+                listing_url=seed.listing_url,
+                source=seed.source,
+                external_id=seed.external_id,
+                listing_status="For Sale",
+                days_on_market=5,
+                view_count=None,
+                listing_description="Updated kitchen.",
+                primary_image_url="https://ssl.cdn-redfin.com/photo/1.jpg",
+                image_urls=("https://ssl.cdn-redfin.com/photo/1.jpg",),
+                taxes_annual=4000.0,
+                hoa_monthly=0.0,
+                year_built=1970,
+                square_footage=1400,
+                property_type="Single Family",
+                latitude=43.15,
+                longitude=-77.61,
+                stated_gross_monthly_rent=0.0,
+                listing_rent_notes="",
+                property_condition="Good",
+                scraped_at="2026-06-13T12:00:00+00:00",
+            )
+            repo.mark_enriched(row_id, scraped)
+
+            async def _run() -> list[dict]:
+                return await dequeue_enriched_listings_async(db_path=str(db_path))
+
+            listings = asyncio.run(_run())
+            self.assertEqual(len(listings), 1)
+            self.assertEqual(listings[0]["_queue_id"], row_id)
+            self.assertEqual(listings[0]["discovery_model"], "scraper")
+            self.assertIsInstance(listings[0]["_scraped"], ScrapedListing)
+
+    def test_resolve_discovery_backend(self):
+        from harvester import resolve_discovery_backend
+
+        with patch.dict(os.environ, {"DISCOVERY_BACKEND": "scraper"}, clear=False):
+            self.assertEqual(resolve_discovery_backend(), "scraper")
+        with patch.dict(os.environ, {"DISCOVERY_BACKEND": "gemini"}, clear=False):
+            self.assertEqual(resolve_discovery_backend(), "gemini")
+        with patch.dict(
+            os.environ,
+            {"DISCOVERY_BACKEND": "", "HARVESTER_USE_SCRAPER": "1"},
+            clear=False,
+        ):
+            self.assertEqual(resolve_discovery_backend(), "scraper")
+        with patch.dict(
+            os.environ,
+            {"DISCOVERY_BACKEND": "", "HARVESTER_USE_SCRAPER": ""},
+            clear=False,
+        ):
+            self.assertEqual(resolve_discovery_backend(), "gemini")
 
     def test_synthesis_prompt_separates_listing_description(self):
         from engine import _synthesis_prompt
