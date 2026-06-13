@@ -37,7 +37,7 @@ from viewer_timezone import (
     ensure_viewer_timezone,
     format_added_at,
     parse_property_timestamp,
-    viewer_timezone_is_resolved,
+    viewer_timezone_is_local,
 )
 
 
@@ -1586,7 +1586,7 @@ def render_portfolio_map_page() -> None:
     if "map_selected_address" not in st.session_state:
         st.session_state["map_selected_address"] = None
 
-    _apply_ledger_selection_to_map(st.session_state.get("property_ledger"), map_df)
+    _apply_ledger_selection_to_map(st.session_state.get("property_ledger_v2"), map_df)
 
     selected_address = st.session_state.get("map_selected_address")
     clicked_address, map_viewport = _render_portfolio_map_fragment(
@@ -1658,8 +1658,10 @@ def render_portfolio_map_page() -> None:
             "Zoom in on a metro area to filter this ledger to properties on screen. "
             "Click a row to focus it on the map."
         )
-    if viewer_timezone_is_resolved():
+    if viewer_timezone_is_local():
         st.caption("Added times are shown in your local timezone.")
+    else:
+        st.caption("Added times use UTC until your browser timezone is detected.")
     ledger_columns = [
         "address",
         "added_at",
@@ -1671,14 +1673,11 @@ def render_portfolio_map_page() -> None:
         "quantum_success",
     ]
     display_df = ledger_df[ledger_columns].copy()
-    if viewer_timezone_is_resolved():
-        display_df["added_at"] = display_df["added_at"].apply(
-            lambda value: format_added_at(value, user_tz)
-            if value is not None and pd.notna(value)
-            else "—"
-        )
-    else:
-        display_df["added_at"] = "…"
+    display_df["added_at"] = display_df["added_at"].apply(
+        lambda value: format_added_at(value, user_tz)
+        if value is not None and pd.notna(value)
+        else "—"
+    )
     display_df = display_df.rename(
         columns={
             "address": "Address",
@@ -1698,7 +1697,7 @@ def render_portfolio_map_page() -> None:
         display_df,
         use_container_width=True,
         hide_index=True,
-        key="property_ledger",
+        key="property_ledger_v2",
         on_select="rerun",
         selection_mode="single-row",
         column_config={

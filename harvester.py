@@ -389,7 +389,7 @@ async def _research_listing(
         ):
             report["property_valued"] = int(report.get("property_valued", 0)) + 1
 
-    skip_reason = engine.synthesis_skip_reason(research)
+    skip_reason = engine.research_stage_skip_reason(research, listing)
     if skip_reason:
         print(f"  [research] SKIP {address} — {skip_reason}")
         async with report_lock:
@@ -596,47 +596,49 @@ async def _research_and_schedule_synthesis(
     session: engine.GenaiSession,
     synthesis_tasks: list[asyncio.Task[None]],
     *,
+    research_semaphore: asyncio.Semaphore,
     geospatial_budget: engine.GroundingRpdBudget | None = None,
 ) -> None:
     """Run research for one listing; start synthesis immediately when it passes filters."""
     address = str(listing.get("address", "")).strip() or "(missing address)"
-    try:
-        job = await _research_listing(
-            listing,
-            admin_user_id,
-            report,
-            report_lock,
-            model_state,
-            rate_limiter,
-            session,
-        )
-    except Exception as exc:
-        if isinstance(exc, KeyboardInterrupt):
-            raise
-        report_error(log, "listing_research_failed", exc, address=address)
-        print(f"  [research] FAILED {address} — {exc}")
-        async with report_lock:
-            report["failed"].append({"address": address, "error": str(exc)})
-        return
-
-    if job is None:
-        return
-
-    synthesis_tasks.append(
-        asyncio.create_task(
-            _run_synthesis_safe(
-                job,
+    async with research_semaphore:
+        try:
+            job = await _research_listing(
+                listing,
                 admin_user_id,
                 report,
                 report_lock,
                 model_state,
                 rate_limiter,
                 session,
-                geospatial_budget=geospatial_budget,
-            ),
-            name=f"synthesis:{job.address}",
+            )
+        except Exception as exc:
+            if isinstance(exc, KeyboardInterrupt):
+                raise
+            report_error(log, "listing_research_failed", exc, address=address)
+            print(f"  [research] FAILED {address} — {exc}")
+            async with report_lock:
+                report["failed"].append({"address": address, "error": str(exc)})
+            return
+
+        if job is None:
+            return
+
+        synthesis_tasks.append(
+            asyncio.create_task(
+                _run_synthesis_safe(
+                    job,
+                    admin_user_id,
+                    report,
+                    report_lock,
+                    model_state,
+                    rate_limiter,
+                    session,
+                    geospatial_budget=geospatial_budget,
+                ),
+                name=f"synthesis:{job.address}",
+            )
         )
-    )
 
 
 async def run_harvester_pipeline_async(admin_user_id: str) -> dict[str, Any]:
@@ -650,9 +652,10 @@ async def run_harvester_pipeline_async(admin_user_id: str) -> dict[str, Any]:
     Stage 3 (Geocode): gemini-2.5-flash/lite Maps + search scout
     Stage 4 (Synthesis): gemini-3.1-flash-lite-preview -> gemini-3.5-flash -> gemma-4-26b-a4b-it
 
-    Stage 1 discovery completes before Stage 2 research begins. Synthesis still pipelines
-    per property as each research job finishes. Discovery runs up to four parallel regional
-    agents per model tier (per-model RPM), then optional top-up rounds.
+    Stage 1 discovery completes before Stage 2 research begins. Up to
+    MAX_CONCURRENT_RESEARCH_AGENTS research workers run at once; each finished
+    property moves to synthesis while a free slot picks up the next listing.
+    Discovery runs one regional agent at a time, then optional top-up rounds.
     """
     global _active_discovery_model, _active_research_model, _active_synthesis_model
     _active_discovery_model = engine.DISCOVERY_MODEL
@@ -708,6 +711,7 @@ async def run_harvester_pipeline_async(admin_user_id: str) -> dict[str, Any]:
     model_state = _HarvesterModelState(synthesis_model=engine.SYNTHESIS_MODEL)
     synthesis_tasks: list[asyncio.Task[None]] = []
     research_tasks: list[asyncio.Task[None]] = []
+    research_semaphore = asyncio.Semaphore(engine.MAX_CONCURRENT_RESEARCH_AGENTS)
 
     print("=" * 60)
     print("ACCURACY WORKFLOW - discovery -> research -> property value -> synthesis")
@@ -756,7 +760,8 @@ async def run_harvester_pipeline_async(admin_user_id: str) -> dict[str, Any]:
 
     print(
         f"[research] Stage 2 START — {len(listings)} listings via "
-        f"{engine.RESEARCH_MODEL}...",
+        f"{engine.RESEARCH_MODEL} "
+        f"(max {engine.MAX_CONCURRENT_RESEARCH_AGENTS} concurrent workers)...",
         flush=True,
     )
     for listing in listings:
@@ -772,6 +777,7 @@ async def run_harvester_pipeline_async(admin_user_id: str) -> dict[str, Any]:
                     rate_limiter,
                     session,
                     synthesis_tasks,
+                    research_semaphore=research_semaphore,
                     geospatial_budget=geospatial_budget,
                 ),
                 name=f"research:{address}",
@@ -859,8 +865,8 @@ def _render_streamlit_app() -> None:
     st.caption(
         "Upstate NY (priority: Rochester, Syracuse, Buffalo, Albany) → Philadelphia, "
         "Pittsburgh, Orlando, Tampa, Miami → Charlotte, Raleigh, Charleston • "
-        "Discovery → research → synthesis (sequential stages; "
-        f"≤{engine.HARVESTER_RPM_PER_MODEL} API calls/min per model)"
+        "Discovery → research → synthesis (sequential discovery; "
+        f"≤{engine.MAX_CONCURRENT_RESEARCH_AGENTS} concurrent research workers)"
     )
 
     render_market_pulse()
@@ -884,7 +890,8 @@ def _render_streamlit_app() -> None:
     st.info(
         f"Discovery uses Search Grounding (≤{engine.MAX_DISCOVERY_LISTINGS} listings under "
         f"${engine.MAX_DISCOVERY_PRICE:,}, suburbs included). After discovery finishes, "
-        f"all listings move to research, then synthesis as each research job completes "
+        f"research runs with up to {engine.MAX_CONCURRENT_RESEARCH_AGENTS} concurrent "
+        f"workers (one property each); synthesis starts as each research job completes "
         f"(rate-limited to {engine.HARVESTER_RPM_PER_MODEL} calls/min per model). "
         f"Synthesis skips Poor condition or price > ${engine.MAX_SYNTHESIS_PRICE:,}."
     )

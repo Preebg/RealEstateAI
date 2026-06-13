@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 # Underscore prefix avoids Streamlit session-state collisions with module names.
 VIEWER_TIMEZONE_SESSION_KEY = "_viewer_timezone"
+VIEWER_TIMEZONE_OFFSET_KEY = "_viewer_tz_offset_min"
 VIEWER_TIMEZONE_QUERY_PARAM = "tz"
+VIEWER_TIMEZONE_OFFSET_QUERY_PARAM = "tz_offset"
 DEFAULT_TIMEZONE = "UTC"
 
 
@@ -35,6 +37,8 @@ def parse_property_timestamp(value: Any) -> datetime | None:
         if not text:
             return None
         normalized = text.replace("Z", "+00:00")
+        if " " in normalized and "T" not in normalized:
+            normalized = normalized.replace(" ", "T", 1)
         try:
             dt = datetime.fromisoformat(normalized)
         except ValueError:
@@ -44,6 +48,15 @@ def parse_property_timestamp(value: Any) -> datetime | None:
     return dt.astimezone(timezone.utc)
 
 
+def timezone_from_offset_minutes(offset_minutes: int) -> tzinfo:
+    """
+    Build a fixed offset tzinfo from JavaScript ``getTimezoneOffset()`` minutes.
+
+    JS returns (UTC - local) in minutes, so Eastern (UTC-4) is 240.
+    """
+    return timezone(timedelta(minutes=-int(offset_minutes)))
+
+
 def _format_12h_time(dt: datetime) -> str:
     hour = dt.hour % 12 or 12
     return f"{hour}:{dt.minute:02d} {'AM' if dt.hour < 12 else 'PM'}"
@@ -51,11 +64,11 @@ def _format_12h_time(dt: datetime) -> str:
 
 def format_added_at(
     utc_dt: datetime,
-    tz: ZoneInfo,
+    tz: tzinfo,
     *,
     now: datetime | None = None,
 ) -> str:
-    """Format a catalog timestamp for display in the user's local timezone."""
+    """Format a catalog timestamp for display in the viewer's local timezone."""
     if hasattr(utc_dt, "to_pydatetime"):
         utc_dt = utc_dt.to_pydatetime()
     if utc_dt.tzinfo is None:
@@ -82,62 +95,129 @@ def _clear_query_param(name: str) -> None:
         del st.query_params[name]
 
 
-def get_user_zoneinfo() -> ZoneInfo:
-    """Return the user's timezone from Streamlit session state, or UTC."""
+def _query_param_value(name: str) -> str | None:
     try:
         import streamlit as st
     except ImportError:
-        return ZoneInfo(DEFAULT_TIMEZONE)
+        return None
+    value = st.query_params.get(name)
+    if value is None:
+        return None
+    if isinstance(value, list):
+        return str(value[0]) if value else None
+    return str(value)
 
-    stored = st.session_state.get(VIEWER_TIMEZONE_SESSION_KEY)
-    if stored:
-        return ZoneInfo(validate_timezone_name(str(stored)))
-    return ZoneInfo(DEFAULT_TIMEZONE)
 
-
-def viewer_timezone_is_resolved() -> bool:
-    """True once the browser timezone has been stored in session state."""
+def _store_viewer_timezone_from_query() -> tzinfo | None:
     try:
         import streamlit as st
     except ImportError:
-        return False
-    return bool(st.session_state.get(VIEWER_TIMEZONE_SESSION_KEY))
+        return None
 
-
-def ensure_viewer_timezone() -> ZoneInfo:
-    """
-    Resolve the viewer's IANA timezone once per session.
-
-    On first load, injects a small script that sets a ``tz`` query param from
-    ``Intl.DateTimeFormat``; the next rerun stores it in session state.
-    """
-    try:
-        import streamlit as st
-        import streamlit.components.v1 as components
-    except ImportError:
-        return ZoneInfo(DEFAULT_TIMEZONE)
-
-    stored = st.session_state.get(VIEWER_TIMEZONE_SESSION_KEY)
-    if stored:
-        return ZoneInfo(validate_timezone_name(str(stored)))
-
-    query_tz = st.query_params.get(VIEWER_TIMEZONE_QUERY_PARAM)
+    query_tz = _query_param_value(VIEWER_TIMEZONE_QUERY_PARAM)
     if query_tz:
         tz_name = validate_timezone_name(query_tz)
         st.session_state[VIEWER_TIMEZONE_SESSION_KEY] = tz_name
         _clear_query_param(VIEWER_TIMEZONE_QUERY_PARAM)
         return ZoneInfo(tz_name)
 
+    offset_raw = _query_param_value(VIEWER_TIMEZONE_OFFSET_QUERY_PARAM)
+    if offset_raw:
+        try:
+            offset_minutes = int(offset_raw)
+        except ValueError:
+            offset_minutes = None
+        if offset_minutes is not None:
+            st.session_state[VIEWER_TIMEZONE_OFFSET_KEY] = offset_minutes
+            _clear_query_param(VIEWER_TIMEZONE_OFFSET_QUERY_PARAM)
+            return timezone_from_offset_minutes(offset_minutes)
+    return None
+
+
+def get_viewer_timezone() -> tzinfo:
+    """Return the viewer timezone from session state, or UTC."""
+    try:
+        import streamlit as st
+    except ImportError:
+        return ZoneInfo(DEFAULT_TIMEZONE)
+
+    stored = st.session_state.get(VIEWER_TIMEZONE_SESSION_KEY)
+    if stored:
+        return ZoneInfo(validate_timezone_name(str(stored)))
+
+    offset_minutes = st.session_state.get(VIEWER_TIMEZONE_OFFSET_KEY)
+    if offset_minutes is not None:
+        try:
+            return timezone_from_offset_minutes(int(offset_minutes))
+        except (TypeError, ValueError):
+            pass
+    return ZoneInfo(DEFAULT_TIMEZONE)
+
+
+def viewer_timezone_is_local() -> bool:
+    """True when a browser-provided timezone is stored (not the UTC fallback)."""
+    try:
+        import streamlit as st
+    except ImportError:
+        return False
+    return bool(
+        st.session_state.get(VIEWER_TIMEZONE_SESSION_KEY)
+        or st.session_state.get(VIEWER_TIMEZONE_OFFSET_KEY) is not None
+    )
+
+
+def ensure_viewer_timezone() -> tzinfo:
+    """
+    Resolve the viewer's timezone once per session.
+
+    On first load, injects a small script that sets ``tz`` / ``tz_offset`` query
+    params from the browser; the next rerun stores them in session state.
+    """
+    try:
+        import streamlit.components.v1 as components
+    except ImportError:
+        return ZoneInfo(DEFAULT_TIMEZONE)
+
+    stored_tz = get_viewer_timezone()
+    if viewer_timezone_is_local():
+        return stored_tz
+
+    detected = _store_viewer_timezone_from_query()
+    if detected is not None:
+        return detected
+
     components.html(
         f"""
         <script>
         (function() {{
-            const param = {VIEWER_TIMEZONE_QUERY_PARAM!r};
+            const tzParam = {VIEWER_TIMEZONE_QUERY_PARAM!r};
+            const offsetParam = {VIEWER_TIMEZONE_OFFSET_QUERY_PARAM!r};
             const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
-            const url = new URL(window.parent.location.href);
-            if (url.searchParams.get(param) !== tz) {{
-                url.searchParams.set(param, tz);
-                window.parent.location.replace(url.toString());
+            const offset = String(new Date().getTimezoneOffset());
+            const targets = [window.top, window.parent, window];
+            let targetWindow = window;
+            for (const candidate of targets) {{
+                try {{
+                    if (candidate && candidate.location) {{
+                        targetWindow = candidate;
+                        break;
+                    }}
+                }} catch (err) {{
+                    /* cross-origin frame */
+                }}
+            }}
+            const url = new URL(targetWindow.location.href);
+            let changed = false;
+            if (url.searchParams.get(tzParam) !== tz) {{
+                url.searchParams.set(tzParam, tz);
+                changed = true;
+            }}
+            if (url.searchParams.get(offsetParam) !== offset) {{
+                url.searchParams.set(offsetParam, offset);
+                changed = true;
+            }}
+            if (changed) {{
+                targetWindow.location.replace(url.toString());
             }}
         }})();
         </script>

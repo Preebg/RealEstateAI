@@ -36,6 +36,11 @@ if legal_path:
 
 authenticated = render_auth_page()
 
+if authenticated:
+    from viewer_timezone import ensure_viewer_timezone
+
+    ensure_viewer_timezone()
+
 open_individual_search = consume_nav_target() == INDIVIDUAL_SEARCH_PAGE
 
 if authenticated and not st.session_state.get("_guest_landing_routed"):

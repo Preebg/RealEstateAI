@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import difflib
 import json
 import os
 import random
@@ -245,6 +246,18 @@ _LISTING_DETAIL_URL_MARKERS = (
     "/property/",
 )
 _DISCOVERY_STATE_CODES = frozenset({"NY", "PA", "FL", "NC", "SC", "OH", "TX", "NJ"})
+_DISCOVERY_STATE_FULL_NAMES: frozenset[str] = frozenset(
+    {
+        "NEW YORK",
+        "PENNSYLVANIA",
+        "FLORIDA",
+        "NORTH CAROLINA",
+        "SOUTH CAROLINA",
+        "OHIO",
+        "TEXAS",
+        "NEW JERSEY",
+    }
+)
 _US_ZIP_RE = re.compile(r"\b\d{5}(?:-\d{4})?\b")
 _STREET_NUMBER_RE = re.compile(r"(?:^|\s)(\d{1,6}[A-Za-z]?)\s+\S+")
 # Grounded discovery needs more search calls than the SDK default (10 AFC).
@@ -266,6 +279,8 @@ HARVESTER_RPM_CAP = 13
 HARVESTER_RPM_PER_MODEL = DEFAULT_MODEL_RPM
 DISCOVERY_RPM_PER_MODEL = DEFAULT_MODEL_RPM
 HARVESTER_RPM_WINDOW_SEC = 60.0
+# Max concurrent Stage 2 research workers in the harvester pipeline.
+MAX_CONCURRENT_RESEARCH_AGENTS = HARVESTER_RPM_CAP
 
 
 @dataclass(frozen=True, slots=True)
@@ -1203,14 +1218,180 @@ _ADDRESS_MARKET_KEYWORDS: tuple[tuple[str, str], ...] = (
     ("buda", "Austin"),
 )
 _DISCOVERY_MARKET_LOOKUP = {name.lower(): name for name in DISCOVERY_MARKET_KEYS}
+# ZIP prefix → state when discovery text omits or mangles the state abbreviation.
+_STATE_BY_ZIP_PREFIX: dict[str, str] = {
+    "146": "NY",
+    "145": "NY",
+    "132": "NY",
+    "130": "NY",
+    "131": "NY",
+    "142": "NY",
+    "140": "NY",
+    "141": "NY",
+    "122": "NY",
+    "123": "NY",
+    "120": "NY",
+    "121": "NY",
+    "191": "PA",
+    "190": "PA",
+    "152": "PA",
+    "151": "PA",
+    "150": "PA",
+    "328": "FL",
+    "327": "FL",
+    "347": "FL",
+    "336": "FL",
+    "337": "FL",
+    "335": "FL",
+    "346": "FL",
+    "331": "FL",
+    "330": "FL",
+    "333": "FL",
+    "334": "FL",
+    "282": "NC",
+    "280": "NC",
+    "276": "NC",
+    "275": "NC",
+    "294": "SC",
+    "441": "OH",
+    "440": "OH",
+    "432": "OH",
+    "430": "OH",
+    "452": "OH",
+    "451": "OH",
+    "752": "TX",
+    "761": "TX",
+    "750": "TX",
+    "787": "TX",
+    "786": "TX",
+}
+_DISCOVERY_FUZZY_VOCAB: tuple[str, ...] = tuple(
+    sorted(
+        {keyword for keyword, _ in _ADDRESS_MARKET_KEYWORDS}
+        | {name.lower() for name in DISCOVERY_MARKET_KEYS}
+        | {name.lower() for name in _DISCOVERY_STATE_FULL_NAMES}
+        | {code.lower() for code in _DISCOVERY_STATE_CODES}
+    )
+)
+_PLACE_TO_MARKET: dict[str, str] = {
+    keyword: market for keyword, market in _ADDRESS_MARKET_KEYWORDS
+}
+
+
+def _strip_discovery_address_artifacts(text: str) -> str:
+    """Remove JSON/escape backslashes and stray punctuation from discovery text."""
+    cleaned = str(text or "").strip()
+    cleaned = cleaned.replace("\\,", ",")
+    cleaned = re.sub(r"\\(?=[A-Za-z])", "", cleaned)
+    cleaned = re.sub(r"([A-Za-z])\\+", r"\1", cleaned)
+    cleaned = re.sub(r"\\+", " ", cleaned)
+    cleaned = re.sub(r"\s+,", ",", cleaned)
+    cleaned = re.sub(r",\s+", ", ", cleaned)
+    cleaned = re.sub(r"\s{2,}", " ", cleaned)
+    return cleaned.strip(" ,;")
+
+
+def _title_place_name(name: str) -> str:
+    """Title-case a repaired place token while preserving common abbreviations."""
+    if not name:
+        return name
+    parts = name.split()
+    titled: list[str] = []
+    for part in parts:
+        lower = part.lower()
+        if lower in {"st.", "st", "mt.", "mt"}:
+            titled.append(part if part.endswith(".") else part.title())
+        else:
+            titled.append(part.title())
+    return " ".join(titled)
+
+
+def _fuzzy_correct_place_name(name: str, *, cutoff: float = 0.72) -> str:
+    """Map truncated or typo'd city tokens to a known discovery place name."""
+    cleaned = _strip_discovery_address_artifacts(name).lower().strip(".,; ")
+    if not cleaned or len(cleaned) < 3:
+        return ""
+    if cleaned in _DISCOVERY_FUZZY_VOCAB:
+        return cleaned
+    matches = difflib.get_close_matches(
+        cleaned,
+        _DISCOVERY_FUZZY_VOCAB,
+        n=1,
+        cutoff=cutoff,
+    )
+    return matches[0] if matches else ""
+
+
+def _repair_city_segment(segment: str) -> str:
+    """Repair a locality segment such as '\\ittsburg' or 'Pittsburg\\ PA 15201'."""
+    seg = _strip_discovery_address_artifacts(segment)
+    if not seg:
+        return seg
+
+    state_zip_match = re.match(
+        r"^(?P<city>.+?)\s+(?P<state>[A-Z]{2})(?:\s+(?P<zip>\d{5}(?:-\d{4})?))?$",
+        seg,
+        flags=re.IGNORECASE,
+    )
+    if state_zip_match:
+        raw_city = state_zip_match.group("city").strip()
+        corrected = _fuzzy_correct_place_name(raw_city) or raw_city
+        city = _title_place_name(corrected)
+        state = state_zip_match.group("state").upper()
+        zip_code = state_zip_match.group("zip") or ""
+        if zip_code:
+            return f"{city} {state} {zip_code}"
+        return f"{city} {state}"
+
+    corrected = _fuzzy_correct_place_name(seg)
+    if corrected:
+        return _title_place_name(corrected)
+    return seg
+
+
+def _repair_discovery_address(address: str) -> str:
+    """
+    Repair common discovery-model address glitches (backslashes, truncated cities).
+
+    Examples: '\\ittsburg' -> 'Pittsburgh', 'Pittsburg\\' -> 'Pittsburgh'.
+    """
+    text = _strip_discovery_address_artifacts(address)
+    if not text or "," not in text:
+        return text
+
+    parts = [part.strip() for part in text.split(",") if part.strip()]
+    if len(parts) < 2:
+        return text
+
+    street = parts[0]
+    locality = [_repair_city_segment(part) for part in parts[1:]]
+    rebuilt = ", ".join([street, *locality])
+
+    zip_match = _US_ZIP_RE.search(rebuilt)
+    if zip_match:
+        prefix = zip_match.group(0)[:3]
+        inferred_state = _STATE_BY_ZIP_PREFIX.get(prefix, "")
+        upper = rebuilt.upper()
+        if inferred_state and f" {inferred_state} " not in upper and f", {inferred_state} " not in upper:
+            zip_code = zip_match.group(0)
+            rebuilt = rebuilt.replace(zip_code, f"{inferred_state} {zip_code}", 1)
+
+    return rebuilt.strip()
 
 
 def _match_market_from_text(text: str) -> str:
     """Map free-text city or address to a canonical discovery market key."""
-    lowered = text.lower()
+    lowered = _strip_discovery_address_artifacts(text).lower()
     for keyword, market in _ADDRESS_MARKET_KEYWORDS:
         if keyword in lowered:
             return market
+    for token in re.split(r"[,/\s]+", lowered):
+        token = token.strip(".,;\\")
+        if len(token) < 4:
+            continue
+        fuzzy = _fuzzy_correct_place_name(token)
+        if fuzzy in _PLACE_TO_MARKET:
+            return _PLACE_TO_MARKET[fuzzy]
     return ""
 
 
@@ -1240,16 +1421,16 @@ def _is_trusted_listing_url(url: str) -> bool:
 def is_plausible_discovery_address(address: str) -> bool:
     """Reject hallucinated or incomplete discovery addresses."""
     normalized = address.strip()
-    if len(normalized) < 12 or "," not in normalized:
+    if len(normalized) < 10 or "," not in normalized:
         return False
     if not _US_ZIP_RE.search(normalized):
         return False
     if not _STREET_NUMBER_RE.search(normalized):
         return False
     upper = normalized.upper()
-    if not any(f", {state}" in upper or f" {state} " in upper for state in _DISCOVERY_STATE_CODES):
-        return False
-    return True
+    if any(f", {state}" in upper or f" {state} " in upper for state in _DISCOVERY_STATE_CODES):
+        return True
+    return any(full_name in upper for full_name in _DISCOVERY_STATE_FULL_NAMES)
 
 
 def _extract_grounding_web_urls(response: Any) -> list[str]:
@@ -1852,7 +2033,14 @@ def _filter_verified_discovery_listings(
         "url": 0,
     }
     for item in listings:
-        address = str(item.get("address", "")).strip()
+        raw_address = str(item.get("address", "")).strip()
+        address = _repair_discovery_address(raw_address)
+        if address != raw_address:
+            _log.info(
+                "discovery_address_repaired",
+                from_address=raw_address[:80],
+                to_address=address[:80],
+            )
         list_price = safe_float(item.get("list_price"))
         listing_url = str(
             item.get("listing_url")
@@ -1863,7 +2051,20 @@ def _filter_verified_discovery_listings(
 
         if not is_plausible_discovery_address(address):
             reject_counts["address"] += 1
-            _log.info("discovery_rejected_address", address=address[:80], reason="implausible")
+            _log.info(
+                "discovery_rejected_address",
+                address=address[:80],
+                reason="implausible",
+            )
+            continue
+        listing_status = str(item.get("listing_status", "")).strip()
+        if listing_status and is_inactive_listing_status(listing_status):
+            reject_counts["address"] += 1
+            _log.info(
+                "discovery_rejected_address",
+                address=address[:80],
+                reason=f"inactive_status:{listing_status}",
+            )
             continue
         if list_price <= 0 or list_price > max_price:
             reject_counts["price"] += 1
@@ -1930,6 +2131,15 @@ def _normalize_discovery_item(item: Any) -> dict[str, Any] | None:
     if not address:
         return None
 
+    repaired_address = _repair_discovery_address(address)
+    if repaired_address != address:
+        _log.info(
+            "discovery_address_repaired",
+            from_address=address[:80],
+            to_address=repaired_address[:80],
+        )
+        address = repaired_address
+
     city = _infer_discovery_city(
         address,
         str(item.get("city") or item.get("market") or item.get("market_city") or ""),
@@ -1952,6 +2162,9 @@ def _normalize_discovery_item(item: Any) -> dict[str, Any] | None:
         "list_price": list_price,
         "listing_url": listing_url,
     }
+    listing_status = str(item.get("listing_status", item.get("status", ""))).strip()
+    if listing_status:
+        listing["listing_status"] = listing_status
     lat = safe_float(item.get("latitude", item.get("lat")))
     lon = safe_float(item.get("longitude", item.get("lon", item.get("lng"))))
     if -90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0 and (lat != 0.0 or lon != 0.0):
@@ -2298,6 +2511,7 @@ Return ONLY a JSON array (no markdown, no commentary). Example:
     "city": "Rochester",
     "list_price": 189000,
     "year_built": 2004,
+    "listing_status": "For Sale",
 {maps_example_fields}    "listing_url": "https://www.zillow.com/homedetails/123-Main-St-Henrietta-NY-14623/12345678_zpid/"
   }},
   {{
@@ -2305,12 +2519,16 @@ Return ONLY a JSON array (no markdown, no commentary). Example:
     "city": "Rochester",
     "list_price": 175000,
     "year_built": 1998,
+    "listing_status": "Active",
 {maps_example_fields}    "listing_url": "https://www.redfin.com/NY/Penfield/456-Oak-Ave-14526/home/12345678"
   }}
 ]
 
 Rules:
-- Search Zillow, Redfin, Realtor.com, or MLS listing pages for active for-sale homes.
+- Search Zillow, Redfin, Realtor.com, or MLS listing pages for active for-sale homes ONLY.
+- EXCLUDE sold, pending, contingent, under contract, and off-market listings entirely.
+- Verify each listing page shows status "For Sale" or "Active" TODAY — not sold history,
+  price reductions on closed sales, or cached/off-market pages.
 - NEVER invent, guess, or fabricate addresses. Only return properties you found on an
   active listing page in this search session.
 - listing_url is REQUIRED for every row — must be the exact Zillow, Redfin, or Realtor.com
@@ -2612,57 +2830,34 @@ def _execute_region_discovery_plan(
     round_total: int | None = None,
     label: str = "region",
 ) -> list[_DiscoveryRegionResult]:
-    """Run regional discovery agents in parallel when multiple geographies are planned."""
+    """Run regional discovery agents one at a time (no parallel discovery calls)."""
     if not plan:
         return []
 
     found_addrs = [str(item.get("address", "")) for item in split_listings]
     region_total = len(plan)
+    results: list[_DiscoveryRegionResult] = []
 
-    def _invoke(
-        region_idx: int,
-        region_key: str,
-        market_needs: list[tuple[str, int]],
-    ) -> _DiscoveryRegionResult:
-        return _run_single_region_discovery(
-            region_key=region_key,
-            market_needs=market_needs,
-            model=model,
-            max_price=max_price,
-            exclude_addresses=exclude_addresses,
-            found_addrs=found_addrs,
-            rate_limiter=rate_limiter,
-            round_idx=round_idx,
-            round_total=round_total,
-            region_idx=region_idx,
-            region_total=region_total,
-            split_listings=split_listings,
-            label=label,
+    for region_idx, (region_key, market_needs) in enumerate(plan, start=1):
+        results.append(
+            _run_single_region_discovery(
+                region_key=region_key,
+                market_needs=market_needs,
+                model=model,
+                max_price=max_price,
+                exclude_addresses=exclude_addresses,
+                found_addrs=found_addrs,
+                rate_limiter=rate_limiter,
+                round_idx=round_idx,
+                round_total=round_total,
+                region_idx=region_idx,
+                region_total=region_total,
+                split_listings=split_listings,
+                label=label,
+            )
         )
 
-    if len(plan) == 1:
-        region_key, market_needs = plan[0]
-        return [_invoke(1, region_key, market_needs)]
-
-    results_by_region: dict[str, _DiscoveryRegionResult] = {}
-    with ThreadPoolExecutor(max_workers=len(plan)) as executor:
-        futures = {
-            executor.submit(_invoke, idx, region_key, market_needs): region_key
-            for idx, (region_key, market_needs) in enumerate(plan, start=1)
-        }
-        for future in as_completed(futures):
-            region_key, market_needs, region_listings, region_raw, elapsed = (
-                future.result()
-            )
-            results_by_region[region_key] = (
-                region_key,
-                market_needs,
-                region_listings,
-                region_raw,
-                elapsed,
-            )
-
-    return [results_by_region[region_key] for region_key, _ in plan]
+    return results
 
 
 def _merge_discovery_region_results(
@@ -2736,7 +2931,7 @@ def _discover_listings_per_market(
             f"{region} ({sum(need for _, need in needs)})"
             for region, needs in plan
         )
-        run_mode = "in parallel" if len(plan) > 1 else "sequentially"
+        run_mode = "sequentially"
         _discovery_log(
             f"[discovery] Round {round_idx}/{DISCOVERY_TOPUP_MAX_ROUNDS}: "
             f"running {len(plan)} regional discovery agent(s) {run_mode}: "
@@ -2849,7 +3044,7 @@ def _discover_listings_for_model(
     _discovery_log(
         f"[discovery] Regional-first discovery on {model} "
         f"({maps_note}, target {MAX_DISCOVERY_LISTINGS} listings, "
-        f"{len(DISCOVERY_REGIONS)} parallel geography agents)..."
+        f"{len(DISCOVERY_REGIONS)} sequential geography agents)..."
     )
 
     deduped, last_raw = _discover_listings_per_market(
@@ -2904,7 +3099,7 @@ def discover_hot_market_listings(
     Gemini tiers also enable Maps grounding; Gemma is search-only.
     (tier 3 resolves to gemma-4-26b-a4b-it on the hosted API).
 
-    Regional-first: up to four parallel geography agents per model tier, then
+    Regional-first: sequential geography agents (one API call at a time), then
     optional top-up rounds and a global sweep. Gemini tiers enable Maps grounding.
     """
     models_to_try = _discovery_models_to_try(model)
@@ -3006,10 +3201,14 @@ def _research_prompt(address: str, discovery: dict[str, Any] | None = None) -> s
     return f"""Research the residential property at: {address}
 {_discovery_hint_block(discovery)}
 Use live listing search results (Zillow, Redfin, Realtor.com, MLS, county records).
+When a discovery listing URL is provided, open THAT page first and verify status.
 Read the FULL listing description and agent remarks — not just headline stats or Rent Zestimate.
 
 Extract ONLY these fields:
-- price (current list price USD, number only)
+- listing_status: the current MLS/listing status shown on the page (e.g. "For Sale",
+  "Active", "Pending", "Sold", "Contingent", "Off Market", "Under Contract")
+- price (current ACTIVE list/asking price USD, number only — NOT last sold price,
+  NOT Zestimate, NOT tax assessment; use 0 if not actively for sale)
 - taxes (total ANNUAL property tax USD)
 - hoa (monthly HOA fee USD, 0 if none)
 - year_built (4-digit construction year from listing facts — NOT property age in years; 0 if unknown)
@@ -3023,9 +3222,13 @@ Extract ONLY these fields:
 - listing_rent_notes: quote or paraphrase any rent/income/tenant language from the listing
   (empty string if none). Include whether amounts were monthly or annual.
 
+If the property is sold, pending, contingent, under contract, or off-market, set price to 0
+and listing_status to the actual status shown on the listing page.
+
 Return ONLY JSON:
 {{
   "address": "{address}",
+  "listing_status": "For Sale",
   "price": number,
   "taxes": number,
   "hoa": number,
@@ -3042,6 +3245,7 @@ def _normalize_research_payload(address: str, data: Any) -> dict[str, Any]:
     if not isinstance(data, dict):
         return {
             "address": address,
+            "listing_status": "",
             "price": 0.0,
             "taxes": 0.0,
             "hoa": 0.0,
@@ -3054,6 +3258,7 @@ def _normalize_research_payload(address: str, data: Any) -> dict[str, Any]:
         }
 
     data["address"] = address
+    data["listing_status"] = str(data.get("listing_status", "")).strip()
     data["price"] = safe_float(data.get("price"))
     data["taxes"] = safe_float(data.get("taxes"))
     data["hoa"] = safe_float(data.get("hoa"))
@@ -3194,6 +3399,10 @@ def _apply_discovery_research_fallback(
         for coord_key in ("latitude", "longitude"):
             if discovery.get(coord_key) is not None:
                 research[coord_key] = discovery[coord_key]
+    listing_status = str(research.get("listing_status", "")).strip()
+    if listing_status and is_inactive_listing_status(listing_status):
+        research["price"] = 0.0
+        return research
     if safe_float(research.get("price")) > 0 or not discovery:
         return research
     hint_price = safe_float(discovery.get("list_price"))
@@ -3459,6 +3668,53 @@ _LARGE_MULTIFAMILY_RE = re.compile(
     r"(?:5|6|7|8|9|\d{2,})[\s-]?unit)\b",
     re.IGNORECASE,
 )
+_ACTIVE_LISTING_STATUS_KEYWORDS = frozenset(
+    {
+        "for sale",
+        "active",
+        "active for sale",
+        "new",
+        "new listing",
+        "for_sale",
+    }
+)
+_INACTIVE_LISTING_STATUS_KEYWORDS = frozenset(
+    {
+        "sold",
+        "pending",
+        "contingent",
+        "under contract",
+        "off market",
+        "off-market",
+        "closed",
+        "coming soon",
+        "withdrawn",
+        "expired",
+        "not for sale",
+        "no longer available",
+    }
+)
+_RESEARCH_PRICE_MISMATCH_RATIO = 0.35
+
+
+def is_inactive_listing_status(status: str) -> bool:
+    """True when listing status indicates the home is not actively for sale."""
+    normalized = status.strip().lower()
+    if not normalized:
+        return False
+    if normalized in _INACTIVE_LISTING_STATUS_KEYWORDS:
+        return True
+    return any(keyword in normalized for keyword in _INACTIVE_LISTING_STATUS_KEYWORDS)
+
+
+def is_active_listing_status(status: str) -> bool:
+    """True when listing status clearly indicates an active for-sale listing."""
+    normalized = status.strip().lower()
+    if not normalized:
+        return False
+    if is_inactive_listing_status(normalized):
+        return False
+    return any(keyword in normalized for keyword in _ACTIVE_LISTING_STATUS_KEYWORDS)
 
 
 def is_disallowed_property_type(property_type: str) -> bool:
@@ -3489,6 +3745,42 @@ def synthesis_skip_reason(research: dict[str, Any]) -> str | None:
     property_type = str(research.get("property_type", "")).strip()
     if is_disallowed_property_type(property_type):
         return f"Excluded property type: {property_type}"
+    return None
+
+
+def research_stage_skip_reason(
+    research: dict[str, Any],
+    discovery: dict[str, Any] | None = None,
+) -> str | None:
+    """Skip research→synthesis when listing is inactive or discovery/research disagree."""
+    base_reason = synthesis_skip_reason(research)
+    if base_reason:
+        return base_reason
+
+    listing_status = str(research.get("listing_status", "")).strip()
+    if listing_status and is_inactive_listing_status(listing_status):
+        return f"Not actively for sale ({listing_status})"
+
+    if discovery:
+        hint_price = safe_float(discovery.get("list_price"))
+        research_price = safe_float(research.get("price"))
+        listing_url = str(discovery.get("listing_url", "")).strip()
+        if (
+            hint_price > 0
+            and research_price > 0
+            and listing_url
+            and _is_trusted_listing_url(listing_url)
+        ):
+            mismatch_ratio = abs(research_price - hint_price) / hint_price
+            if mismatch_ratio > _RESEARCH_PRICE_MISMATCH_RATIO:
+                return (
+                    f"Price mismatch: discovery ${hint_price:,.0f} vs "
+                    f"research ${research_price:,.0f}"
+                )
+
+    if listing_status and not is_active_listing_status(listing_status):
+        return f"Unverified listing status ({listing_status})"
+
     return None
 
 

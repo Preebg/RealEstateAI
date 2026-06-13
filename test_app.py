@@ -47,6 +47,11 @@ with patch("streamlit.secrets", {"GEMINI_API_KEY": "fake_key"}):
         is_disallowed_property_type,
         should_skip_synthesis,
         synthesis_skip_reason,
+        research_stage_skip_reason,
+        is_plausible_discovery_address,
+        MAX_CONCURRENT_RESEARCH_AGENTS,
+        _repair_discovery_address,
+        _build_listings_from_raw,
     )
     from finance import (
         DEFAULT_METRO_CAGR,
@@ -827,6 +832,36 @@ class TestHarvestSkipLogic(unittest.TestCase):
             "Excluded property type: Manufactured Home",
         )
 
+    def test_research_stage_skips_sold_listing(self):
+        research = {
+            "property_condition": "Good",
+            "price": 240_000,
+            "property_type": "Single Family",
+            "listing_status": "Sold",
+        }
+        self.assertEqual(
+            research_stage_skip_reason(research),
+            "Not actively for sale (Sold)",
+        )
+
+    def test_research_stage_skips_price_mismatch_with_discovery(self):
+        research = {
+            "property_condition": "Good",
+            "price": 240_000,
+            "property_type": "Single Family",
+            "listing_status": "For Sale",
+        }
+        discovery = {
+            "list_price": 540_000,
+            "listing_url": "https://www.zillow.com/homedetails/example/123_zpid/",
+        }
+        reason = research_stage_skip_reason(research, discovery)
+        self.assertIsNotNone(reason)
+        self.assertIn("Price mismatch", reason or "")
+
+    def test_max_concurrent_research_agents_is_thirteen(self):
+        self.assertEqual(MAX_CONCURRENT_RESEARCH_AGENTS, 13)
+
 
 class TestDiscoveryParsing(unittest.TestCase):
     def test_extract_wrapped_listings_object(self):
@@ -1019,6 +1054,90 @@ class TestDiscoveryParsing(unittest.TestCase):
         raw = json.dumps([{**_VERIFIED_DISCOVERY_ROW, "list_price": 0}])
         listings = _build_listings_from_raw(raw, 250_000)
         self.assertEqual(listings, [])
+
+    def test_accepts_full_state_name_in_address(self):
+        from engine import is_plausible_discovery_address
+
+        address = "100 Pine St, Charlotte, North Carolina 28202"
+        self.assertTrue(is_plausible_discovery_address(address))
+
+    def test_repair_backslash_truncated_pittsburgh(self):
+        raw = r"412 Oak Ave, \ittsburg, PA 15213"
+        repaired = _repair_discovery_address(raw)
+        self.assertIn("Pittsburgh", repaired)
+        self.assertTrue(is_plausible_discovery_address(repaired))
+
+    def test_repair_trailing_backslash_city(self):
+        raw = r"412 Oak Ave, Pittsburg\, PA 15213"
+        repaired = _repair_discovery_address(raw)
+        self.assertIn("Pittsburgh", repaired)
+        payload = json.dumps(
+            [
+                {
+                    "address": raw,
+                    "city": "Pittsburgh",
+                    "list_price": 185000,
+                    "listing_url": "https://www.zillow.com/homedetails/pittsburgh-oak/123_zpid/",
+                }
+            ]
+        )
+        listings = _build_listings_from_raw(payload, 250_000)
+        self.assertEqual(len(listings), 1)
+        self.assertIn("Pittsburgh", listings[0]["address"])
+
+    def test_repair_misspelled_city_without_state(self):
+        raw = "100 Main St, ittsburgh, 15213"
+        repaired = _repair_discovery_address(raw)
+        self.assertIn("Pittsburgh", repaired)
+        self.assertIn("PA", repaired)
+        self.assertTrue(is_plausible_discovery_address(repaired))
+
+    def test_rejects_sold_discovery_row(self):
+        from engine import _build_listings_from_raw
+
+        raw = json.dumps(
+            [
+                {
+                    **_VERIFIED_DISCOVERY_ROW,
+                    "listing_status": "Sold",
+                }
+            ]
+        )
+        listings = _build_listings_from_raw(raw, 250_000)
+        self.assertEqual(listings, [])
+
+    def test_discovery_regions_run_sequentially(self):
+        from engine import DISCOVERY_MODEL, _execute_region_discovery_plan
+
+        call_order: list[str] = []
+
+        def fake_run_single_region_discovery(**kwargs: object) -> tuple:
+            call_order.append(str(kwargs.get("region_key")))
+            return (
+                str(kwargs.get("region_key")),
+                list(kwargs.get("market_needs") or []),
+                [],
+                "[]",
+                0.0,
+            )
+
+        plan = [
+            ("Upstate NY", [("Rochester", 2)]),
+            ("Florida", [("Orlando", 1)]),
+        ]
+        with patch(
+            "engine._run_single_region_discovery",
+            side_effect=fake_run_single_region_discovery,
+        ):
+            _execute_region_discovery_plan(
+                plan,
+                model=DISCOVERY_MODEL,
+                max_price=250_000,
+                exclude_addresses=None,
+                split_listings=[],
+                rate_limiter=None,
+            )
+        self.assertEqual(call_order, ["Upstate NY", "Florida"])
 
     def test_accepts_grounded_row_without_explicit_listing_url(self):
         from engine import _build_listings_from_raw
@@ -2479,6 +2598,24 @@ class TestViewerTimezone(unittest.TestCase):
         )
         sorted_df = sort_portfolio(df, "added_at")
         self.assertEqual(sorted_df.iloc[0]["address"], "newer")
+
+    def test_parse_property_timestamp_postgres_format(self):
+        from datetime import datetime, timezone
+
+        from viewer_timezone import parse_property_timestamp
+
+        parsed = parse_property_timestamp("2025-06-11 22:53:00+00:00")
+        self.assertEqual(parsed, datetime(2025, 6, 11, 22, 53, tzinfo=timezone.utc))
+
+    def test_timezone_from_offset_minutes(self):
+        from datetime import datetime, timezone
+
+        from viewer_timezone import format_added_at, timezone_from_offset_minutes
+
+        utc_dt = datetime(2025, 6, 11, 22, 53, tzinfo=timezone.utc)
+        eastern = timezone_from_offset_minutes(240)
+        now = datetime(2025, 6, 11, 12, 0, tzinfo=eastern)
+        self.assertEqual(format_added_at(utc_dt, eastern, now=now), "6:53 PM")
 
 
 class TestDeferredAnalysis(unittest.TestCase):
