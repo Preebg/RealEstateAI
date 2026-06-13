@@ -1,0 +1,22 @@
+{
+  "price": 185000,
+  "year": 1958,
+  "rent": 1650,
+  "tax_rate": 3.2,
+  "hoa": 0,
+  "insurance": 125,
+  "summary": "Single-family ranch in Rochester's 14607 zip. Tenant-occupied at $1,650/mo with modest deferred exterior maintenance; interior updated within the last decade. Taxes align with Monroe County assessor data; comps support list near $185k with upside toward $190k.",
+  "maint_percent": 3.0,
+  "predicted_value": 190000,
+  "prediction_reasoning": "Three nearby Maple/Culver comps sold $179k–$192k in 2023–2024; subject list is mid-pack with stable tenant income.",
+  "location_score": 6.5,
+  "market_city": "Rochester",
+  "vacancy_rate": 6,
+  "management_fee": 10,
+  "property_label": "Balanced",
+  "sources": [
+    "https://www.zillow.com/homedetails/742-maple-ave-rochester-ny/",
+    "https://www.redfin.com/ny/rochester/742-maple-ave-14607/",
+    "https://www.realtor.com/realestateandhomes-detail/742-Maple-Ave_Rochester_NY_14607"
+  ]
+}
