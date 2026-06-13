@@ -686,7 +686,11 @@ def _discovery_afc_budget(
 ) -> int:
     """Right-size AFC search calls: combined needs more; per-market/gemma need fewer."""
     if split_region and region_market_needs:
-        target = needed_count or sum(need for _, need in region_market_needs)
+        target = (
+            needed_count
+            if needed_count is not None
+            else sum(need for _, need in region_market_needs)
+        )
         market_count = len(region_market_needs)
         cap = (
             DISCOVERY_REGION_MAX_REMOTE_CALLS
@@ -695,9 +699,13 @@ def _discovery_afc_budget(
         )
         return min(max(target, 1) + 4 + max(0, market_count - 1) * 3, cap)
     if split_market:
-        target = needed_count or next(
-            (count for name, _, count in HOT_MARKETS if name == split_market),
-            3,
+        target = (
+            needed_count
+            if needed_count is not None
+            else next(
+                (count for name, _, count in HOT_MARKETS if name == split_market),
+                3,
+            )
         )
         per_market_cap = (
             DISCOVERY_FALLBACK_MAX_REMOTE_CALLS
