@@ -1,4 +1,4 @@
-# Q-Scout UI Design System
+# CapEigen UI Design System
 
 Design tokens and patterns for the Streamlit app. Implementation lives in `ui_theme.py` and `.streamlit/config.toml`.
 

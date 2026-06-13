@@ -4,7 +4,7 @@
 
 ### Product overview
 
-**AI Property Scout** is a Python Streamlit app (`AIUnderwriterv2.py`) for AI-assisted real-estate underwriting. Auth and data use **Supabase**; property research uses **Google Gemini**. See `docs/HARVESTER_SETUP.md` for the optional batch harvester (`harvester.py`).
+**CapEigen** is a Python Streamlit app (`AIUnderwriterv2.py`) for AI-assisted real-estate underwriting. Auth and data use **Supabase**; property research uses **Google Gemini**. See `docs/HARVESTER_SETUP.md` for the optional batch harvester (`harvester.py`).
 
 ### PATH
 

@@ -555,7 +555,7 @@ def inject_app_css() -> None:
 
 def render_app_footer_glossary() -> None:
     """Footer glossary plus Terms of Service and Privacy Policy links."""
-    from legal import render_legal_footer_links
+    from legal import APP_NAME, render_legal_footer_links
 
     st.markdown(
         '<p class="app-footer-glossary">'
@@ -563,7 +563,7 @@ def render_app_footer_glossary() -> None:
         "cash-flow and appreciation targets (0–100%). It is a research simulation, "
         "not a market forecast or financial advice."
         "</p>"
-        '<p class="app-footer-research">Built with QAOA portfolio-alignment research.</p>',
+        f'<p class="app-footer-research">{APP_NAME} · Built with QAOA portfolio-alignment research.</p>',
         unsafe_allow_html=True,
     )
     render_legal_footer_links()

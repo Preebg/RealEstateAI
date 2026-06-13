@@ -16,7 +16,7 @@ from postgrest.exceptions import APIError
 from supabase import Client, create_client
 
 from app_logging import configure_logging, report_error
-from legal import APP_NAME, get_privacy_policy_text, get_terms_of_service_text
+from legal import APP_NAME, APP_TAGLINE, get_privacy_policy_text, get_terms_of_service_text
 
 log = configure_logging("authenticate")
 
@@ -946,9 +946,8 @@ def render_login_page() -> bool:
         st.markdown(
             f'<div class="login-brand">'
             f'<p class="login-wordmark">{APP_NAME}</p>'
-            '<p class="login-tagline">'
-            "Research rental properties with AI estimates, cash flow, and 10-year returns."
-            "</p></div>",
+            f'<p class="login-tagline">{APP_TAGLINE}</p>'
+            "</div>",
             unsafe_allow_html=True,
         )
 

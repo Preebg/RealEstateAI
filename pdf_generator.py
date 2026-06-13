@@ -10,6 +10,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from fpdf import FPDF
 
+from legal import APP_NAME
+
 
 def _pdf_text(text: Any) -> str:
     """Encode text safely for FPDF (latin-1)."""
@@ -224,7 +226,7 @@ def generate_property_pdf(
     pdf.set_auto_page_break(auto=True, margin=15)
 
     pdf.set_font("Times", "B", 16)
-    pdf.cell(0, 10, "Property Analysis Report", ln=True, align="C")
+    pdf.cell(0, 10, _pdf_text(f"{APP_NAME} — Property Analysis Report"), ln=True, align="C")
     pdf.set_font("Times", "", 12)
     pdf.cell(0, 10, _pdf_text(f"Address: {address}"), ln=True, align="C")
     pdf.ln(5)

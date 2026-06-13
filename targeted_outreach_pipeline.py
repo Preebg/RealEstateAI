@@ -8,6 +8,8 @@ Agent 2 (gemma-4-26b-a4b-it): personalized subject/body referencing the agent an
 Run on your harvester machine (long-running; needs local Gmail OAuth once):
     python targeted_outreach_pipeline.py --dry-run --limit 5
     python targeted_outreach_pipeline.py --limit 10
+    python targeted_outreach_pipeline.py --fix-draft-urls
+    python targeted_outreach_pipeline.py --fix-draft-urls --dry-run
 
 Credentials: st.secrets / .streamlit/secrets.toml
 (GEMINI_API_KEY, SUPABASE_SERVICE_ROLE_KEY, Google OAuth; service role required to read/update catalog).
@@ -24,9 +26,11 @@ import os
 import re
 import sys
 import time
+from email import message_from_bytes
 from email.mime.application import MIMEApplication
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from email.message import Message
 from pathlib import Path
 from typing import Any
 
@@ -55,8 +59,10 @@ from share_access import create_headless_property_share_url
 GMAIL_SCOPES = ("https://www.googleapis.com/auth/gmail.compose",)
 TOKEN_PATH = Path(__file__).resolve().parent / ".gmail_oauth_token.json"
 SECRETS_PATH = Path(__file__).resolve().parent / ".streamlit" / "secrets.toml"
-APP_URL = "https://realestateanalyzer.streamlit.app"
+DEFAULT_APP_URL = "https://capeigen.streamlit.app"
+LEGACY_APP_URLS: tuple[str, ...] = ("https://realestateanalyzer.streamlit.app",)
 SIGNATURE_LINE = "Shaker HS 2027"
+_resolved_app_url: str | None = None
 
 AGENT1_MODEL = PROPERTY_VALUE_TRIGGERED_MODEL  # gemma-4-31b-it — search grounding
 AGENT2_MODEL = PROPERTY_VALUE_MODEL  # gemma-4-26b-a4b-it — drafting
@@ -99,6 +105,50 @@ def _bootstrap_streamlit_secrets() -> None:
             continue
         if isinstance(value, (str, int, float, bool)):
             os.environ[key] = str(value)
+
+
+def resolve_app_url(*, force_refresh: bool = False) -> str:
+    """Production app origin for outreach links (secrets APP_URL, then OAUTH_REDIRECT_URL)."""
+    global _resolved_app_url
+    if _resolved_app_url is not None and not force_refresh:
+        return _resolved_app_url
+
+    from authenticate import _is_localhost_url, _normalize_app_url
+
+    for key in ("APP_URL", "OAUTH_REDIRECT_URL"):
+        for source in (os.getenv(key), _optional_secret(key)):
+            if not source or not str(source).strip():
+                continue
+            normalized = _normalize_app_url(str(source).strip())
+            if normalized and not _is_localhost_url(normalized):
+                _resolved_app_url = normalized
+                return normalized
+
+    _resolved_app_url = DEFAULT_APP_URL
+    return _resolved_app_url
+
+
+def _optional_secret(name: str) -> str | None:
+    try:
+        value = st.secrets[name]
+    except (KeyError, TypeError):
+        return None
+    if value is None or not str(value).strip():
+        return None
+    return str(value).strip()
+
+
+def replace_legacy_app_urls(text: str, *, app_url: str | None = None) -> tuple[str, bool]:
+    """Swap retired Streamlit Cloud origins for the current app URL."""
+    current = app_url or resolve_app_url()
+    changed = False
+    updated = text
+    for legacy in LEGACY_APP_URLS:
+        if legacy == current or legacy not in updated:
+            continue
+        updated = updated.replace(legacy, current)
+        changed = True
+    return updated, changed
 
 
 def _require_secret(*names: str) -> str:
@@ -246,7 +296,7 @@ def resolve_property_share_url(row: dict[str, Any]) -> str | None:
     return create_headless_property_share_url(
         property_id,
         row,
-        app_base_url=APP_URL,
+        app_base_url=resolve_app_url(),
         include_assumptions=False,
         expires_days=90,
     )
@@ -258,6 +308,7 @@ def _agent2_draft_email_prompt(
     *,
     closing: str,
     share_url: str | None,
+    app_url: str,
 ) -> str:
     address = str(row.get("address") or "").strip()
     tag = str(row.get("strategy_tag") or row.get("property_label") or "").strip()
@@ -289,8 +340,8 @@ Voice rules:
 - Reference their specific listing naturally (you saw it online / came across their listing).
 - Mention you built a small analysis tool and are attaching a PDF report you prepared.
 - Include this property-specific share link once in the body (so they can open the live analysis):
-  {share_url or APP_URL}
-- You may also mention the main app: {APP_URL}
+  {share_url or app_url}
+- You may also mention the main app: {app_url}
 - Do NOT use bullet points or markdown.
 - Do NOT say "I hope this email finds you well" or other cliché openers.
 
@@ -298,7 +349,7 @@ Sign-off MUST end exactly like this (keep line breaks):
 {closing},
 [student first name if OUTREACH_SENDER_FIRST_NAME is unknown use a natural single name like "Jordan"]
 {SIGNATURE_LINE}
-{APP_URL}
+{app_url}
 
 Return ONLY JSON:
 {{
@@ -341,10 +392,13 @@ def run_agent2_draft_email(
     model: str,
     closing: str,
     share_url: str | None,
+    app_url: str,
 ) -> dict[str, str]:
     raw = generate_with_retry(
         model,
-        _agent2_draft_email_prompt(row, agent, closing=closing, share_url=share_url),
+        _agent2_draft_email_prompt(
+            row, agent, closing=closing, share_url=share_url, app_url=app_url
+        ),
         use_search=False,
     )
     parsed = _extract_json(raw)
@@ -362,20 +416,22 @@ def _ensure_signature(
     closing: str,
     *,
     share_url: str | None = None,
+    app_url: str | None = None,
 ) -> str:
     """Ensure share link, app link, and Shaker HS line appear even if the model omitted them."""
-    text = body.rstrip()
+    current_app_url = app_url or resolve_app_url()
+    text, _ = replace_legacy_app_urls(body.rstrip(), app_url=current_app_url)
     if share_url and share_url not in text:
         text += f"\n\nFull analysis for this listing: {share_url}"
-    if APP_URL not in text:
-        text += f"\n{APP_URL}"
+    if current_app_url not in text:
+        text += f"\n{current_app_url}"
     if SIGNATURE_LINE not in text:
         text += f"\n{SIGNATURE_LINE}"
     if not any(text.endswith(closer) or f"\n{closer}," in text for closer in CLOSING_LINES):
         text += f"\n\n{closing},\n{SIGNATURE_LINE}"
         if share_url:
             text += f"\n{share_url}"
-        text += f"\n{APP_URL}"
+        text += f"\n{current_app_url}"
     return text
 
 
@@ -534,9 +590,9 @@ def get_gmail_service():
             creds.refresh(Request())
         else:
             print(
-                "\nGmail sign-in required — a browser will open on http://localhost:8080\n"
+                "\nGmail sign-in required - a browser will open on http://localhost:8080\n"
                 "Sign in with the Gmail account where you want DRAFTS saved.\n"
-                "(Drafts appear under Gmail → Drafts, not the Inbox.)\n"
+                "(Drafts appear under Gmail -> Drafts, not the Inbox.)\n"
             )
             flow = InstalledAppFlow.from_client_config(build_google_client_config(), GMAIL_SCOPES)
             creds = flow.run_local_server(port=8080, open_browser=True)
@@ -572,6 +628,129 @@ def create_gmail_draft_with_attachment(
         .execute()
     )
     return str(draft.get("id") or "")
+
+
+def _replace_urls_in_message(message: Message, *, app_url: str) -> bool:
+    """Replace legacy app URLs in a draft MIME message (plain-text parts only)."""
+    changed = False
+    if message.is_multipart():
+        for part in message.walk():
+            if part.get_content_type() != "text/plain":
+                continue
+            payload = part.get_payload(decode=True)
+            if payload is None:
+                continue
+            charset = part.get_content_charset() or "utf-8"
+            text = payload.decode(charset, errors="replace")
+            updated, part_changed = replace_legacy_app_urls(text, app_url=app_url)
+            if not part_changed:
+                continue
+            part.set_payload(updated, charset=charset)
+            changed = True
+        return changed
+
+    payload = message.get_payload(decode=True)
+    if payload is None:
+        return False
+    charset = message.get_content_charset() or "utf-8"
+    text = payload.decode(charset, errors="replace")
+    updated, changed = replace_legacy_app_urls(text, app_url=app_url)
+    if changed:
+        message.set_payload(updated, charset=charset)
+    return changed
+
+
+def fix_gmail_draft_urls(
+    gmail_service: Any,
+    *,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Scan Gmail drafts and replace retired app URLs with the current production URL."""
+    app_url = resolve_app_url()
+    report: dict[str, Any] = {
+        "app_url": app_url,
+        "scanned": 0,
+        "updated": [],
+        "skipped": [],
+        "errors": [],
+    }
+    page_token: str | None = None
+
+    while True:
+        list_kwargs: dict[str, Any] = {"userId": "me", "maxResults": 100}
+        if page_token:
+            list_kwargs["pageToken"] = page_token
+        response = gmail_service.users().drafts().list(**list_kwargs).execute()
+        drafts = response.get("drafts") or []
+
+        for item in drafts:
+            draft_id = str(item.get("id") or "")
+            if not draft_id:
+                continue
+            report["scanned"] += 1
+            try:
+                full = (
+                    gmail_service.users()
+                    .drafts()
+                    .get(userId="me", id=draft_id, format="raw")
+                    .execute()
+                )
+                raw_b64 = full.get("message", {}).get("raw")
+                if not raw_b64:
+                    report["skipped"].append({"id": draft_id, "reason": "missing_raw"})
+                    continue
+
+                message = message_from_bytes(base64.urlsafe_b64decode(raw_b64))
+                if not _replace_urls_in_message(message, app_url=app_url):
+                    report["skipped"].append({"id": draft_id, "reason": "no_legacy_url"})
+                    continue
+
+                subject = str(message.get("Subject") or "(no subject)")
+                entry = {"id": draft_id, "subject": subject}
+                if dry_run:
+                    entry["dry_run"] = True
+                    report["updated"].append(entry)
+                    continue
+
+                new_raw = base64.urlsafe_b64encode(message.as_bytes()).decode("utf-8")
+                gmail_service.users().drafts().update(
+                    userId="me",
+                    id=draft_id,
+                    body={"message": {"raw": new_raw}},
+                ).execute()
+                report["updated"].append(entry)
+            except HttpError as exc:
+                report["errors"].append({"id": draft_id, "error": str(exc)})
+            except Exception as exc:
+                report["errors"].append({"id": draft_id, "error": str(exc)})
+
+        page_token = response.get("nextPageToken")
+        if not page_token:
+            break
+
+    return report
+
+
+def run_fix_draft_urls(*, dry_run: bool = False) -> dict[str, Any]:
+    _bootstrap_streamlit_secrets()
+    resolve_app_url(force_refresh=True)
+    gmail_service = get_gmail_service()
+    report = fix_gmail_draft_urls(gmail_service, dry_run=dry_run)
+    updated = len(report["updated"])
+    skipped = len(report["skipped"])
+    errors = len(report["errors"])
+    mode = "DRY-RUN - no drafts modified" if dry_run else "updated"
+    print(
+        f"\nDraft URL fix - app URL: {report['app_url']}\n"
+        f"  scanned: {report['scanned']}, {mode}: {updated}, "
+        f"skipped: {skipped}, errors: {errors}"
+    )
+    for entry in report["updated"]:
+        suffix = " (dry-run)" if entry.get("dry_run") else ""
+        print(f"  OK {entry.get('subject')} [{entry.get('id')}]{suffix}")
+    for entry in report["errors"]:
+        print(f"  FAIL draft {entry.get('id')}: {entry.get('error')}", file=sys.stderr)
+    return report
 
 
 def _valid_agent_email(email: str) -> bool:
@@ -685,14 +864,18 @@ def process_property(
         )
 
     print(f"  Agent 2 ({agent2_model}): drafting email...")
+    app_url = resolve_app_url()
     draft = run_agent2_draft_email(
         row,
         agent,
         model=agent2_model,
         closing=closing,
         share_url=share_url,
+        app_url=app_url,
     )
-    body = _ensure_signature(draft["body"], closing, share_url=share_url)
+    body = _ensure_signature(
+        draft["body"], closing, share_url=share_url, app_url=app_url
+    )
     result["subject"] = draft["subject"]
     result["body_preview"] = body[:200] + ("..." if len(body) > 200 else "")
 
@@ -747,6 +930,7 @@ def run_pipeline(
     agent2_model: str = AGENT2_MODEL,
 ) -> dict[str, Any]:
     _bootstrap_streamlit_secrets()
+    resolve_app_url(force_refresh=True)
     _require_secret("GEMINI_API_KEY")
 
     supabase = get_supabase_client()
@@ -836,7 +1020,16 @@ def main() -> int:
     )
     parser.add_argument("--model-agent1", default=AGENT1_MODEL, help="Listing agent lookup model.")
     parser.add_argument("--model-agent2", default=AGENT2_MODEL, help="Email drafting model.")
+    parser.add_argument(
+        "--fix-draft-urls",
+        action="store_true",
+        help="Replace legacy app URLs in existing Gmail drafts (use with --dry-run to preview).",
+    )
     args = parser.parse_args()
+
+    if args.fix_draft_urls:
+        report = run_fix_draft_urls(dry_run=args.dry_run)
+        return 1 if report["errors"] else 0
 
     report = run_pipeline(
         dry_run=args.dry_run,

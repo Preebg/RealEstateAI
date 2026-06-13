@@ -2026,11 +2026,11 @@ class TestOAuthRedirectUrl(unittest.TestCase):
             ):
                 with patch(
                     "authenticate._origin_from_request_headers",
-                    return_value="https://q-scout.streamlit.app",
+                    return_value="https://capeigen.streamlit.app",
                 ):
                     from authenticate import _current_app_url
 
-                    self.assertEqual(_current_app_url(), "https://q-scout.streamlit.app")
+                    self.assertEqual(_current_app_url(), "https://capeigen.streamlit.app")
 
     def test_prefers_live_app_url_over_localhost_secret(self):
         from unittest.mock import patch
@@ -3056,6 +3056,71 @@ class TestSecurityHardening(unittest.TestCase):
         self.assertFalse(authenticate._is_trusted_app_host("evil.example.com"))
         self.assertTrue(authenticate._is_trusted_app_host("localhost"))
         self.assertTrue(authenticate._is_trusted_app_host("my-app.streamlit.app"))
+
+
+class TestOutreachAppUrls(unittest.TestCase):
+    def test_replace_legacy_app_urls(self):
+        from targeted_outreach_pipeline import (
+            DEFAULT_APP_URL,
+            replace_legacy_app_urls,
+        )
+
+        body = (
+            "See the analysis at https://realestateanalyzer.streamlit.app?share=abc123\n"
+            "https://realestateanalyzer.streamlit.app"
+        )
+        updated, changed = replace_legacy_app_urls(body, app_url=DEFAULT_APP_URL)
+        self.assertTrue(changed)
+        self.assertNotIn("realestateanalyzer", updated)
+        self.assertIn(DEFAULT_APP_URL, updated)
+        self.assertIn(f"{DEFAULT_APP_URL}?share=abc123", updated)
+
+    def test_replace_legacy_app_urls_noop_when_current(self):
+        from targeted_outreach_pipeline import DEFAULT_APP_URL, replace_legacy_app_urls
+
+        body = f"Open {DEFAULT_APP_URL}?share=token"
+        updated, changed = replace_legacy_app_urls(body, app_url=DEFAULT_APP_URL)
+        self.assertFalse(changed)
+        self.assertEqual(updated, body)
+
+    def test_ensure_signature_uses_current_app_url(self):
+        from targeted_outreach_pipeline import DEFAULT_APP_URL, _ensure_signature
+
+        body = "Hi — see https://realestateanalyzer.streamlit.app"
+        signed = _ensure_signature(
+            body,
+            "Best regards",
+            app_url=DEFAULT_APP_URL,
+        )
+        self.assertNotIn("realestateanalyzer", signed)
+        self.assertIn(DEFAULT_APP_URL, signed)
+
+    def test_replace_urls_in_multipart_draft(self):
+        from email.mime.application import MIMEApplication
+        from email.mime.multipart import MIMEMultipart
+        from email.mime.text import MIMEText
+
+        from targeted_outreach_pipeline import (
+            DEFAULT_APP_URL,
+            _replace_urls_in_message,
+        )
+
+        message = MIMEMultipart()
+        message["Subject"] = "Listing analysis"
+        message.attach(
+            MIMEText(
+                "Full report: https://realestateanalyzer.streamlit.app?share=xyz",
+                "plain",
+                "utf-8",
+            )
+        )
+        message.attach(MIMEApplication(b"%PDF", _subtype="pdf"))
+        changed = _replace_urls_in_message(message, app_url=DEFAULT_APP_URL)
+        self.assertTrue(changed)
+        plain_part = message.get_payload()[0]
+        payload = plain_part.get_payload(decode=True).decode("utf-8")
+        self.assertIn(DEFAULT_APP_URL, payload)
+        self.assertNotIn("realestateanalyzer", payload)
 
 
 if __name__ == "__main__":

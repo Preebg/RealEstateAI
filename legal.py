@@ -1,10 +1,11 @@
-"""Terms of Service and Privacy Policy content for Q-Scout."""
+"""Terms of Service and Privacy Policy content for CapEigen."""
 
 from __future__ import annotations
 
 import streamlit as st
 
-APP_NAME = "Q-Scout"
+APP_NAME = "CapEigen"
+APP_TAGLINE = "AI rental underwriting with QAOA portfolio alignment."
 EFFECTIVE_DATE = "2025-06-09"
 
 LEGAL_QUERY_PARAM = "legal"
