@@ -2050,6 +2050,24 @@ class TestOAuthRedirectUrl(unittest.TestCase):
                         _get_redirect_url(), "https://my-app.streamlit.app"
                     )
 
+    def test_prefers_live_app_url_over_stale_cloud_secret(self):
+        from unittest.mock import patch
+
+        with patch("authenticate._headless_mode", return_value=False):
+            with patch(
+                "authenticate._current_app_url",
+                return_value="https://capeigen.streamlit.app",
+            ):
+                with patch(
+                    "authenticate._configured_redirect_url",
+                    return_value="https://q-scout.streamlit.app",
+                ):
+                    from authenticate import _get_redirect_url
+
+                    self.assertEqual(
+                        _get_redirect_url(), "https://capeigen.streamlit.app"
+                    )
+
     def test_uses_localhost_when_app_is_local(self):
         from unittest.mock import patch
 

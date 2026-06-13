@@ -278,6 +278,21 @@ def _get_redirect_url() -> str:
                 context_url=context_url,
             )
             return context_url
+        if (
+            context_url
+            and configured != context_url
+            and not _is_localhost_url(context_url)
+        ):
+            from urllib.parse import urlsplit
+
+            context_host = urlsplit(context_url).hostname or ""
+            if _is_trusted_app_host(context_host):
+                log.warning(
+                    "oauth_redirect_prefers_live_url",
+                    configured=configured,
+                    context_url=context_url,
+                )
+                return context_url
         return configured
 
     if context_url:
