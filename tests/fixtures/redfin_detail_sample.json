@@ -1,0 +1,33 @@
+{
+  "payload": {
+    "initialInfo": {
+      "addressSectionInfo": {
+        "streetAddress": "10 Park Ave, Rochester, NY 14607",
+        "url": "/NY/Rochester/10-Park-Ave-14607/home/12345678"
+      }
+    },
+    "aboveTheFold": {
+      "addressSectionInfo": {
+        "price": {"value": 210000},
+        "status": {"value": "Active"},
+        "timeOnRedfin": {"value": 12},
+        "listingViewCount": {"value": 87},
+        "propertyType": {"value": "Single Family"},
+        "sqFt": {"value": 1450},
+        "yearBuilt": {"value": 1968},
+        "hoaDues": {"value": 0},
+        "latLong": {"value": {"latitude": 43.15, "longitude": -77.61}},
+        "mediaBrowserInfo": {
+          "photos": [
+            {"photoUrl": "https://ssl.cdn-redfin.com/photo/1.jpg"},
+            {"photoUrl": "https://ssl.cdn-redfin.com/photo/2.jpg"}
+          ]
+        }
+      }
+    },
+    "belowTheFold": {
+      "publicRemarks": "Turnkey rental rents for $1,850/mo with long-term tenant.",
+      "taxAnnualAmount": {"value": 4200}
+    }
+  }
+}

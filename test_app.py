@@ -1823,15 +1823,16 @@ class TestResolveCanonicalPropertyId(unittest.TestCase):
             "rent": 1500,
         }
 
-        with patch(
-            "knowledge_base.save_canonical_property",
-            return_value=MagicMock(data=[{"id": fresh_id}]),
-        ):
+        with patch("knowledge_base.get_admin_uid", return_value=None):
             with patch(
-                "knowledge_base.save_user_property_override",
-                return_value=MagicMock(),
-            ) as mock_override:
-                save_knowledge_base(property_data, user_id=user_id)
+                "knowledge_base.save_canonical_property",
+                return_value=MagicMock(data=[{"id": fresh_id}]),
+            ):
+                with patch(
+                    "knowledge_base.save_user_property_override",
+                    return_value=MagicMock(),
+                ) as mock_override:
+                    save_knowledge_base(property_data, user_id=user_id)
 
         mock_override.assert_called_once()
         self.assertEqual(mock_override.call_args.args[1], fresh_id)
@@ -3296,60 +3297,36 @@ class TestOutreachAppUrls(unittest.TestCase):
 
 
 class TestDiscoveryScraper(unittest.TestCase):
-    _GIS_FIXTURE = {
-        "homes": [
-            {
-                "propertyId": 12345678,
-                "url": "/NY/Rochester/10-Park-Ave-14607/home/12345678",
-                "streetLine": {"value": "10 Park Ave"},
-                "city": "Rochester",
-                "state": "NY",
-                "zip": "14607",
-                "price": {"value": 210000},
-                "photos": {"value": "https://ssl.cdn-redfin.com/photo/1.jpg"},
-            }
-        ]
-    }
+    _FIXTURES_DIR = Path(__file__).resolve().parent / "tests" / "fixtures"
 
-    _DETAIL_FIXTURE = {
-        "payload": {
-            "initialInfo": {
-                "addressSectionInfo": {
-                    "streetAddress": "10 Park Ave, Rochester, NY 14607",
-                    "url": "/NY/Rochester/10-Park-Ave-14607/home/12345678",
-                }
-            },
-            "aboveTheFold": {
-                "addressSectionInfo": {
-                    "price": {"value": 210000},
-                    "status": {"value": "Active"},
-                    "timeOnRedfin": {"value": 12},
-                    "listingViewCount": {"value": 87},
-                    "propertyType": {"value": "Single Family"},
-                    "sqFt": {"value": 1450},
-                    "yearBuilt": {"value": 1968},
-                    "hoaDues": {"value": 0},
-                    "latLong": {"value": {"latitude": 43.15, "longitude": -77.61}},
-                    "mediaBrowserInfo": {
-                        "photos": [
-                            {"photoUrl": "https://ssl.cdn-redfin.com/photo/1.jpg"},
-                            {"photoUrl": "https://ssl.cdn-redfin.com/photo/2.jpg"},
-                        ]
-                    },
-                }
-            },
-            "belowTheFold": {
-                "publicRemarks": "Turnkey rental rents for $1,850/mo with long-term tenant.",
-                "taxAnnualAmount": {"value": 4200},
-            },
-        }
-    }
+    @classmethod
+    def _load_json_fixture(cls, name: str) -> dict:
+        return json.loads((cls._FIXTURES_DIR / name).read_text(encoding="utf-8"))
+
+    @classmethod
+    def _load_text_fixture(cls, name: str) -> str:
+        return (cls._FIXTURES_DIR / name).read_text(encoding="utf-8")
+
+    @classmethod
+    def _sample_seed(cls):
+        from discovery.models import ListingSeed
+
+        return ListingSeed(
+            address="10 Park Ave, Rochester, NY 14607",
+            city="Rochester",
+            list_price=210000,
+            listing_url="https://www.redfin.com/NY/Rochester/10-Park-Ave-14607/home/12345678",
+            source="redfin",
+            external_id="12345678",
+            thumbnail_url="https://ssl.cdn-redfin.com/photo/1.jpg",
+        )
 
     def test_parse_redfin_gis_seed(self):
         from discovery.parsers.redfin_gis import parse_redfin_gis_payload
 
+        gis_fixture = self._load_json_fixture("redfin_gis_sample.json")
         seeds = parse_redfin_gis_payload(
-            self._GIS_FIXTURE,
+            gis_fixture,
             market_city="Rochester",
             max_price=250_000,
         )
@@ -3360,27 +3337,35 @@ class TestDiscoveryScraper(unittest.TestCase):
         self.assertIn("redfin.com", seed.listing_url)
         self.assertEqual(seed.list_price, 210000.0)
 
-    def test_parse_redfin_detail_payload(self):
-        from discovery.models import ListingSeed
+    def test_redfin_detail_parser_extracts_images_status_dom(self):
         from discovery.parsers.redfin_detail import parse_redfin_detail_payload
 
-        seed = ListingSeed(
-            address="10 Park Ave, Rochester, NY 14607",
-            city="Rochester",
-            list_price=210000,
-            listing_url="https://www.redfin.com/NY/Rochester/10-Park-Ave-14607/home/12345678",
-            source="redfin",
-            external_id="12345678",
-        )
-        scraped = parse_redfin_detail_payload(self._DETAIL_FIXTURE, seed=seed)
+        detail_fixture = self._load_json_fixture("redfin_detail_sample.json")
+        scraped = parse_redfin_detail_payload(detail_fixture, seed=self._sample_seed())
         self.assertEqual(scraped.listing_status, "For Sale")
         self.assertEqual(scraped.days_on_market, 12)
-        self.assertEqual(scraped.view_count, 87)
         self.assertEqual(len(scraped.image_urls), 2)
-        self.assertEqual(scraped.stated_gross_monthly_rent, 1850.0)
+        self.assertEqual(scraped.primary_image_url, "https://ssl.cdn-redfin.com/photo/1.jpg")
         self.assertIn("Turnkey rental", scraped.listing_description)
+        self.assertEqual(scraped.stated_gross_monthly_rent, 1850.0)
 
-    def test_scraped_to_research_dict_shape(self):
+        html_fixture = self._load_text_fixture("redfin_detail_sample.html")
+        html_scraped = parse_redfin_detail_payload({}, seed=self._sample_seed(), html=html_fixture)
+        self.assertEqual(html_scraped.listing_status, "Pending")
+        self.assertIn("updated kitchen", html_scraped.listing_description)
+        self.assertEqual(len(html_scraped.image_urls), 2)
+
+    def test_view_count_optional_when_missing(self):
+        from discovery.parsers.redfin_detail import parse_redfin_detail_payload
+
+        detail_fixture = self._load_json_fixture("redfin_detail_sample.json")
+        address_info = detail_fixture["payload"]["aboveTheFold"]["addressSectionInfo"]
+        address_info.pop("listingViewCount", None)
+        scraped = parse_redfin_detail_payload(detail_fixture, seed=self._sample_seed())
+        self.assertIsNone(scraped.view_count)
+        self.assertEqual(scraped.days_on_market, 12)
+
+    def test_scraped_to_research_dict_maps_all_fields(self):
         from discovery.models import ScrapedListing
         from discovery.normalize import scraped_to_research_dict
 
@@ -3410,13 +3395,91 @@ class TestDiscoveryScraper(unittest.TestCase):
             scraped_at="2026-06-13T12:00:00+00:00",
         )
         research = scraped_to_research_dict(scraped, market_city="Rochester")
+        self.assertEqual(research["address"], scraped.address)
+        self.assertEqual(research["listing_status"], scraped.listing_status)
         self.assertEqual(research["price"], 210000.0)
         self.assertEqual(research["taxes"], 4200.0)
+        self.assertEqual(research["hoa"], 0.0)
+        self.assertEqual(research["year_built"], scraped.year_built)
+        self.assertEqual(research["square_footage"], scraped.square_footage)
+        self.assertEqual(research["property_condition"], scraped.property_condition)
+        self.assertEqual(research["property_type"], scraped.property_type)
+        self.assertEqual(research["stated_gross_monthly_rent"], scraped.stated_gross_monthly_rent)
+        self.assertEqual(research["listing_rent_notes"], scraped.listing_rent_notes)
+        self.assertEqual(research["listing_description"], scraped.listing_description)
+        self.assertEqual(research["days_on_market"], scraped.days_on_market)
+        self.assertEqual(research["view_count"], scraped.view_count)
+        self.assertEqual(research["primary_image_url"], scraped.primary_image_url)
+        self.assertEqual(research["image_urls"], list(scraped.image_urls))
+        self.assertEqual(research["listing_url"], scraped.listing_url)
+        self.assertEqual(research["latitude"], scraped.latitude)
+        self.assertEqual(research["longitude"], scraped.longitude)
         self.assertEqual(research["discovery_model"], "scraper")
         self.assertEqual(research["vacancy_rate"], 6.0)
         self.assertEqual(research["management_fee"], 10.0)
-        self.assertEqual(research["primary_image_url"], scraped.primary_image_url)
-        self.assertEqual(research["listing_description"], scraped.listing_description)
+        self.assertEqual(research["insurance_monthly_default"], 95.0)
+        self.assertEqual(research["source"], scraped.source)
+        self.assertEqual(research["external_id"], scraped.external_id)
+
+    def test_inactive_status_skips_harvest(self):
+        from discovery.models import ScrapedListing
+        from discovery.normalize import scraped_to_research_dict
+
+        for inactive_status in ("Sold", "Pending"):
+            with self.subTest(status=inactive_status):
+                scraped = ScrapedListing(
+                    address="10 Park Ave, Rochester, NY 14607",
+                    city="Rochester",
+                    list_price=210000,
+                    listing_url="https://www.redfin.com/NY/Rochester/10-Park-Ave-14607/home/12345678",
+                    source="redfin",
+                    external_id="12345678",
+                    listing_status=inactive_status,
+                    days_on_market=12,
+                    view_count=87,
+                    listing_description="Previously listed rental.",
+                    primary_image_url="https://ssl.cdn-redfin.com/photo/1.jpg",
+                    image_urls=("https://ssl.cdn-redfin.com/photo/1.jpg",),
+                    taxes_annual=4200.0,
+                    hoa_monthly=0.0,
+                    year_built=1968,
+                    square_footage=1450,
+                    property_type="Single Family",
+                    latitude=43.15,
+                    longitude=-77.61,
+                    stated_gross_monthly_rent=0.0,
+                    listing_rent_notes="",
+                    property_condition="Good",
+                    scraped_at="2026-06-13T12:00:00+00:00",
+                )
+                research = scraped_to_research_dict(scraped, market_city="Rochester")
+                discovery = {
+                    "list_price": scraped.list_price,
+                    "listing_url": scraped.listing_url,
+                }
+                reason = research_stage_skip_reason(research, discovery)
+                self.assertIsNotNone(reason)
+                self.assertIn(inactive_status, reason or "")
+
+    def test_discovery_repository_dedupe(self):
+        from discovery.repository import SqliteDiscoveryRepository
+
+        seed = self._sample_seed()
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = SqliteDiscoveryRepository(Path(tmp) / "capigen.db")
+            first_id = repo.upsert_seed(seed)
+            second_id = repo.upsert_seed(seed)
+            self.assertEqual(first_id, second_id)
+            with repo._connect() as conn:
+                row = conn.execute(
+                    """
+                    SELECT COUNT(*) AS count
+                    FROM discovery_queue
+                    WHERE source = ? AND external_id = ?
+                    """,
+                    (seed.source, seed.external_id),
+                ).fetchone()
+            self.assertEqual(int(row["count"]), 1)
 
     def test_sqlite_repository_round_trip(self):
         from discovery.models import ListingSeed, ScrapedListing
@@ -3467,36 +3530,34 @@ class TestDiscoveryScraper(unittest.TestCase):
 
     def test_orchestrator_run_with_mocked_http(self):
         import asyncio
+        from unittest.mock import AsyncMock
 
-        from discovery.models import ListingSeed
+        import httpx
+
+        from discovery.market_defaults import REDFIN_REGION_IDS
         from discovery.orchestrator import DiscoveryOrchestrator
         from discovery.repository import SqliteDiscoveryRepository
+        from discovery.sources.redfin import RedfinListingSource
+        from discovery.transport.http_client import ScraperHttpClient
 
-        seed = ListingSeed(
-            address="10 Park Ave, Rochester, NY 14607",
-            city="Rochester",
-            list_price=210000,
-            listing_url="https://www.redfin.com/NY/Rochester/10-Park-Ave-14607/home/12345678",
-            source="redfin",
-            external_id="12345678",
-            thumbnail_url="https://ssl.cdn-redfin.com/photo/1.jpg",
-        )
+        gis_fixture = self._load_json_fixture("redfin_gis_sample.json")
+        detail_fixture = self._load_json_fixture("redfin_detail_sample.json")
+        rochester_region_id = REDFIN_REGION_IDS["Rochester"]
 
-        class FakeSource:
-            source_name = "redfin"
+        async def mock_request(method: str, url: str, **kwargs: object) -> httpx.Response:
+            url_str = str(url)
+            request = httpx.Request(method, url_str)
+            if "stingray/api/gis" in url_str:
+                if f"region_id={rochester_region_id}" in url_str:
+                    return httpx.Response(200, text=json.dumps(gis_fixture), request=request)
+                return httpx.Response(200, text=json.dumps({"homes": []}), request=request)
+            if "stingray/api/home/details/initialInfo" in url_str:
+                return httpx.Response(200, text=json.dumps(detail_fixture), request=request)
+            raise AssertionError(f"Unexpected HTTP request: {url_str}")
 
-            async def search_market(self, market_city, *, max_price, limit):
-                if market_city == "Rochester":
-                    return [seed]
-                return []
-
-            async def fetch_detail(self, listing_seed):
-                from discovery.parsers.redfin_detail import parse_redfin_detail_payload
-
-                return parse_redfin_detail_payload(
-                    TestDiscoveryScraper._DETAIL_FIXTURE,
-                    seed=listing_seed,
-                )
+        mock_httpx = AsyncMock(spec=httpx.AsyncClient)
+        mock_httpx.request = AsyncMock(side_effect=mock_request)
+        http_client = ScraperHttpClient(client=mock_httpx)
 
         with tempfile.TemporaryDirectory() as tmp:
             repo = SqliteDiscoveryRepository(Path(tmp) / "capigen.db")
@@ -3504,8 +3565,8 @@ class TestDiscoveryScraper(unittest.TestCase):
             async def _run() -> list[dict]:
                 orchestrator = DiscoveryOrchestrator(
                     repository=repo,
-                    http_client=object(),
-                    sources=[FakeSource()],
+                    http_client=http_client,
+                    sources=[RedfinListingSource(http_client)],
                 )
                 try:
                     return await orchestrator.run(
@@ -3521,8 +3582,12 @@ class TestDiscoveryScraper(unittest.TestCase):
             rochester = [item for item in listings if item.get("city") == "Rochester"]
             self.assertEqual(len(rochester), 1)
             self.assertEqual(rochester[0]["discovery_model"], "scraper")
+            self.assertEqual(rochester[0]["listing_status"], "For Sale")
+            self.assertEqual(rochester[0]["days_on_market"], 12)
+            self.assertEqual(rochester[0]["view_count"], 87)
             self.assertTrue(rochester[0].get("primary_image_url"))
-            self.assertTrue(rochester[0].get("listing_description"))
+            self.assertIn("Turnkey rental", rochester[0].get("listing_description", ""))
+            mock_httpx.request.assert_called()
 
     def test_mark_completed_and_list_enriched_includes_row_id(self):
         from discovery.models import ListingSeed, ScrapedListing
