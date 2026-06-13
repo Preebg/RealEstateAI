@@ -10,7 +10,6 @@ import re
 import threading
 import time
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import lru_cache
 from dataclasses import dataclass
 from datetime import date
@@ -42,7 +41,6 @@ from rent_comps_analysis import (
 from data_provenance import attach_data_provenance
 from knowledge_base import backfill_property_rent, get_kb_context, lookup_property
 from quantum_portfolio import (
-    ALIGNMENT_SCORE_KEYS,
     PortfolioInputs,
     score_portfolio,
 )
@@ -640,7 +638,7 @@ def _grounded_discovery_config(
         )
 
     return types.GenerateContentConfig(
-        tools=tools,
+        tools=cast(Any, tools),
         tool_config=tool_config,
         automatic_function_calling=types.AutomaticFunctionCallingConfig(
             maximum_remote_calls=max_remote_calls,

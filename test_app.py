@@ -1,9 +1,11 @@
 import json
-import logging
 import math
 import os
 import tempfile
 import unittest
+import gc
+import shutil
+from contextlib import contextmanager
 from datetime import date
 from pathlib import Path
 from unittest.mock import patch
@@ -27,21 +29,18 @@ def _discovery_generate_return(payload: str) -> tuple[str, list[str]]:
 # Mock streamlit before importing engine to avoid secrets errors
 with patch("streamlit.secrets", {"GEMINI_API_KEY": "fake_key"}):
     from engine import (
-        ALIGNMENT_SCORE_KEYS,
         calculate_quantum_probability,
         calculate_quantum_risk,
         clear_quantum_risk_cache,
     )
     from engine import (
         DISCOVERY_FALLBACK_MODEL,
-        DISCOVERY_FALLBACK_MODELS,
         DISCOVERY_MODEL,
         DISCOVERY_MODEL_CHAIN,
         RESEARCH_MODEL,
         discover_hot_market_listings,
         DEFAULT_MODEL_RPM,
         SharedModelRateLimiter,
-        acquire_model_rpm,
         is_daily_quota_exhausted,
         model_rpm_limit,
         research_property,
@@ -64,9 +63,7 @@ with patch("streamlit.secrets", {"GEMINI_API_KEY": "fake_key"}):
         monte_carlo_appreciation_forecast,
         resolve_metro_base_rate,
     )
-    from google.genai import errors
-
-from qiskit_aer import AerSimulator
+    from quantum_portfolio import ALIGNMENT_SCORE_KEYS
 
 QUANTUM_RISK_KEYS = ALIGNMENT_SCORE_KEYS
 
@@ -338,6 +335,8 @@ class TestAIUnderwriterEngine(unittest.TestCase):
 
     def test_quantum_simulator_uses_fixed_seed(self):
         """Every AerSimulator.run in the QAOA path must pass seed_simulator=42."""
+        from qiskit_aer import AerSimulator
+
         clear_quantum_risk_cache()
         seeds: list[int | None] = []
         original_run = AerSimulator.run
@@ -1506,7 +1505,7 @@ class TestUnreliableForeclosureROI(unittest.TestCase):
         mock_table.upsert.assert_not_called()
 
     def test_save_canonical_unreliable_does_not_delete_existing(self):
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import patch
 
         from knowledge_base import save_canonical_property
 
@@ -1765,7 +1764,7 @@ class TestScannedAddressDetection(unittest.TestCase):
 
 class TestResolveCanonicalPropertyId(unittest.TestCase):
     def test_prefers_valid_property_id_over_stale_cache(self):
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import patch
 
         from knowledge_base import resolve_canonical_property_id
 
@@ -1816,23 +1815,24 @@ class TestResolveCanonicalPropertyId(unittest.TestCase):
 
         user_id = "7f35bc1e-9de5-484d-8f73-27fd3da733eb"
         fresh_id = "b2c3d4e5-f6a7-8901-bcde-f12345678901"
-        stale_id = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
         property_data = {
             "address": "10 Park Ave, Rochester, NY 14609",
             "price": 200000,
             "rent": 1500,
         }
 
-        with patch("knowledge_base.get_admin_uid", return_value=None):
-            with patch(
+        with (
+            patch("knowledge_base.get_admin_uid", return_value=user_id),
+            patch(
                 "knowledge_base.save_canonical_property",
                 return_value=MagicMock(data=[{"id": fresh_id}]),
-            ):
-                with patch(
-                    "knowledge_base.save_user_property_override",
-                    return_value=MagicMock(),
-                ) as mock_override:
-                    save_knowledge_base(property_data, user_id=user_id)
+            ),
+            patch(
+                "knowledge_base.save_user_property_override",
+                return_value=MagicMock(),
+            ) as mock_override,
+        ):
+            save_knowledge_base(property_data, user_id=user_id)
 
         mock_override.assert_called_once()
         self.assertEqual(mock_override.call_args.args[1], fresh_id)
@@ -2030,7 +2030,7 @@ class TestUserSavedProperties(unittest.TestCase):
             self.assertFalse(is_property_saved_for_user(user_id, None))
 
     def test_save_property_blocked_at_max_limit(self):
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import patch
 
         from knowledge_base import MAX_SAVED_PROPERTIES, save_property_to_user_account
 
@@ -3375,6 +3375,17 @@ class TestDiscoveryScraper(unittest.TestCase):
             thumbnail_url="https://ssl.cdn-redfin.com/photo/1.jpg",
         )
 
+    @contextmanager
+    def _sqlite_repo(self):
+        from discovery.repository import SqliteDiscoveryRepository
+
+        tmp = tempfile.mkdtemp()
+        try:
+            yield SqliteDiscoveryRepository(Path(tmp) / "capigen.db")
+        finally:
+            gc.collect()
+            shutil.rmtree(tmp, ignore_errors=True)
+
     def test_parse_redfin_gis_seed(self):
         from discovery.parsers.redfin_gis import parse_redfin_gis_payload
 
@@ -3516,11 +3527,8 @@ class TestDiscoveryScraper(unittest.TestCase):
                 self.assertIn(inactive_status, reason or "")
 
     def test_discovery_repository_dedupe(self):
-        from discovery.repository import SqliteDiscoveryRepository
-
         seed = self._sample_seed()
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = SqliteDiscoveryRepository(Path(tmp) / "capigen.db")
+        with self._sqlite_repo() as repo:
             first_id = repo.upsert_seed(seed)
             second_id = repo.upsert_seed(seed)
             self.assertEqual(first_id, second_id)
@@ -3537,10 +3545,8 @@ class TestDiscoveryScraper(unittest.TestCase):
 
     def test_sqlite_repository_round_trip(self):
         from discovery.models import ListingSeed, ScrapedListing
-        from discovery.repository import SqliteDiscoveryRepository
 
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = SqliteDiscoveryRepository(Path(tmp) / "capigen.db")
+        with self._sqlite_repo() as repo:
             seed = ListingSeed(
                 address="10 Park Ave, Rochester, NY 14607",
                 city="Rochester",
@@ -3590,7 +3596,6 @@ class TestDiscoveryScraper(unittest.TestCase):
 
         from discovery.market_defaults import REDFIN_REGION_IDS
         from discovery.orchestrator import DiscoveryOrchestrator
-        from discovery.repository import SqliteDiscoveryRepository
         from discovery.sources.redfin import RedfinListingSource
         from discovery.transport.http_client import ScraperHttpClient
 
@@ -3613,8 +3618,7 @@ class TestDiscoveryScraper(unittest.TestCase):
         mock_httpx.request = AsyncMock(side_effect=mock_request)
         http_client = ScraperHttpClient(client=mock_httpx)
 
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = SqliteDiscoveryRepository(Path(tmp) / "capigen.db")
+        with self._sqlite_repo() as repo:
 
             async def _run() -> list[dict]:
                 orchestrator = DiscoveryOrchestrator(
@@ -3645,10 +3649,8 @@ class TestDiscoveryScraper(unittest.TestCase):
 
     def test_mark_completed_and_list_enriched_includes_row_id(self):
         from discovery.models import ListingSeed, ScrapedListing
-        from discovery.repository import SqliteDiscoveryRepository
 
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = SqliteDiscoveryRepository(Path(tmp) / "capigen.db")
+        with self._sqlite_repo() as repo:
             seed = ListingSeed(
                 address="10 Park Ave, Rochester, NY 14607",
                 city="Rochester",
@@ -3695,11 +3697,9 @@ class TestDiscoveryScraper(unittest.TestCase):
 
         from discovery.models import ListingSeed, ScrapedListing
         from discovery.orchestrator import dequeue_enriched_listings_async
-        from discovery.repository import SqliteDiscoveryRepository
 
-        with tempfile.TemporaryDirectory() as tmp:
-            db_path = Path(tmp) / "capigen.db"
-            repo = SqliteDiscoveryRepository(db_path)
+        with self._sqlite_repo() as repo:
+            db_path = repo._db_path
             seed = ListingSeed(
                 address="10 Park Ave, Rochester, NY 14607",
                 city="Rochester",

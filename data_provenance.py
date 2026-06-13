@@ -167,7 +167,7 @@ def compute_field_confidence(
     scores["predicted_value"] = _clamp_confidence(pred_conf)
 
     loc_conf = FIELD_BASE_CONFIDENCE["location_score"]
-    if location_score := _safe_float(property_data.get("location_score")):
+    if _safe_float(property_data.get("location_score")):
         loc_conf = min(loc_conf + 0.08, 0.70)
         if property_data.get("market_city"):
             loc_conf = min(loc_conf + 0.12, 0.82)

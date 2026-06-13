@@ -13,7 +13,6 @@ from components.property_analysis_display import render_individual_search_analys
 from components.property_assumptions_sidebar import (
     render_assumption_sliders,
     render_closing_costs_caption,
-    render_hitl_save_section,
 )
 from data_provenance import ensure_data_provenance
 from engine import backfill_year_built_if_needed, safe_float
@@ -34,6 +33,7 @@ from services.property_analysis_flow import (
     run_finance_analysis,
     run_initial_property_analysis,
 )
+from share_access import is_guest_viewer, render_guest_sidebar
 from ui_theme import render_callout_info, render_flow_steps, render_page_hero
 
 
@@ -50,8 +50,6 @@ def _load_property_from_kb(address: str) -> dict[str, Any] | None:
 
 if not render_auth_page():
     st.stop()
-
-from share_access import is_guest_viewer, render_guest_sidebar
 
 _guest_mode = is_guest_viewer()
 
