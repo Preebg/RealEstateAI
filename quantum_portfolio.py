@@ -13,9 +13,9 @@ import logging
 from dataclasses import dataclass
 from typing import Final
 
-from qiskit import QuantumCircuit, transpile
-from qiskit_aer import AerSimulator
-from scipy.optimize import minimize
+from qiskit import QuantumCircuit, transpile  # type: ignore[import-untyped]
+from qiskit_aer import AerSimulator  # type: ignore[import-untyped]
+from scipy.optimize import minimize  # type: ignore[import-untyped]
 
 _log = logging.getLogger(__name__)
 

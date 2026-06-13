@@ -1,5 +1,4 @@
 import json
-import logging
 import math
 import os
 import tempfile
@@ -27,21 +26,18 @@ def _discovery_generate_return(payload: str) -> tuple[str, list[str]]:
 # Mock streamlit before importing engine to avoid secrets errors
 with patch("streamlit.secrets", {"GEMINI_API_KEY": "fake_key"}):
     from engine import (
-        ALIGNMENT_SCORE_KEYS,
         calculate_quantum_probability,
         calculate_quantum_risk,
         clear_quantum_risk_cache,
     )
     from engine import (
         DISCOVERY_FALLBACK_MODEL,
-        DISCOVERY_FALLBACK_MODELS,
         DISCOVERY_MODEL,
         DISCOVERY_MODEL_CHAIN,
         RESEARCH_MODEL,
         discover_hot_market_listings,
         DEFAULT_MODEL_RPM,
         SharedModelRateLimiter,
-        acquire_model_rpm,
         is_daily_quota_exhausted,
         model_rpm_limit,
         research_property,
@@ -64,9 +60,7 @@ with patch("streamlit.secrets", {"GEMINI_API_KEY": "fake_key"}):
         monte_carlo_appreciation_forecast,
         resolve_metro_base_rate,
     )
-    from google.genai import errors
-
-from qiskit_aer import AerSimulator
+    from quantum_portfolio import ALIGNMENT_SCORE_KEYS
 
 QUANTUM_RISK_KEYS = ALIGNMENT_SCORE_KEYS
 
@@ -338,6 +332,8 @@ class TestAIUnderwriterEngine(unittest.TestCase):
 
     def test_quantum_simulator_uses_fixed_seed(self):
         """Every AerSimulator.run in the QAOA path must pass seed_simulator=42."""
+        from qiskit_aer import AerSimulator
+
         clear_quantum_risk_cache()
         seeds: list[int | None] = []
         original_run = AerSimulator.run
@@ -1506,7 +1502,7 @@ class TestUnreliableForeclosureROI(unittest.TestCase):
         mock_table.upsert.assert_not_called()
 
     def test_save_canonical_unreliable_does_not_delete_existing(self):
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import patch
 
         from knowledge_base import save_canonical_property
 
@@ -1765,7 +1761,7 @@ class TestScannedAddressDetection(unittest.TestCase):
 
 class TestResolveCanonicalPropertyId(unittest.TestCase):
     def test_prefers_valid_property_id_over_stale_cache(self):
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import patch
 
         from knowledge_base import resolve_canonical_property_id
 
@@ -1816,22 +1812,24 @@ class TestResolveCanonicalPropertyId(unittest.TestCase):
 
         user_id = "7f35bc1e-9de5-484d-8f73-27fd3da733eb"
         fresh_id = "b2c3d4e5-f6a7-8901-bcde-f12345678901"
-        stale_id = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
         property_data = {
             "address": "10 Park Ave, Rochester, NY 14609",
             "price": 200000,
             "rent": 1500,
         }
 
-        with patch(
-            "knowledge_base.save_canonical_property",
-            return_value=MagicMock(data=[{"id": fresh_id}]),
-        ):
-            with patch(
+        with (
+            patch("knowledge_base.get_admin_uid", return_value=user_id),
+            patch(
+                "knowledge_base.save_canonical_property",
+                return_value=MagicMock(data=[{"id": fresh_id}]),
+            ),
+            patch(
                 "knowledge_base.save_user_property_override",
                 return_value=MagicMock(),
-            ) as mock_override:
-                save_knowledge_base(property_data, user_id=user_id)
+            ) as mock_override,
+        ):
+            save_knowledge_base(property_data, user_id=user_id)
 
         mock_override.assert_called_once()
         self.assertEqual(mock_override.call_args.args[1], fresh_id)
@@ -2029,7 +2027,7 @@ class TestUserSavedProperties(unittest.TestCase):
             self.assertFalse(is_property_saved_for_user(user_id, None))
 
     def test_save_property_blocked_at_max_limit(self):
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import patch
 
         from knowledge_base import MAX_SAVED_PROPERTIES, save_property_to_user_account
 

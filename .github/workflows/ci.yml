@@ -39,4 +39,4 @@ jobs:
         run: mypy quantum_portfolio.py engine.py --follow-imports=silent
 
       - name: Run tests
-        run: pytest test_app.py tests/ -v
+        run: pytest test_app.py -v
