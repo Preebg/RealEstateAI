@@ -3537,6 +3537,31 @@ class TestDiscoveryScraper(unittest.TestCase):
         self.assertIn("Gorgeous turnkey rental", prompt)
         self.assertNotIn('"listing_description"', prompt)
 
+    def test_synthesis_prompt_scraper_block_with_metadata_and_rules(self):
+        from engine import _synthesis_prompt
+
+        research = {
+            "price": 210000,
+            "discovery_model": "scraper",
+            "listing_description": "Turnkey duplex with long-term tenants.",
+            "days_on_market": 45,
+            "view_count": None,
+            "listing_status": "For Sale",
+            "vacancy_rate": 6.0,
+            "management_fee": 10.0,
+        }
+        with patch("engine.get_kb_context", return_value=""):
+            prompt = _synthesis_prompt(research, "Rochester")
+        self.assertIn("LISTING DESCRIPTION (scraper", prompt)
+        self.assertIn("Turnkey duplex with long-term tenants.", prompt)
+        self.assertIn("LISTING METADATA:", prompt)
+        self.assertIn("days_on_market: 45", prompt)
+        self.assertIn("view_count: None", prompt)
+        self.assertIn("listing_status: For Sale", prompt)
+        self.assertIn("SUMMARY RULES:", prompt)
+        self.assertIn("Never paste sentences from the listing description.", prompt)
+        self.assertNotIn('"listing_description"', prompt)
+
 
 if __name__ == "__main__":
     unittest.main()
