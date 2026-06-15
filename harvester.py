@@ -14,7 +14,10 @@ from google.genai import errors
 import engine
 from app_logging import configure_logging, report_error
 from discovery.normalize import listing_dict_to_scraped, scraped_to_research_dict
-from discovery.orchestrator import dequeue_enriched_listings_async
+from discovery.orchestrator import (
+    dequeue_enriched_listings_async,
+    run_scraper_discovery_async,
+)
 from discovery.repository import DEFAULT_DB_PATH, SqliteDiscoveryRepository
 from finance import analyze_investment
 from knowledge_base import (
@@ -45,8 +48,8 @@ _active_research_model = engine.RESEARCH_MODEL
 _active_synthesis_model = engine.SYNTHESIS_MODEL
 
 def resolve_discovery_backend() -> str:
-    """Return ``gemini`` (default) or ``scraper`` from DISCOVERY_BACKEND."""
-    backend = os.getenv("DISCOVERY_BACKEND", "").strip().lower()
+    """Return ``scraper`` (default) or ``gemini`` from DISCOVERY_BACKEND."""
+    backend = os.getenv("DISCOVERY_BACKEND", "scraper").strip().lower()
     if backend in ("gemini", "scraper"):
         return backend
     legacy = os.getenv("HARVESTER_USE_SCRAPER", "").strip().lower()
@@ -54,7 +57,7 @@ def resolve_discovery_backend() -> str:
         return "scraper"
     if legacy in ("0", "false", "no", "off"):
         return "gemini"
-    return "gemini"
+    return "scraper"
 
 
 @dataclass
@@ -685,18 +688,6 @@ async def _research_and_schedule_synthesis(
 async def run_harvester_pipeline_async(admin_user_id: str) -> dict[str, Any]:
     """
     Execute the full accuracy workflow harvester once per run.
-
-    Stage 1 (Discovery): local Redfin scraper (httpx + selectolax) or Gemini fallback
-    Stage 2 (Research): scraper-enriched payload or gemma-4-31b-it + search grounding
-    Stage 2.5 (Property Value): gemma-4-26b-a4b-it classifier; gemma-4-31b-it comps when
-        strategy matches turnkey rental, cash flow, suburban core rental, buy and hold, etc.
-    Stage 3 (Geocode): gemini-2.5-flash/lite Maps + search scout
-    Stage 4 (Synthesis): gemini-3.1-flash-lite-preview -> gemini-3.5-flash -> gemma-4-26b-a4b-it
-
-    Stage 1 discovery completes before Stage 2 research begins. Up to
-    MAX_CONCURRENT_RESEARCH_AGENTS research workers run at once; each finished
-    property moves to synthesis while a free slot picks up the next listing.
-    Discovery runs one regional agent at a time, then optional top-up rounds.
     """
     global _active_discovery_model, _active_research_model, _active_synthesis_model
     discovery_backend = resolve_discovery_backend()
@@ -774,11 +765,13 @@ async def run_harvester_pipeline_async(admin_user_id: str) -> dict[str, Any]:
             admin_user_id=admin_user_id,
             exclude_addresses=scanned_addresses,
         )
+        # If the queue is empty, trigger the scraper search
+        if not listings:
+            print("[discovery] Queue empty, running scraper discovery search...")
+            listings = await run_scraper_discovery_async(enrich=True)
     else:
 
         def _run_discovery() -> list[dict[str, Any]]:
-            # discover_hot_market_listings walks DISCOVERY_MODEL_CHAIN on RPD/empty:
-            # gemini-2.5-flash -> gemini-2.5-flash-lite -> gemma-4-26b-a4b-it
             return engine.discover_hot_market_listings(
                 exclude_addresses=scanned_addresses,
             )
@@ -803,15 +796,9 @@ async def run_harvester_pipeline_async(admin_user_id: str) -> dict[str, Any]:
 
     if not listings:
         if discovery_backend == "scraper":
-            print("No enriched listings in SQLite queue. Exiting.")
-            print("Run python discovery_scraper.py --enrich-only first.")
+            print("No enriched listings in SQLite queue and search returned no new listings. Exiting.")
         else:
             print("No listings discovered. Exiting.")
-            print(
-                "Tip: 503/empty grounded responses are usually transient. "
-                "Pull latest code and rerun; discovery now retries per market "
-                "and falls back to the Gemma discovery model automatically."
-            )
         return report
 
     print(
