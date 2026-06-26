@@ -6,10 +6,11 @@ import asyncio
 from typing import Any
 
 from app_logging import configure_logging
+from discovery.merge import merge_scraped_listings, merge_seeds_by_address
 from discovery.models import ListingSeed, ScrapedListing
 from discovery.normalize import enriched_to_discovery_listing, seed_to_discovery_listing
 from discovery.repository import DEFAULT_DB_PATH, SqliteDiscoveryRepository, discovery_repository
-from discovery.sources.redfin import RedfinListingSource
+from discovery.sources.registry import build_default_sources
 from discovery.transport.http_client import ScraperHttpClient
 from knowledge_base import get_harvest_complete_addresses, normalize_address_key
 
@@ -20,7 +21,7 @@ PER_SOURCE_CONCURRENCY = 2
 
 
 class DiscoveryOrchestrator:
-    """Search HOT_MARKETS, queue seeds, and enrich pending detail rows."""
+    """Search HOT_MARKETS across portals, queue seeds, and enrich detail rows."""
 
     def __init__(
         self,
@@ -32,7 +33,7 @@ class DiscoveryOrchestrator:
         self._repo = repository or discovery_repository(persist=True)
         self._http = http_client or ScraperHttpClient()
         self._owns_http = http_client is None
-        self._sources = sources or [RedfinListingSource(self._http)]
+        self._sources = sources or build_default_sources(self._http)
         self._global_sem = asyncio.Semaphore(GLOBAL_CONCURRENCY)
         self._source_sems = {
             source.source_name: asyncio.Semaphore(PER_SOURCE_CONCURRENCY)
@@ -71,14 +72,16 @@ class DiscoveryOrchestrator:
             ]
 
         for task in tasks:
-            for seed in task.result():
-                key = normalize_address_key(seed.address)
+            for primary, alternates in task.result():
+                key = normalize_address_key(primary.address)
                 if key in excluded or key in seen_keys:
                     continue
                 seen_keys.add(key)
-                row_id = self._repo.upsert_seed(seed)
-                listing = seed_to_discovery_listing(seed)
+                row_id = self._repo.upsert_seed(primary)
+                listing = seed_to_discovery_listing(primary)
                 listing["_queue_id"] = row_id
+                if alternates:
+                    listing["_alternate_seeds"] = alternates
                 listings.append(listing)
                 if len(listings) >= MAX_DISCOVERY_LISTINGS:
                     break
@@ -90,6 +93,7 @@ class DiscoveryOrchestrator:
 
         for listing in listings:
             listing.pop("_queue_id", None)
+            listing.pop("_alternate_seeds", None)
         return listings[:MAX_DISCOVERY_LISTINGS]
 
     async def _search_one_market(
@@ -98,33 +102,60 @@ class DiscoveryOrchestrator:
         *,
         max_price: float,
         limit: int,
+    ) -> list[tuple[ListingSeed, list[ListingSeed]]]:
+        seeds: list[ListingSeed] = []
+        async with asyncio.TaskGroup() as tg:
+            tasks = [
+                tg.create_task(
+                    self._search_market_source(
+                        source,
+                        market_city,
+                        max_price=max_price,
+                        limit=limit,
+                    )
+                )
+                for source in self._sources
+            ]
+        for task in tasks:
+            seeds.extend(task.result())
+
+        merged = merge_seeds_by_address(seeds)
+        if merged:
+            sources_hit = sorted({seed.source for seed in seeds})
+            _log.info(
+                "discovery_market_search",
+                market_city=market_city,
+                sources=sources_hit,
+                raw_count=len(seeds),
+                merged_count=len(merged),
+            )
+        return merged[:limit]
+
+    async def _search_market_source(
+        self,
+        source: Any,
+        market_city: str,
+        *,
+        max_price: float,
+        limit: int,
     ) -> list[ListingSeed]:
+        source_sem = self._source_sems[source.source_name]
         async with self._global_sem:
-            for source in self._sources:
-                source_sem = self._source_sems[source.source_name]
-                async with source_sem:
-                    try:
-                        seeds = await source.search_market(
-                            market_city,
-                            max_price=max_price,
-                            limit=limit,
-                        )
-                        if seeds:
-                            _log.info(
-                                "discovery_market_search",
-                                market_city=market_city,
-                                source=source.source_name,
-                                count=len(seeds),
-                            )
-                            return seeds
-                    except Exception as exc:
-                        _log.warning(
-                            "discovery_market_search_failed",
-                            market_city=market_city,
-                            source=source.source_name,
-                            error=str(exc),
-                        )
-        return []
+            async with source_sem:
+                try:
+                    return await source.search_market(
+                        market_city,
+                        max_price=max_price,
+                        limit=limit,
+                    )
+                except Exception as exc:
+                    _log.warning(
+                        "discovery_market_search_failed",
+                        market_city=market_city,
+                        source=source.source_name,
+                        error=str(exc),
+                    )
+                    return []
 
     async def _enrich_listings(self, listings: list[dict[str, Any]]) -> None:
         async with asyncio.TaskGroup() as tg:
@@ -148,6 +179,8 @@ class DiscoveryOrchestrator:
             external_id=str(listing.get("external_id", "")),
             thumbnail_url=str(listing.get("primary_image_url", "")),
         )
+        alternate_seeds = _coerce_alternate_seeds(listing.get("_alternate_seeds"))
+
         source = self._resolve_source(seed.source)
         if source is None:
             return None
@@ -167,6 +200,26 @@ class DiscoveryOrchestrator:
                     if row_id:
                         self._repo.mark_status(row_id, "failed")
                     return None
+
+            supplemental: list[ScrapedListing] = []
+            for alt_seed in alternate_seeds:
+                alt_source = self._resolve_source(alt_seed.source)
+                if alt_source is None:
+                    continue
+                alt_sem = self._source_sems[alt_source.source_name]
+                async with alt_sem:
+                    try:
+                        supplemental.append(await alt_source.fetch_detail(alt_seed))
+                    except Exception as exc:
+                        _log.warning(
+                            "discovery_cross_source_enrich_failed",
+                            address=alt_seed.address,
+                            source=alt_seed.source,
+                            error=str(exc),
+                        )
+
+        if supplemental:
+            scraped = merge_scraped_listings(scraped, *supplemental)
 
         if row_id:
             self._repo.mark_enriched(row_id, scraped)
@@ -198,6 +251,28 @@ class DiscoveryOrchestrator:
             if scraped is not None:
                 return scraped
         return None
+
+
+def _coerce_alternate_seeds(raw: Any) -> list[ListingSeed]:
+    if not isinstance(raw, list):
+        return []
+    seeds: list[ListingSeed] = []
+    for item in raw:
+        if isinstance(item, ListingSeed):
+            seeds.append(item)
+        elif isinstance(item, dict):
+            seeds.append(
+                ListingSeed(
+                    address=str(item.get("address", "")),
+                    city=str(item.get("city", "")),
+                    list_price=float(item.get("list_price", 0.0) or 0.0),
+                    listing_url=str(item.get("listing_url", "")),
+                    source=str(item.get("source", "")),
+                    external_id=str(item.get("external_id", "")),
+                    thumbnail_url=str(item.get("thumbnail_url", "")),
+                )
+            )
+    return seeds
 
 
 async def dequeue_enriched_listings_async(

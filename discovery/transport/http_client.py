@@ -54,13 +54,49 @@ class ScraperHttpClient:
         text = await self.get_text(url)
         return _decode_stingray_json(text)
 
-    async def _request(self, method: str, url: str) -> httpx.Response:
+    async def post_json(
+        self,
+        url: str,
+        body: Any,
+        *,
+        headers: dict[str, str] | None = None,
+        params: dict[str, str] | None = None,
+    ) -> Any:
+        import json
+
+        request_headers = dict(headers or {})
+        if "Content-Type" not in request_headers:
+            request_headers["Content-Type"] = "application/json"
+        response = await self._request(
+            "POST",
+            url,
+            content=json.dumps(body),
+            headers=request_headers,
+            params=params,
+        )
+        return json.loads(response.text)
+
+    async def _request(
+        self,
+        method: str,
+        url: str,
+        *,
+        content: str | None = None,
+        headers: dict[str, str] | None = None,
+        params: dict[str, str] | None = None,
+    ) -> httpx.Response:
         host = httpx.URL(url).host or "unknown"
         last_error: BaseException | None = None
         for attempt in range(self._max_retries):
             await self._rate_limiter.acquire(host)
             try:
-                response = await self._client.request(method, url)
+                response = await self._client.request(
+                    method,
+                    url,
+                    content=content,
+                    headers=headers,
+                    params=params,
+                )
             except httpx.ConnectError as exc:
                 last_error = exc
                 if attempt == 0 and "getaddrinfo" in str(exc).lower():

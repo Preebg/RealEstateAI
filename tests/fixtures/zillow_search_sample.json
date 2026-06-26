@@ -1,0 +1,17 @@
+{
+  "cat1": {
+    "searchResults": {
+      "listResults": [
+        {
+          "zpid": "98765432",
+          "address": "10 Park Ave, Rochester, NY 14607",
+          "unformattedPrice": 210000,
+          "detailUrl": "/homedetails/10-Park-Ave-Rochester-NY-14607/98765432_zpid/",
+          "imgSrc": "https://photos.zillowstatic.com/photo/1.jpg",
+          "latLong": {"latitude": 43.15, "longitude": -77.61}
+        }
+      ],
+      "mapResults": []
+    }
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "data": {
+    "home_search": {
+      "total": 1,
+      "results": [
+        {
+          "property_id": "realtor-998877",
+          "listing_id": "realtor-list-1",
+          "list_price": 210000,
+          "status": "for_sale",
+          "permalink": "10-Park-Ave-Rochester-NY-14607",
+          "primary_photo": {
+            "href": "https://ap.rdcpix.com/photo/1.jpg"
+          },
+          "location": {
+            "address": {
+              "line": "10 Park Ave",
+              "city": "Rochester",
+              "state_code": "NY",
+              "postal_code": "14607"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

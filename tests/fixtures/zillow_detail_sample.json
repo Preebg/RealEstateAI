@@ -1,0 +1,25 @@
+{
+  "props": {
+    "pageProps": {
+      "property": {
+        "zpid": "98765432",
+        "streetAddress": "10 Park Ave, Rochester, NY 14607",
+        "price": 210000,
+        "homeStatus": "FOR_SALE",
+        "description": "Turnkey rental rents for $1,850/mo with long-term tenant.",
+        "yearBuilt": 1968,
+        "livingArea": 1450,
+        "taxAnnualAmount": 4200,
+        "monthlyHoaFee": 0,
+        "homeType": "SINGLE_FAMILY",
+        "daysOnZillow": 12,
+        "url": "/homedetails/10-Park-Ave-Rochester-NY-14607/98765432_zpid/",
+        "responsivePhotos": [
+          {"url": "https://photos.zillowstatic.com/photo/1.jpg"},
+          {"url": "https://photos.zillowstatic.com/photo/2.jpg"}
+        ],
+        "latLong": {"latitude": 43.15, "longitude": -77.61}
+      }
+    }
+  }
+}

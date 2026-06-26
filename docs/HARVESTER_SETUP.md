@@ -146,7 +146,7 @@ For every 90 minutes, use a loop script or systemd timer with `OnUnitActiveSec=9
 
 | Stage | Model | Calls per run | Concurrency |
 |-------|--------|----------------|-------------|
-| Discovery | gemini-2.5-flash → flash-lite → gemma-4-21b-it (API: 26b-a4b) | 1 (Flash) or per-market (Gemma) | Sequential |
+| Discovery | Redfin + Realtor + Zillow scrapers (default, cross-source merge) or gemini-2.5-flash-lite → gemma-4-26b-a4b-it | Scraper: per-market HTTP across 3 portals; LLM: 1 (lite) or per-market (Gemma) | Sequential |
 | Research | gemma-4-31b-it → gemma-4-21b-it (API: 26b-a4b) | up to ~25 | **Parallel** (≤10 calls/min) |
 | Synthesis | gemini-3.1-flash-lite-preview | up to ~25 | **Parallel** (≤10 calls/min) |
 

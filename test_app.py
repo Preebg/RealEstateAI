@@ -432,7 +432,7 @@ class TestDailyQuotaDetection(unittest.TestCase):
                     generate_with_retry(DISCOVERY_MODEL, "prompt")
                 mock_sleep.assert_not_called()
 
-    def test_discovery_switches_to_gemma_on_flash_quota(self):
+    def test_discovery_switches_to_gemma_on_flash_lite_quota(self):
         payload = json.dumps([_VERIFIED_DISCOVERY_ROW])
         quota_err = errors.ClientError(
             429,
@@ -447,7 +447,7 @@ class TestDailyQuotaDetection(unittest.TestCase):
 
         def fake_generate(model, contents, **kwargs):
             calls.append(model)
-            if model in ("gemini-2.5-flash", "gemini-2.5-flash-lite"):
+            if model == "gemini-2.5-flash-lite":
                 raise quota_err
             return _discovery_generate_return(payload)
 
@@ -457,7 +457,7 @@ class TestDailyQuotaDetection(unittest.TestCase):
         self.assertEqual(calls[0], DISCOVERY_MODEL)
         self.assertEqual(
             DISCOVERY_MODEL_CHAIN,
-            ("gemini-2.5-flash", "gemini-2.5-flash-lite", "gemma-4-26b-a4b-it"),
+            ("gemini-2.5-flash-lite", "gemma-4-26b-a4b-it"),
         )
         self.assertTrue(any(model == "gemma-4-26b-a4b-it" for model in calls))
 
@@ -3353,6 +3353,11 @@ class TestOutreachAppUrls(unittest.TestCase):
 
 class TestDiscoveryScraper(unittest.TestCase):
     _FIXTURES_DIR = Path(__file__).resolve().parent / "tests" / "fixtures"
+    _EXPECTED_GIS_THUMBNAIL = "https://ssl.cdn-redfin.com/photo/1.jpg"
+    _EXPECTED_DETAIL_IMAGES = (
+        "https://ssl.cdn-redfin.com/photo/1.jpg",
+        "https://ssl.cdn-redfin.com/photo/2.jpg",
+    )
 
     @classmethod
     def _load_json_fixture(cls, name: str) -> dict:
@@ -3387,6 +3392,88 @@ class TestDiscoveryScraper(unittest.TestCase):
             gc.collect()
             shutil.rmtree(tmp, ignore_errors=True)
 
+    def _assert_portal_image_urls(self, urls: list[str] | tuple[str, ...], *, min_count: int) -> None:
+        self.assertGreaterEqual(len(urls), min_count)
+        for url in urls:
+            self.assertTrue(str(url).startswith("https://"), url)
+
+    def _assert_redfin_image_urls(self, urls: list[str] | tuple[str, ...], *, min_count: int) -> None:
+        redfin_urls = [url for url in urls if "cdn-redfin.com" in str(url)]
+        self.assertGreaterEqual(len(redfin_urls), min_count)
+        for url in redfin_urls:
+            self.assertTrue(str(url).startswith("https://"), url)
+
+    def _assert_listing_image_payload(self, listing: dict) -> None:
+        """Enriched scraper listings must expose primary + gallery image URLs."""
+        from discovery.models import ScrapedListing
+
+        primary = str(listing.get("primary_image_url", "")).strip()
+        self.assertEqual(primary, self._EXPECTED_DETAIL_IMAGES[0])
+        image_urls = list(listing.get("image_urls") or [])
+        self.assertGreaterEqual(len(image_urls), 2)
+        for expected in self._EXPECTED_DETAIL_IMAGES:
+            self.assertIn(expected, image_urls)
+        self._assert_redfin_image_urls(image_urls, min_count=2)
+        self._assert_portal_image_urls(image_urls, min_count=2)
+
+        scraped = listing.get("_scraped")
+        if isinstance(scraped, ScrapedListing):
+            self.assertEqual(scraped.primary_image_url, primary)
+            self.assertGreaterEqual(len(scraped.image_urls), 2)
+
+    def _run_orchestrator_with_mocked_http(
+        self,
+        repo: object,
+        *,
+        gemini_guard: BaseException | None = None,
+    ) -> tuple[list[dict], object]:
+        """Run DiscoveryOrchestrator with fixture-backed Redfin HTTP responses."""
+        import asyncio
+        from unittest.mock import AsyncMock
+
+        from discovery.orchestrator import DiscoveryOrchestrator
+        from discovery.sources.registry import build_default_sources
+
+        http_client, mock_httpx = self._mock_portal_http()
+
+        async def _run() -> list[dict]:
+            orchestrator = DiscoveryOrchestrator(
+                repository=repo,
+                http_client=http_client,
+                sources=build_default_sources(http_client),
+            )
+            try:
+                if gemini_guard is None:
+                    return await orchestrator.run(
+                        exclude_keys=set(),
+                        max_price=250_000,
+                        per_market_limit=5,
+                        enrich=True,
+                    )
+                with patch(
+                    "engine.discover_hot_market_listings",
+                    side_effect=gemini_guard,
+                ):
+                    with patch(
+                        "engine.generate_with_retry_async",
+                        new_callable=AsyncMock,
+                        side_effect=gemini_guard,
+                    ):
+                        with patch(
+                            "engine.generate_with_retry",
+                            side_effect=gemini_guard,
+                        ):
+                            return await orchestrator.run(
+                                exclude_keys=set(),
+                                max_price=250_000,
+                                per_market_limit=5,
+                                enrich=True,
+                            )
+            finally:
+                await orchestrator.close()
+
+        return asyncio.run(_run()), mock_httpx
+
     def test_parse_redfin_gis_seed(self):
         from discovery.parsers.redfin_gis import parse_redfin_gis_payload
 
@@ -3403,6 +3490,98 @@ class TestDiscoveryScraper(unittest.TestCase):
         self.assertIn("redfin.com", seed.listing_url)
         self.assertEqual(seed.list_price, 210000.0)
 
+    def test_parse_realtor_search_seed(self):
+        from discovery.parsers.realtor_search import parse_realtor_search_payload
+
+        payload = self._load_json_fixture("realtor_search_sample.json")
+        seeds = parse_realtor_search_payload(
+            payload,
+            market_city="Rochester",
+            max_price=250_000,
+        )
+        self.assertEqual(len(seeds), 1)
+        self.assertEqual(seeds[0].source, "realtor")
+        self.assertIn("realtor.com", seeds[0].listing_url)
+
+    def test_parse_zillow_search_seed(self):
+        from discovery.parsers.zillow_search import parse_zillow_search_payload
+
+        payload = self._load_json_fixture("zillow_search_sample.json")
+        seeds = parse_zillow_search_payload(
+            payload,
+            market_city="Rochester",
+            max_price=250_000,
+        )
+        self.assertEqual(len(seeds), 1)
+        self.assertEqual(seeds[0].source, "zillow")
+        self.assertEqual(seeds[0].external_id, "98765432")
+
+    def test_merge_scraped_listings_fills_gaps(self):
+        from discovery.merge import merge_scraped_listings
+        from discovery.models import ScrapedListing
+
+        primary = ScrapedListing(
+            address="10 Park Ave, Rochester, NY 14607",
+            city="Rochester",
+            list_price=210000,
+            listing_url="https://www.redfin.com/NY/Rochester/10-Park-Ave-14607/home/12345678",
+            source="redfin",
+            external_id="12345678",
+            listing_status="For Sale",
+            days_on_market=None,
+            view_count=None,
+            listing_description="",
+            primary_image_url="https://ssl.cdn-redfin.com/photo/1.jpg",
+            image_urls=("https://ssl.cdn-redfin.com/photo/1.jpg",),
+            taxes_annual=0.0,
+            hoa_monthly=0.0,
+            year_built=None,
+            square_footage=0,
+            property_type="Unknown",
+            latitude=None,
+            longitude=None,
+            stated_gross_monthly_rent=0.0,
+            listing_rent_notes="",
+            property_condition="Good",
+            scraped_at="2026-06-13T12:00:00+00:00",
+        )
+        supplemental = ScrapedListing(
+            address="10 Park Ave, Rochester, NY 14607",
+            city="Rochester",
+            list_price=210000,
+            listing_url="https://www.realtor.com/realestateandhomes-detail/10-Park-Ave-Rochester-NY-14607",
+            source="realtor",
+            external_id="realtor-998877",
+            listing_status="For Sale",
+            days_on_market=12,
+            view_count=87,
+            listing_description="Turnkey rental rents for $1,850/mo with long-term tenant.",
+            primary_image_url="https://ap.rdcpix.com/photo/1.jpg",
+            image_urls=(
+                "https://ap.rdcpix.com/photo/1.jpg",
+                "https://ap.rdcpix.com/photo/2.jpg",
+            ),
+            taxes_annual=4200.0,
+            hoa_monthly=0.0,
+            year_built=1968,
+            square_footage=1450,
+            property_type="Single Family",
+            latitude=43.15,
+            longitude=-77.61,
+            stated_gross_monthly_rent=1850.0,
+            listing_rent_notes="Monthly rent mentioned in listing: $1,850/mo",
+            property_condition="Good",
+            scraped_at="2026-06-13T12:00:00+00:00",
+        )
+        merged = merge_scraped_listings(primary, supplemental)
+        self.assertEqual(merged.source, "redfin")
+        self.assertEqual(merged.taxes_annual, 4200.0)
+        self.assertEqual(merged.year_built, 1968)
+        self.assertEqual(merged.square_footage, 1450)
+        self.assertEqual(merged.latitude, 43.15)
+        self.assertEqual(merged.stated_gross_monthly_rent, 1850.0)
+        self.assertGreaterEqual(len(merged.image_urls), 2)
+
     def test_redfin_detail_parser_extracts_images_status_dom(self):
         from discovery.parsers.redfin_detail import parse_redfin_detail_payload
 
@@ -3410,8 +3589,8 @@ class TestDiscoveryScraper(unittest.TestCase):
         scraped = parse_redfin_detail_payload(detail_fixture, seed=self._sample_seed())
         self.assertEqual(scraped.listing_status, "For Sale")
         self.assertEqual(scraped.days_on_market, 12)
-        self.assertEqual(len(scraped.image_urls), 2)
-        self.assertEqual(scraped.primary_image_url, "https://ssl.cdn-redfin.com/photo/1.jpg")
+        self.assertEqual(list(scraped.image_urls), list(self._EXPECTED_DETAIL_IMAGES))
+        self.assertEqual(scraped.primary_image_url, self._EXPECTED_DETAIL_IMAGES[0])
         self.assertIn("Turnkey rental", scraped.listing_description)
         self.assertEqual(scraped.stated_gross_monthly_rent, 1850.0)
 
@@ -3446,8 +3625,8 @@ class TestDiscoveryScraper(unittest.TestCase):
             days_on_market=12,
             view_count=87,
             listing_description="Charming bungalow near parks.",
-            primary_image_url="https://ssl.cdn-redfin.com/photo/1.jpg",
-            image_urls=("https://ssl.cdn-redfin.com/photo/1.jpg",),
+            primary_image_url=self._EXPECTED_DETAIL_IMAGES[0],
+            image_urls=self._EXPECTED_DETAIL_IMAGES,
             taxes_annual=4200.0,
             hoa_monthly=0.0,
             year_built=1968,
@@ -3476,7 +3655,7 @@ class TestDiscoveryScraper(unittest.TestCase):
         self.assertEqual(research["days_on_market"], scraped.days_on_market)
         self.assertEqual(research["view_count"], scraped.view_count)
         self.assertEqual(research["primary_image_url"], scraped.primary_image_url)
-        self.assertEqual(research["image_urls"], list(scraped.image_urls))
+        self.assertEqual(research["image_urls"], list(self._EXPECTED_DETAIL_IMAGES))
         self.assertEqual(research["listing_url"], scraped.listing_url)
         self.assertEqual(research["latitude"], scraped.latitude)
         self.assertEqual(research["longitude"], scraped.longitude)
@@ -3590,63 +3769,186 @@ class TestDiscoveryScraper(unittest.TestCase):
             self.assertIsNone(loaded.view_count)
 
     def test_orchestrator_run_with_mocked_http(self):
+        with self._sqlite_repo() as repo:
+            listings, mock_httpx = self._run_orchestrator_with_mocked_http(repo)
+
+        rochester = [item for item in listings if item.get("city") == "Rochester"]
+        self.assertEqual(len(rochester), 1)
+        self.assertEqual(rochester[0]["discovery_model"], "scraper")
+        self.assertEqual(rochester[0]["listing_status"], "For Sale")
+        self.assertEqual(rochester[0]["days_on_market"], 12)
+        self.assertEqual(rochester[0]["view_count"], 87)
+        self._assert_listing_image_payload(rochester[0])
+        self.assertIn("Turnkey rental", rochester[0].get("listing_description", ""))
+        mock_httpx.request.assert_called()
+
+    def test_scraper_end_to_end_property_images(self):
+        """GIS thumbnail -> detail gallery -> listing dict -> repo mirror -> research dict."""
         import asyncio
         from unittest.mock import AsyncMock
 
-        import httpx
-
-        from discovery.market_defaults import REDFIN_REGION_IDS
-        from discovery.orchestrator import DiscoveryOrchestrator
+        from discovery.normalize import (
+            listing_dict_to_scraped,
+            scraped_to_research_dict,
+            seed_to_discovery_listing,
+        )
+        from discovery.orchestrator import run_scraper_discovery_async
+        from discovery.parsers.redfin_gis import parse_redfin_gis_payload
         from discovery.sources.redfin import RedfinListingSource
-        from discovery.transport.http_client import ScraperHttpClient
+        from discovery.orchestrator import DiscoveryOrchestrator
+        from harvester import _HarvesterModelState, _research_listing_with_fallback
+        from knowledge_base import normalize_address_key
 
         gis_fixture = self._load_json_fixture("redfin_gis_sample.json")
-        detail_fixture = self._load_json_fixture("redfin_detail_sample.json")
-        rochester_region_id = REDFIN_REGION_IDS["Rochester"]
+        html_fixture = self._load_text_fixture("redfin_detail_sample.html")
+        from discovery.parsers.redfin_detail import parse_redfin_detail_payload
 
-        async def mock_request(method: str, url: str, **kwargs: object) -> httpx.Response:
-            url_str = str(url)
-            request = httpx.Request(method, url_str)
-            if "stingray/api/gis" in url_str:
-                if f"region_id={rochester_region_id}" in url_str:
-                    return httpx.Response(200, text=json.dumps(gis_fixture), request=request)
-                return httpx.Response(200, text=json.dumps({"homes": []}), request=request)
-            if "stingray/api/home/details/initialInfo" in url_str:
-                return httpx.Response(200, text=json.dumps(detail_fixture), request=request)
-            raise AssertionError(f"Unexpected HTTP request: {url_str}")
+        seeds = parse_redfin_gis_payload(
+            gis_fixture,
+            market_city="Rochester",
+            max_price=250_000,
+        )
+        self.assertEqual(len(seeds), 1)
+        self.assertEqual(seeds[0].thumbnail_url, self._EXPECTED_GIS_THUMBNAIL)
+        seed_listing = seed_to_discovery_listing(seeds[0])
+        self.assertEqual(seed_listing["primary_image_url"], self._EXPECTED_GIS_THUMBNAIL)
+        self.assertNotIn("image_urls", seed_listing)
 
-        mock_httpx = AsyncMock(spec=httpx.AsyncClient)
-        mock_httpx.request = AsyncMock(side_effect=mock_request)
-        http_client = ScraperHttpClient(client=mock_httpx)
+        html_scraped = parse_redfin_detail_payload(
+            {},
+            seed=seeds[0],
+            html=html_fixture,
+        )
+        self.assertEqual(
+            list(html_scraped.image_urls),
+            [
+                "https://ssl.cdn-redfin.com/photo/html-1.jpg",
+                "https://ssl.cdn-redfin.com/photo/html-2.jpg",
+            ],
+        )
+        self._assert_redfin_image_urls(html_scraped.image_urls, min_count=2)
 
+        gemini_guard = AssertionError("Gemini API must not be called during scraper discovery")
         with self._sqlite_repo() as repo:
+            listings, mock_httpx = self._run_orchestrator_with_mocked_http(
+                repo,
+                gemini_guard=gemini_guard,
+            )
+            rochester = [item for item in listings if item.get("city") == "Rochester"]
+            self.assertEqual(len(rochester), 1)
+            listing = rochester[0]
+            self._assert_listing_image_payload(listing)
 
-            async def _run() -> list[dict]:
-                orchestrator = DiscoveryOrchestrator(
+            detail_calls = [
+                call
+                for call in mock_httpx.request.call_args_list
+                if "stingray/api/home/details/initialInfo" in str(call)
+            ]
+            self.assertGreaterEqual(len(detail_calls), 1)
+
+            stored = repo.get_enriched_by_external_id("redfin", "12345678")
+            self.assertIsNotNone(stored)
+            assert stored is not None
+            self.assertEqual(stored.primary_image_url, self._EXPECTED_DETAIL_IMAGES[0])
+            for expected in self._EXPECTED_DETAIL_IMAGES:
+                self.assertIn(expected, list(stored.image_urls))
+
+            address_key = normalize_address_key(listing["address"])
+            with repo._connect() as conn:
+                mirror = conn.execute(
+                    """
+                    SELECT primary_image_url, payload_json
+                    FROM property_mirror
+                    WHERE address_key = ?
+                    """,
+                    (address_key,),
+                ).fetchone()
+            self.assertIsNotNone(mirror)
+            self.assertEqual(mirror["primary_image_url"], self._EXPECTED_DETAIL_IMAGES[0])
+            mirror_payload = json.loads(str(mirror["payload_json"]))
+            self.assertEqual(mirror_payload["primary_image_url"], self._EXPECTED_DETAIL_IMAGES[0])
+            for expected in self._EXPECTED_DETAIL_IMAGES:
+                self.assertIn(expected, mirror_payload["image_urls"])
+
+            scraped = listing_dict_to_scraped(listing)
+            self.assertIsNotNone(scraped)
+            assert scraped is not None
+            research = scraped_to_research_dict(scraped, market_city="Rochester")
+            self.assertEqual(research["primary_image_url"], self._EXPECTED_DETAIL_IMAGES[0])
+            for expected in self._EXPECTED_DETAIL_IMAGES:
+                self.assertIn(expected, research["image_urls"])
+
+            http_client, _ = self._mock_redfin_http()
+
+            def _orchestrator_factory(**kwargs: object) -> DiscoveryOrchestrator:
+                _ = kwargs
+                return DiscoveryOrchestrator(
                     repository=repo,
                     http_client=http_client,
                     sources=[RedfinListingSource(http_client)],
                 )
-                try:
-                    return await orchestrator.run(
-                        exclude_keys=set(),
-                        max_price=250_000,
-                        per_market_limit=5,
-                        enrich=True,
-                    )
-                finally:
-                    await orchestrator.close()
 
-            listings = asyncio.run(_run())
-            rochester = [item for item in listings if item.get("city") == "Rochester"]
-            self.assertEqual(len(rochester), 1)
-            self.assertEqual(rochester[0]["discovery_model"], "scraper")
-            self.assertEqual(rochester[0]["listing_status"], "For Sale")
-            self.assertEqual(rochester[0]["days_on_market"], 12)
-            self.assertEqual(rochester[0]["view_count"], 87)
-            self.assertTrue(rochester[0].get("primary_image_url"))
-            self.assertIn("Turnkey rental", rochester[0].get("listing_description", ""))
-            mock_httpx.request.assert_called()
+            async def _run_entry() -> list[dict]:
+                with patch(
+                    "discovery.orchestrator.discovery_repository",
+                    return_value=repo,
+                ):
+                    with patch(
+                        "discovery.orchestrator.DiscoveryOrchestrator",
+                        side_effect=_orchestrator_factory,
+                    ):
+                        with patch(
+                            "engine.discover_hot_market_listings",
+                            side_effect=gemini_guard,
+                        ):
+                            return await run_scraper_discovery_async(
+                                persist=False,
+                                enrich=True,
+                            )
+
+            entry_listings = asyncio.run(_run_entry())
+            entry_rochester = [
+                item for item in entry_listings if item.get("city") == "Rochester"
+            ]
+            self.assertEqual(len(entry_rochester), 1)
+            self._assert_listing_image_payload(entry_rochester[0])
+
+            async def _fake_property_value(
+                address: str,
+                research_payload: dict,
+                market_city: str,
+                **kwargs: object,
+            ) -> dict:
+                _ = address, market_city, kwargs
+                return dict(research_payload)
+
+            with patch(
+                "engine.research_property_async",
+                new_callable=AsyncMock,
+                side_effect=AssertionError("Gemini research must not run for scraper listings"),
+            ):
+                with patch(
+                    "harvester._run_property_value_stage",
+                    new_callable=AsyncMock,
+                    side_effect=_fake_property_value,
+                ):
+                    research_result = asyncio.run(
+                        _research_listing_with_fallback(
+                            listing["address"],
+                            listing,
+                            "Rochester",
+                            _HarvesterModelState(),
+                            AsyncMock(),
+                            AsyncMock(),
+                        )
+                    )
+
+            self.assertEqual(
+                research_result["primary_image_url"],
+                self._EXPECTED_DETAIL_IMAGES[0],
+            )
+            for expected in self._EXPECTED_DETAIL_IMAGES:
+                self.assertIn(expected, research_result["image_urls"])
 
     def test_mark_completed_and_list_enriched_includes_row_id(self):
         from discovery.models import ListingSeed, ScrapedListing
@@ -3764,7 +4066,226 @@ class TestDiscoveryScraper(unittest.TestCase):
             {"DISCOVERY_BACKEND": "", "HARVESTER_USE_SCRAPER": ""},
             clear=False,
         ):
-            self.assertEqual(resolve_discovery_backend(), "gemini")
+            self.assertEqual(resolve_discovery_backend(), "scraper")
+
+    def _mock_portal_http(self):
+        """Return a ScraperHttpClient backed by fixture-driven httpx responses."""
+        from unittest.mock import AsyncMock
+
+        import httpx
+
+        from discovery.market_defaults import REDFIN_REGION_IDS
+        from discovery.transport.http_client import ScraperHttpClient
+
+        gis_fixture = self._load_json_fixture("redfin_gis_sample.json")
+        detail_fixture = self._load_json_fixture("redfin_detail_sample.json")
+        realtor_search_fixture = self._load_json_fixture("realtor_search_sample.json")
+        realtor_detail_fixture = self._load_json_fixture("realtor_detail_sample.json")
+        zillow_search_fixture = self._load_json_fixture("zillow_search_sample.json")
+        zillow_detail_fixture = self._load_json_fixture("zillow_detail_sample.json")
+        rochester_region_id = REDFIN_REGION_IDS["Rochester"]
+
+        async def mock_request(method: str, url: str, **kwargs: object) -> httpx.Response:
+            url_str = str(url)
+            request = httpx.Request(method, url_str)
+            body = str(kwargs.get("content") or "")
+            is_rochester = "Rochester, NY" in body or "Rochester" in body
+            if "stingray/api/gis" in url_str:
+                if f"region_id={rochester_region_id}" in url_str:
+                    return httpx.Response(200, text=json.dumps(gis_fixture), request=request)
+                return httpx.Response(200, text=json.dumps({"homes": []}), request=request)
+            if "stingray/api/home/details/initialInfo" in url_str:
+                return httpx.Response(200, text=json.dumps(detail_fixture), request=request)
+            if "hulk_main_srp" in url_str:
+                payload = realtor_search_fixture if is_rochester else {"data": {"home_search": {"results": []}}}
+                return httpx.Response(200, text=json.dumps(payload), request=request)
+            if "async-create-search-page-state" in url_str:
+                payload = (
+                    zillow_search_fixture
+                    if is_rochester
+                    else {"cat1": {"searchResults": {"listResults": [], "mapResults": []}}}
+                )
+                return httpx.Response(200, text=json.dumps(payload), request=request)
+            if "realtor.com" in url_str and method.upper() == "GET":
+                html = (
+                    '<script id="__NEXT_DATA__" type="application/json">'
+                    f"{json.dumps(realtor_detail_fixture)}"
+                    "</script>"
+                )
+                return httpx.Response(200, text=html, request=request)
+            if "zillow.com" in url_str and method.upper() == "GET":
+                html = (
+                    '<script id="__NEXT_DATA__" type="application/json">'
+                    f"{json.dumps(zillow_detail_fixture)}"
+                    "</script>"
+                )
+                return httpx.Response(200, text=html, request=request)
+            raise AssertionError(f"Unexpected HTTP request: {method} {url_str}")
+
+        mock_httpx = AsyncMock(spec=httpx.AsyncClient)
+        mock_httpx.request = AsyncMock(side_effect=mock_request)
+        return ScraperHttpClient(client=mock_httpx), mock_httpx
+
+    def _mock_redfin_http(self):
+        """Backward-compatible alias for Redfin-only tests."""
+        return self._mock_portal_http()
+
+    def test_run_scraper_discovery_async_no_gemini_api(self):
+        """Scraper discovery must use portal HTTP only — never the Gemini discovery agent."""
+        gemini_guard = AssertionError("Gemini API must not be called during scraper discovery")
+
+        with self._sqlite_repo() as repo:
+            listings, mock_httpx = self._run_orchestrator_with_mocked_http(
+                repo,
+                gemini_guard=gemini_guard,
+            )
+
+        rochester = [item for item in listings if item.get("city") == "Rochester"]
+        self.assertEqual(len(rochester), 1)
+        self.assertEqual(rochester[0]["discovery_model"], "scraper")
+        self.assertEqual(rochester[0]["listing_status"], "For Sale")
+        self._assert_listing_image_payload(rochester[0])
+        mock_httpx.request.assert_called()
+
+    def test_run_scraper_discovery_entry_no_gemini_discovery_agent(self):
+        """run_scraper_discovery_async must route to orchestrator, not discover_hot_market_listings."""
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+
+        from discovery.orchestrator import run_scraper_discovery_async
+
+        gemini_guard = AssertionError("Gemini discovery agent must not run")
+        scraper_listing = {
+            "address": "10 Park Ave, Rochester, NY 14607",
+            "city": "Rochester",
+            "list_price": 210000.0,
+            "discovery_model": "scraper",
+        }
+
+        with patch("discovery.orchestrator.DiscoveryOrchestrator") as mock_orchestrator_cls:
+            instance = AsyncMock()
+            instance.run = AsyncMock(return_value=[scraper_listing])
+            instance.close = AsyncMock()
+            mock_orchestrator_cls.return_value = instance
+            with patch("engine.discover_hot_market_listings", side_effect=gemini_guard):
+                listings = asyncio.run(
+                    run_scraper_discovery_async(persist=False, enrich=True)
+                )
+
+        mock_orchestrator_cls.assert_called_once()
+        instance.run.assert_called_once()
+        instance.close.assert_awaited_once()
+        self.assertEqual(listings[0]["discovery_model"], "scraper")
+
+    def test_harvester_scraper_discovery_branch_no_gemini_agent(self):
+        """Harvester with DISCOVERY_BACKEND=scraper must not call engine discovery agent."""
+        import asyncio
+        from unittest.mock import AsyncMock
+
+        admin_uid = "00000000-0000-0000-0000-000000000001"
+        gemini_guard = AssertionError("Gemini discovery agent must not run")
+
+        with patch.dict(os.environ, {"DISCOVERY_BACKEND": "scraper"}, clear=False):
+            with patch(
+                "harvester.run_scraper_discovery_async",
+                new_callable=AsyncMock,
+                return_value=[],
+            ) as mock_scraper:
+                with patch(
+                    "engine.discover_hot_market_listings",
+                    side_effect=gemini_guard,
+                ):
+                    with patch(
+                        "harvester.purge_unreliable_one_year_roi_properties",
+                        return_value=[],
+                    ):
+                        with patch(
+                            "harvester.get_harvest_complete_addresses",
+                            return_value=[],
+                        ):
+                            with patch("harvester.get_kb_raw_data", return_value={}):
+                                from harvester import run_harvester_pipeline_async
+
+                                report = asyncio.run(
+                                    run_harvester_pipeline_async(admin_uid)
+                                )
+
+        mock_scraper.assert_called_once()
+        self.assertEqual(report["discovered"], 0)
+
+    def test_scraper_listing_research_skips_gemini_research(self):
+        """Scraper-enriched listings must not invoke Gemini research_property_async."""
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock
+
+        from discovery.models import ScrapedListing
+        from discovery.normalize import enriched_to_discovery_listing
+        from harvester import _HarvesterModelState, _research_listing_with_fallback
+
+        seed = self._sample_seed()
+        scraped = ScrapedListing(
+            address=seed.address,
+            city=seed.city,
+            list_price=seed.list_price,
+            listing_url=seed.listing_url,
+            source=seed.source,
+            external_id=seed.external_id,
+            listing_status="For Sale",
+            days_on_market=12,
+            view_count=87,
+            listing_description="Charming bungalow near parks.",
+            primary_image_url=self._EXPECTED_DETAIL_IMAGES[0],
+            image_urls=self._EXPECTED_DETAIL_IMAGES,
+            taxes_annual=4200.0,
+            hoa_monthly=0.0,
+            year_built=1968,
+            square_footage=1450,
+            property_type="Single Family",
+            latitude=43.15,
+            longitude=-77.61,
+            stated_gross_monthly_rent=1850.0,
+            listing_rent_notes="Monthly rent mentioned in listing: $1,850/mo",
+            property_condition="Good",
+            scraped_at="2026-06-13T12:00:00+00:00",
+        )
+        listing = enriched_to_discovery_listing(1, seed, scraped)
+
+        async def _fake_property_value(
+            address: str,
+            research: dict,
+            market_city: str,
+            **kwargs: object,
+        ) -> dict:
+            _ = address, market_city, kwargs
+            return dict(research)
+
+        with patch(
+            "engine.research_property_async",
+            new_callable=AsyncMock,
+            side_effect=AssertionError("Gemini research must not run for scraper listings"),
+        ) as mock_gemini_research:
+            with patch(
+                "harvester._run_property_value_stage",
+                new_callable=AsyncMock,
+                side_effect=_fake_property_value,
+            ):
+                result = asyncio.run(
+                    _research_listing_with_fallback(
+                        seed.address,
+                        listing,
+                        "Rochester",
+                        _HarvesterModelState(),
+                        MagicMock(),
+                        MagicMock(),
+                    )
+                )
+
+        mock_gemini_research.assert_not_called()
+        self.assertEqual(result["address"], scraped.address)
+        self.assertEqual(result["discovery_model"], "scraper")
+        self.assertEqual(result["price"], 210000.0)
+        self.assertEqual(result["primary_image_url"], self._EXPECTED_DETAIL_IMAGES[0])
+        self.assertEqual(result["image_urls"], list(self._EXPECTED_DETAIL_IMAGES))
 
     def test_synthesis_prompt_separates_listing_description(self):
         from engine import _synthesis_prompt

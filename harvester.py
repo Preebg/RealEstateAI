@@ -51,7 +51,7 @@ _active_research_model = engine.RESEARCH_MODEL
 _active_synthesis_model = engine.SYNTHESIS_MODEL
 
 def resolve_discovery_backend() -> str:
-    """Return ``scraper`` or ``gemini`` (default) from DISCOVERY_BACKEND."""
+    """Return ``scraper`` (default) or ``gemini`` from DISCOVERY_BACKEND."""
     raw = os.getenv("DISCOVERY_BACKEND")
     if raw is not None and raw.strip():
         backend = raw.strip().lower()
@@ -62,7 +62,7 @@ def resolve_discovery_backend() -> str:
         return "scraper"
     if legacy in ("0", "false", "no", "off"):
         return "gemini"
-    return "gemini"
+    return "scraper"
 
 
 @dataclass
@@ -237,12 +237,17 @@ def _validate_harvest_network() -> bool:
         return False
 
     if resolve_discovery_backend() == "scraper":
-        try:
-            resolve_hostname("www.redfin.com", label="Redfin scraper")
-        except OSError as exc:
-            log.error("harvest_dns_failed", error=str(exc), host="www.redfin.com")
-            print(f"Network configuration error: {exc}")
-            return False
+        for host, label in (
+            ("www.redfin.com", "Redfin scraper"),
+            ("www.realtor.com", "Realtor scraper"),
+            ("www.zillow.com", "Zillow scraper"),
+        ):
+            try:
+                resolve_hostname(host, label=label)
+            except OSError as exc:
+                log.error("harvest_dns_failed", error=str(exc), host=host)
+                print(f"Network configuration error: {exc}")
+                return False
 
     return True
 
@@ -750,7 +755,7 @@ async def run_harvester_pipeline_async(admin_user_id: str) -> dict[str, Any]:
 
     print(
         f"[discovery] Stage 1 START — "
-        f"{'live Redfin search' if discovery_backend == 'scraper' else 'hot-market LLM search'} "
+        f"{'live multi-portal search (Redfin, Realtor, Zillow)' if discovery_backend == 'scraper' else 'hot-market LLM search'} "
         f"(Supabase KB skip list; ≤{engine.MAX_DISCOVERY_LISTINGS} listings under "
         f"${engine.MAX_DISCOVERY_PRICE:,})...",
         flush=True,
@@ -966,9 +971,10 @@ def _render_streamlit_app() -> None:
 
     st.info(
         f"Harvester uses Supabase as the source of truth (no local SQLite). Default "
-        f"DISCOVERY_BACKEND=gemini runs LLM hot-market search (≤{engine.MAX_DISCOVERY_LISTINGS} "
-        f"listings under ${engine.MAX_DISCOVERY_PRICE:,}). Set DISCOVERY_BACKEND=scraper for "
-        f"live Redfin search in-memory only. Research runs with up to "
+        f"DISCOVERY_BACKEND=scraper runs live Redfin, Realtor, and Zillow search "
+        f"in-memory (cross-source merge for accuracy). Set DISCOVERY_BACKEND=gemini "
+        f"for LLM hot-market search (≤{engine.MAX_DISCOVERY_LISTINGS} listings under "
+        f"${engine.MAX_DISCOVERY_PRICE:,}). Research runs with up to "
         f"{engine.MAX_CONCURRENT_RESEARCH_AGENTS} concurrent workers; synthesis starts "
         f"as each research job completes (rate-limited to "
         f"{engine.HARVESTER_RPM_PER_MODEL} calls/min per model). "

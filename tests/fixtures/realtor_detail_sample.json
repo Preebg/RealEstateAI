@@ -1,0 +1,35 @@
+{
+  "props": {
+    "pageProps": {
+      "property": {
+        "property_id": "realtor-998877",
+        "listing_id": "realtor-list-1",
+        "list_price": 210000,
+        "status": "for_sale",
+        "permalink": "10-Park-Ave-Rochester-NY-14607",
+        "description": {
+          "text": "Turnkey rental rents for $1,850/mo with long-term tenant."
+        },
+        "year_built": 1968,
+        "sqft": 1450,
+        "tax_amount": 4200,
+        "hoa_fee": 0,
+        "prop_type": "Single Family",
+        "days_on_market": 12,
+        "primary_photo": {
+          "href": "https://ap.rdcpix.com/photo/1.jpg"
+        },
+        "photos": [
+          {"href": "https://ap.rdcpix.com/photo/1.jpg"},
+          {"href": "https://ap.rdcpix.com/photo/2.jpg"}
+        ],
+        "location": {
+          "address": {
+            "line": "10 Park Ave, Rochester, NY 14607",
+            "coordinate": {"lat": 43.15, "lon": -77.61}
+          }
+        }
+      }
+    }
+  }
+}
