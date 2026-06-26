@@ -134,7 +134,10 @@ if st.button("Analyze Property", disabled=_guest_mode):
                     # This might require creating a more specific helper function in discovery/orchestrator.
                     listings = asyncio.run(run_scraper_discovery_async(enrich=True))
                     # Check if found in listings (this is highly simplified)
-                    found = next((l for l in listings if l.get("address") == address), None)
+                    found = next(
+                        (listing for listing in listings if listing.get("address") == address),
+                        None,
+                    )
                     if found:
                         status.update(label="✅ Found via scraper", state="complete")
                         run_initial_property_analysis(address, guest_mode=_guest_mode)

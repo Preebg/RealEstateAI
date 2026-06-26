@@ -8,7 +8,7 @@ from typing import Any
 from app_logging import configure_logging
 from discovery.models import ListingSeed, ScrapedListing
 from discovery.normalize import enriched_to_discovery_listing, seed_to_discovery_listing
-from discovery.repository import DEFAULT_DB_PATH, SqliteDiscoveryRepository
+from discovery.repository import DEFAULT_DB_PATH, SqliteDiscoveryRepository, discovery_repository
 from discovery.sources.redfin import RedfinListingSource
 from discovery.transport.http_client import ScraperHttpClient
 from knowledge_base import get_harvest_complete_addresses, normalize_address_key
@@ -25,11 +25,11 @@ class DiscoveryOrchestrator:
     def __init__(
         self,
         *,
-        repository: SqliteDiscoveryRepository | None = None,
+        repository: Any | None = None,
         http_client: ScraperHttpClient | None = None,
         sources: list[Any] | None = None,
     ) -> None:
-        self._repo = repository or SqliteDiscoveryRepository()
+        self._repo = repository or discovery_repository(persist=True)
         self._http = http_client or ScraperHttpClient()
         self._owns_http = http_client is None
         self._sources = sources or [RedfinListingSource(self._http)]
@@ -268,6 +268,7 @@ async def run_scraper_discovery_async(
     db_path: str | None = None,
     per_market_limit: int = 25,
     enrich: bool = True,
+    persist: bool = True,
 ) -> list[dict[str, Any]]:
     """Search HOT_MARKETS and optionally enrich; used by discovery_scraper.py."""
     from engine import MAX_DISCOVERY_PRICE
@@ -279,7 +280,7 @@ async def run_scraper_discovery_async(
         if str(address).strip():
             exclude_keys.add(normalize_address_key(str(address)))
 
-    repo = SqliteDiscoveryRepository(db_path or DEFAULT_DB_PATH)
+    repo = discovery_repository(persist=persist, db_path=db_path or DEFAULT_DB_PATH)
     orchestrator = DiscoveryOrchestrator(repository=repo)
     try:
         return await orchestrator.run(

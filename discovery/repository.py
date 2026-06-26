@@ -202,3 +202,92 @@ class SqliteDiscoveryRepository:
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+class EphemeralDiscoveryRepository:
+    """In-memory discovery queue for headless harvest (no local SQLite file)."""
+
+    def __init__(self) -> None:
+        self._next_id = 1
+        self._rows: dict[int, dict[str, Any]] = {}
+        self._by_external: dict[tuple[str, str], int] = {}
+
+    def upsert_seed(self, seed: ListingSeed) -> int:
+        now = _utc_now()
+        key = (seed.source, seed.external_id)
+        existing_id = self._by_external.get(key)
+        if existing_id is not None:
+            self._rows[existing_id].update(
+                {
+                    "address": seed.address,
+                    "city": seed.city,
+                    "list_price": seed.list_price,
+                    "listing_url": seed.listing_url,
+                    "updated_at": now,
+                }
+            )
+            return existing_id
+
+        row_id = self._next_id
+        self._next_id += 1
+        self._by_external[key] = row_id
+        self._rows[row_id] = {
+            "id": row_id,
+            "address": seed.address,
+            "city": seed.city,
+            "list_price": seed.list_price,
+            "listing_url": seed.listing_url,
+            "source": seed.source,
+            "external_id": seed.external_id,
+            "status": "pending",
+            "raw_json": None,
+            "discovered_at": now,
+            "updated_at": now,
+        }
+        return row_id
+
+    def mark_enriched(self, row_id: int, scraped: ScrapedListing) -> None:
+        row = self._rows.get(row_id)
+        if row is None:
+            return
+        row["status"] = "enriched"
+        row["raw_json"] = json.dumps(scraped.to_dict())
+        row["updated_at"] = _utc_now()
+
+    def mark_status(self, row_id: int, status: str) -> None:
+        row = self._rows.get(row_id)
+        if row is None:
+            return
+        row["status"] = status
+        row["updated_at"] = _utc_now()
+
+    def mark_completed(self, row_id: int) -> None:
+        self.mark_status(row_id, "completed")
+
+    def get_enriched_by_external_id(
+        self,
+        source: str,
+        external_id: str,
+    ) -> ScrapedListing | None:
+        row_id = self._by_external.get((source, external_id))
+        if row_id is None:
+            return None
+        row = self._rows.get(row_id)
+        if row is None or not row.get("raw_json"):
+            return None
+        payload = json.loads(str(row["raw_json"]))
+        return ScrapedListing.from_dict(payload)
+
+    def mirror_property(self, address_key: str, payload: dict[str, Any]) -> None:
+        """No-op — Supabase is the canonical property store for harvester runs."""
+
+
+def discovery_repository(
+    *,
+    persist: bool = True,
+    db_path: Path | str | None = None,
+) -> SqliteDiscoveryRepository | EphemeralDiscoveryRepository:
+    """Return SQLite persistence or an in-memory repo for single-run harvest."""
+    if persist:
+        return SqliteDiscoveryRepository(db_path)
+    return EphemeralDiscoveryRepository()

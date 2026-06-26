@@ -15,11 +15,7 @@ from google.genai import errors
 import engine
 from app_logging import configure_logging, report_error
 from discovery.normalize import listing_dict_to_scraped, scraped_to_research_dict
-from discovery.orchestrator import (
-    dequeue_enriched_listings_async,
-    run_scraper_discovery_async,
-)
-from discovery.repository import DEFAULT_DB_PATH, SqliteDiscoveryRepository
+from discovery.orchestrator import run_scraper_discovery_async
 from config_secrets import (
     load_streamlit_secrets_into_environ,
     normalize_secret_value,
@@ -55,16 +51,18 @@ _active_research_model = engine.RESEARCH_MODEL
 _active_synthesis_model = engine.SYNTHESIS_MODEL
 
 def resolve_discovery_backend() -> str:
-    """Return ``scraper`` (default) or ``gemini`` from DISCOVERY_BACKEND."""
-    backend = os.getenv("DISCOVERY_BACKEND", "scraper").strip().lower()
-    if backend in ("gemini", "scraper"):
-        return backend
+    """Return ``scraper`` or ``gemini`` (default) from DISCOVERY_BACKEND."""
+    raw = os.getenv("DISCOVERY_BACKEND")
+    if raw is not None and raw.strip():
+        backend = raw.strip().lower()
+        if backend in ("gemini", "scraper"):
+            return backend
     legacy = os.getenv("HARVESTER_USE_SCRAPER", "").strip().lower()
     if legacy in ("1", "true", "yes", "on"):
         return "scraper"
     if legacy in ("0", "false", "no", "off"):
         return "gemini"
-    return "scraper"
+    return "gemini"
 
 
 @dataclass
@@ -72,7 +70,6 @@ class _SynthesisJob:
     address: str
     market_city: str
     research: dict[str, Any]
-    queue_id: int | None = None
 
 
 @dataclass
@@ -437,12 +434,10 @@ async def _research_listing(
         return None
 
     print(f"  [research] DONE {address}")
-    queue_id = int(listing["_queue_id"]) if listing.get("_queue_id") else None
     return _SynthesisJob(
         address=address,
         market_city=market_city,
         research=research,
-        queue_id=queue_id,
     )
 
 
@@ -469,15 +464,6 @@ async def _synthesize_harvest_property_with_fallback(
         session=session,
         geospatial=geospatial,
     )
-
-
-def _finalize_queue_save(queue_id: int, final_data: dict[str, Any]) -> None:
-    """Mark SQLite queue row completed and upsert property_mirror after Supabase save."""
-    repo = SqliteDiscoveryRepository(DEFAULT_DB_PATH)
-    repo.mark_completed(queue_id)
-    address_key = normalize_address_key(str(final_data.get("address", "")))
-    if address_key:
-        repo.mirror_property(address_key, final_data)
 
 
 async def _synthesize_listing(
@@ -606,8 +592,6 @@ async def _synthesize_listing(
         f"  [synthesis] SAVED {address} — "
         f"Quantum: {quantum:.1f}% | Cash Flow: ${cash_flow:,.2f}"
     )
-    if job.queue_id is not None:
-        await asyncio.to_thread(_finalize_queue_save, job.queue_id, final_data)
 
 
 async def _run_synthesis_safe(
@@ -766,21 +750,19 @@ async def run_harvester_pipeline_async(admin_user_id: str) -> dict[str, Any]:
 
     print(
         f"[discovery] Stage 1 START — "
-        f"{'SQLite enriched queue' if discovery_backend == 'scraper' else 'hot-market LLM search'} "
-        f"(≤{engine.MAX_DISCOVERY_LISTINGS} listings under "
+        f"{'live Redfin search' if discovery_backend == 'scraper' else 'hot-market LLM search'} "
+        f"(Supabase KB skip list; ≤{engine.MAX_DISCOVERY_LISTINGS} listings under "
         f"${engine.MAX_DISCOVERY_PRICE:,})...",
         flush=True,
     )
 
     if discovery_backend == "scraper":
-        listings = await dequeue_enriched_listings_async(
+        listings = await run_scraper_discovery_async(
             admin_user_id=admin_user_id,
             exclude_addresses=scanned_addresses,
+            enrich=True,
+            persist=False,
         )
-        # If the queue is empty, trigger the scraper search
-        if not listings:
-            print("[discovery] Queue empty, running scraper discovery search...")
-            listings = await run_scraper_discovery_async(enrich=True)
     else:
 
         def _run_discovery() -> list[dict[str, Any]]:
@@ -808,7 +790,15 @@ async def run_harvester_pipeline_async(admin_user_id: str) -> dict[str, Any]:
 
     if not listings:
         if discovery_backend == "scraper":
-            print("No enriched listings in SQLite queue and search returned no new listings. Exiting.")
+            if complete_keys:
+                print(
+                    "No new listings to harvest — live search found only addresses "
+                    f"already in Supabase ({len(complete_keys)} complete)."
+                )
+            else:
+                print(
+                    "Live scraper search returned no listings under the price cap. Exiting."
+                )
         else:
             print("No listings discovered. Exiting.")
         return report
@@ -892,13 +882,44 @@ def _configure_stdio() -> None:
                 pass
 
 
+def _print_harvest_exit_summary(report: dict[str, Any]) -> None:
+    """CLI footer — distinguish zero-save runs from successful harvests."""
+    saved_count = len(report.get("saved", []))
+    if saved_count > 0:
+        print(f"Harvester finished successfully. Saved {saved_count} properties.", flush=True)
+        return
+
+    skipped = len(report.get("skipped", []))
+    already = len(report.get("already_scanned", []))
+    failed = len(report.get("failed", []))
+    unreliable = len(report.get("unreliable_deleted", []))
+    discovered = int(report.get("discovered", 0))
+
+    print("Harvester finished with 0 properties saved.", flush=True)
+    if discovered == 0:
+        print(
+            "  Discovery found no new listings (all markets already in Supabase or search empty).",
+            flush=True,
+        )
+    else:
+        print(
+            f"  Discovery: {discovered} | Skipped: {skipped} | "
+            f"Already in KB: {already} | Unreliable: {unreliable} | Failed: {failed}",
+            flush=True,
+        )
+        print(
+            "  Tip: listings already in Supabase with year_built are skipped automatically.",
+            flush=True,
+        )
+
+
 def main() -> None:
     _configure_stdio()
     print("Harvester starting (headless CLI)...", flush=True)
     try:
         admin_user_id = require_harvest_config()
-        run_harvester_pipeline(admin_user_id)
-        print("Harvester finished successfully.", flush=True)
+        report = run_harvester_pipeline(admin_user_id)
+        _print_harvest_exit_summary(report)
     except SystemExit:
         raise
     except Exception as exc:
@@ -944,10 +965,10 @@ def _render_streamlit_app() -> None:
     col3.metric("Synthesis Model", _active_synthesis_model)
 
     st.info(
-        f"Set DISCOVERY_BACKEND=scraper to dequeue enriched rows from SQLite "
-        f"(run `python discovery_scraper.py --enrich-only` first). Default gemini uses "
-        f"LLM discovery (≤{engine.MAX_DISCOVERY_LISTINGS} listings under "
-        f"${engine.MAX_DISCOVERY_PRICE:,}). Research runs with up to "
+        f"Harvester uses Supabase as the source of truth (no local SQLite). Default "
+        f"DISCOVERY_BACKEND=gemini runs LLM hot-market search (≤{engine.MAX_DISCOVERY_LISTINGS} "
+        f"listings under ${engine.MAX_DISCOVERY_PRICE:,}). Set DISCOVERY_BACKEND=scraper for "
+        f"live Redfin search in-memory only. Research runs with up to "
         f"{engine.MAX_CONCURRENT_RESEARCH_AGENTS} concurrent workers; synthesis starts "
         f"as each research job completes (rate-limited to "
         f"{engine.HARVESTER_RPM_PER_MODEL} calls/min per model). "
@@ -968,6 +989,12 @@ def _render_streamlit_app() -> None:
             f"Saved {len(report['saved'])} properties"
             + (f" ({market_summary})" if market_summary else "")
         )
+        if not report["saved"]:
+            st.warning(
+                "No properties were saved this run. Check the status log above — common causes: "
+                "all listings already in Supabase, discovery found nothing new, listings were "
+                "skipped (price/condition), or synthesis failed."
+            )
 
         if report["skipped"]:
             with st.expander(f"Skipped ({len(report['skipped'])})"):
