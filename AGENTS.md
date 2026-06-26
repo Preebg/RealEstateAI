@@ -47,7 +47,7 @@ Matches `.github/workflows/ci.yml`:
 export PATH="$HOME/.local/bin:$PATH"
 export GEMINI_API_KEY=fake_key_for_ci
 ruff check .
-mypy quantum_portfolio.py engine.py --follow-imports=silent
+mypy quantum_portfolio.py engine.py
 pytest test_app.py -v
 ```
 
