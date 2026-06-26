@@ -4178,18 +4178,27 @@ class TestDiscoveryScraper(unittest.TestCase):
         self.assertEqual(listings[0]["discovery_model"], "scraper")
 
     def test_harvester_scraper_discovery_branch_no_gemini_agent(self):
-        """Harvester with DISCOVERY_BACKEND=scraper must not call engine discovery agent."""
+        """Harvester with DISCOVERY_BACKEND=scraper must not call Gemini when scraper returns listings."""
         import asyncio
         from unittest.mock import AsyncMock
 
         admin_uid = "00000000-0000-0000-0000-000000000001"
         gemini_guard = AssertionError("Gemini discovery agent must not run")
+        scraper_listing = {
+            "address": "10 Park Ave, Rochester, NY 14607",
+            "city": "Rochester",
+            "list_price": 210000,
+            "listing_url": "https://www.redfin.com/NY/Rochester/10-Park-Ave-14607/home/12345678",
+            "source": "redfin",
+            "external_id": "12345678",
+            "discovery_model": "scraper",
+        }
 
         with patch.dict(os.environ, {"DISCOVERY_BACKEND": "scraper"}, clear=False):
             with patch(
                 "harvester.run_scraper_discovery_async",
                 new_callable=AsyncMock,
-                return_value=[],
+                return_value=[scraper_listing],
             ) as mock_scraper:
                 with patch(
                     "engine.discover_hot_market_listings",
@@ -4204,14 +4213,65 @@ class TestDiscoveryScraper(unittest.TestCase):
                             return_value=[],
                         ):
                             with patch("harvester.get_kb_raw_data", return_value={}):
-                                from harvester import run_harvester_pipeline_async
+                                with patch(
+                                    "harvester._research_and_schedule_synthesis",
+                                    new_callable=AsyncMock,
+                                ):
+                                    from harvester import run_harvester_pipeline_async
 
-                                report = asyncio.run(
-                                    run_harvester_pipeline_async(admin_uid)
-                                )
+                                    report = asyncio.run(
+                                        run_harvester_pipeline_async(admin_uid)
+                                    )
 
         mock_scraper.assert_called_once()
-        self.assertEqual(report["discovered"], 0)
+        self.assertEqual(report["discovered"], 1)
+
+    def test_harvester_scraper_empty_falls_back_to_gemini(self):
+        """When scraper returns 0 listings, harvester falls back to Gemini discovery."""
+        import asyncio
+        from unittest.mock import AsyncMock
+
+        admin_uid = "00000000-0000-0000-0000-000000000001"
+        gemini_listing = {
+            "address": "20 Main St, Rochester, NY 14607",
+            "city": "Rochester",
+            "list_price": 199000,
+            "listing_url": "https://www.redfin.com/example",
+            "discovery_model": "gemini-2.5-flash",
+        }
+
+        with patch.dict(os.environ, {"DISCOVERY_BACKEND": "scraper"}, clear=False):
+            with patch(
+                "harvester.run_scraper_discovery_async",
+                new_callable=AsyncMock,
+                return_value=[],
+            ) as mock_scraper:
+                with patch(
+                    "engine.discover_hot_market_listings",
+                    return_value=[gemini_listing],
+                ) as mock_gemini:
+                    with patch(
+                        "harvester.purge_unreliable_one_year_roi_properties",
+                        return_value=[],
+                    ):
+                        with patch(
+                            "harvester.get_harvest_complete_addresses",
+                            return_value=[],
+                        ):
+                            with patch("harvester.get_kb_raw_data", return_value={}):
+                                with patch(
+                                    "harvester._research_and_schedule_synthesis",
+                                    new_callable=AsyncMock,
+                                ):
+                                    from harvester import run_harvester_pipeline_async
+
+                                    report = asyncio.run(
+                                        run_harvester_pipeline_async(admin_uid)
+                                    )
+
+        mock_scraper.assert_called_once()
+        mock_gemini.assert_called_once()
+        self.assertEqual(report["discovered"], 1)
 
     def test_scraper_listing_research_skips_gemini_research(self):
         """Scraper-enriched listings must not invoke Gemini research_property_async."""
