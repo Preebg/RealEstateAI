@@ -5,6 +5,7 @@ import asyncio
 import os
 import sys
 import time
+from urllib.parse import urlparse
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -19,6 +20,12 @@ from discovery.orchestrator import (
     run_scraper_discovery_async,
 )
 from discovery.repository import DEFAULT_DB_PATH, SqliteDiscoveryRepository
+from config_secrets import (
+    load_streamlit_secrets_into_environ,
+    normalize_secret_value,
+    normalize_supabase_url,
+    resolve_hostname,
+)
 from finance import analyze_investment
 from knowledge_base import (
     delete_unreliable_property,
@@ -193,19 +200,6 @@ def headless_cash_flow(property_data: dict[str, Any]) -> float:
     return analysis["monthly_net_cash_flow"]
 
 
-def _parse_secrets_toml(path: Path) -> dict[str, Any]:
-    """Parse secrets.toml on Python 3.11+ (tomllib) or older (tomli)."""
-    with path.open("rb") as secrets_file:
-        try:
-            import tomllib
-
-            return tomllib.load(secrets_file)
-        except ImportError:
-            import tomli
-
-            return tomli.load(secrets_file)
-
-
 def _load_local_secrets() -> None:
     """Load .streamlit/secrets.toml into os.environ for headless CLI runs."""
     secrets_path = Path(__file__).resolve().parent / ".streamlit" / "secrets.toml"
@@ -213,32 +207,47 @@ def _load_local_secrets() -> None:
         log.info("secrets_toml_missing", path=str(secrets_path))
         return
 
-    try:
-        secrets = _parse_secrets_toml(secrets_path)
-    except Exception as exc:
-        log.error("secrets_toml_parse_failed", path=str(secrets_path), error=str(exc))
-        print(f"Warning: could not parse {secrets_path}: {exc}")
-        return
-
-    for key, value in secrets.items():
-        if os.getenv(key):
-            continue
-        if isinstance(value, str):
-            os.environ[key] = value
-        elif isinstance(value, (int, float, bool)):
-            os.environ[key] = str(value)
+    if not load_streamlit_secrets_into_environ(secrets_path=secrets_path):
+        log.error("secrets_toml_parse_failed", path=str(secrets_path))
+        print(f"Warning: could not parse {secrets_path}")
 
 
 def _secret_from_env_or_streamlit(name: str) -> str | None:
-    value = os.getenv(name)
+    value = normalize_secret_value(os.getenv(name))
     if value:
         return value
     if os.environ.get("STREAMLIT_RUNTIME_ENV"):
         import streamlit as st
 
         secret = st.secrets.get(name)
-        return str(secret) if secret is not None else None
+        return normalize_secret_value(secret)
     return None
+
+
+def _validate_harvest_network() -> bool:
+    """Confirm Supabase (and scraper hosts) resolve on this machine."""
+    raw_url = _secret_from_env_or_streamlit("SUPABASE_URL")
+    if not raw_url:
+        return False
+
+    try:
+        supabase_url = normalize_supabase_url(raw_url)
+        os.environ["SUPABASE_URL"] = supabase_url
+        resolve_hostname(urlparse(supabase_url).hostname or "", label="SUPABASE_URL")
+    except (OSError, ValueError) as exc:
+        log.error("harvest_dns_failed", error=str(exc), supabase_url=raw_url)
+        print(f"Network configuration error: {exc}")
+        return False
+
+    if resolve_discovery_backend() == "scraper":
+        try:
+            resolve_hostname("www.redfin.com", label="Redfin scraper")
+        except OSError as exc:
+            log.error("harvest_dns_failed", error=str(exc), host="www.redfin.com")
+            print(f"Network configuration error: {exc}")
+            return False
+
+    return True
 
 
 def validate_harvest_config() -> str | None:
@@ -270,6 +279,9 @@ def validate_harvest_config() -> str | None:
             "   Watch for typos: letter 'l' vs digit '1', letter 'O' vs zero '0'.\n"
             f"   Current value: {raw_admin!r}"
         )
+        return None
+
+    if not _validate_harvest_network():
         return None
 
     from authenticate import get_service_client

@@ -1,6 +1,7 @@
 import json
 import math
 import os
+import socket
 import tempfile
 import unittest
 import gc
@@ -3803,6 +3804,51 @@ class TestDiscoveryScraper(unittest.TestCase):
         self.assertIn("SUMMARY RULES:", prompt)
         self.assertIn("Never paste sentences from the listing description.", prompt)
         self.assertNotIn('"listing_description"', prompt)
+
+
+class TestConfigSecrets(unittest.TestCase):
+    def test_normalize_secret_value_strips_wrapping_quotes(self) -> None:
+        from config_secrets import normalize_secret_value
+
+        self.assertEqual(
+            normalize_secret_value('"https://abc.supabase.co"'),
+            "https://abc.supabase.co",
+        )
+
+    def test_normalize_supabase_url_rejects_postgres_dsn(self) -> None:
+        from config_secrets import normalize_supabase_url
+
+        with self.assertRaises(ValueError):
+            normalize_supabase_url(
+                "postgresql://postgres:secret@db.abc.supabase.co:5432/postgres"
+            )
+
+    def test_load_streamlit_secrets_normalizes_existing_env(self) -> None:
+        import config_secrets
+
+        with tempfile.TemporaryDirectory() as tmp:
+            secrets_path = Path(tmp) / "secrets.toml"
+            secrets_path.write_text(
+                'SUPABASE_URL = "https://fresh.supabase.co"\n',
+                encoding="utf-8",
+            )
+            with patch.dict(
+                os.environ,
+                {"SUPABASE_URL": ' "https://stale.supabase.co" '},
+                clear=False,
+            ):
+                loaded = config_secrets.load_streamlit_secrets_into_environ(
+                    secrets_path=secrets_path
+                )
+                self.assertTrue(loaded)
+                self.assertEqual(os.environ["SUPABASE_URL"], "https://stale.supabase.co")
+
+    @patch("config_secrets.socket.getaddrinfo")
+    def test_resolve_hostname_prefers_ipv4(self, mock_getaddrinfo) -> None:
+        from config_secrets import resolve_hostname
+
+        resolve_hostname("example.supabase.co", label="SUPABASE_URL")
+        self.assertEqual(mock_getaddrinfo.call_args_list[0].args[2], socket.AF_INET)
 
 
 if __name__ == "__main__":

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import socket
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
@@ -59,6 +61,12 @@ class ScraperHttpClient:
             await self._rate_limiter.acquire(host)
             try:
                 response = await self._client.request(method, url)
+            except httpx.ConnectError as exc:
+                last_error = exc
+                if attempt == 0 and "getaddrinfo" in str(exc).lower():
+                    _raise_dns_hint(url, host, exc)
+                await asyncio.sleep(min(2 ** attempt, 16))
+                continue
             except httpx.HTTPError as exc:
                 last_error = exc
                 await asyncio.sleep(min(2 ** attempt, 16))
@@ -73,7 +81,24 @@ class ScraperHttpClient:
             response.raise_for_status()
             return response
 
+        if isinstance(last_error, httpx.ConnectError) and "getaddrinfo" in str(last_error).lower():
+            _raise_dns_hint(url, host, last_error)
         raise RuntimeError(f"HTTP request failed after {self._max_retries} attempts: {url}") from last_error
+
+
+def _raise_dns_hint(url: str, host: str, exc: BaseException) -> None:
+    """Turn opaque getaddrinfo failures into actionable harvest-machine guidance."""
+    parsed_host = urlparse(url).hostname or host
+    hint = (
+        f"DNS lookup failed for {parsed_host!r} while requesting {url}. "
+        "On the harvest machine, verify internet access, DNS/firewall settings, "
+        "and that no proxy is required."
+    )
+    try:
+        socket.getaddrinfo(parsed_host, None, socket.AF_INET, socket.SOCK_STREAM)
+    except socket.gaierror as dns_exc:
+        raise OSError(f"{hint} ({dns_exc})") from exc
+    raise OSError(hint) from exc
 
 
 def _decode_stingray_json(text: str) -> Any:

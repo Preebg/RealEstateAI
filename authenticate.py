@@ -16,6 +16,11 @@ from postgrest.exceptions import APIError
 from supabase import Client, create_client
 
 from app_logging import configure_logging, report_error
+from config_secrets import (
+    load_streamlit_secrets_into_environ,
+    normalize_secret_value,
+    normalize_supabase_url,
+)
 from legal import APP_NAME, APP_TAGLINE, get_privacy_policy_text, get_terms_of_service_text
 
 log = configure_logging("authenticate")
@@ -103,11 +108,20 @@ class StreamlitAuthStorage:
 
 
 def _get_secret(name: str) -> str:
-    value = os.getenv(name)
+    if _headless_mode():
+        load_streamlit_secrets_into_environ()
+    value = normalize_secret_value(os.getenv(name))
     if value:
+        if name == "SUPABASE_URL":
+            return normalize_supabase_url(value)
         return value
     try:
-        return st.secrets[name]
+        secret = normalize_secret_value(st.secrets[name])
+        if not secret:
+            raise KeyError(name)
+        if name == "SUPABASE_URL":
+            return normalize_supabase_url(secret)
+        return secret
     except Exception as exc:
         raise EnvironmentError(
             f"{name} not set. Add it to environment variables or Streamlit secrets."
@@ -135,14 +149,15 @@ def in_streamlit_app() -> bool:
 
 def _get_optional_secret(name: str) -> str | None:
     """Return a secret when set; None if missing (no error)."""
-    value = os.getenv(name)
-    if value and str(value).strip():
-        return str(value).strip()
+    if _headless_mode():
+        load_streamlit_secrets_into_environ()
+    value = normalize_secret_value(os.getenv(name))
+    if value:
+        return value
     if not _headless_mode():
         try:
             if name in st.secrets:
-                secret = str(st.secrets[name]).strip()
-                return secret or None
+                return normalize_secret_value(st.secrets[name])
         except Exception:
             pass
     return None

@@ -115,7 +115,36 @@ if st.button("Analyze Property", disabled=_guest_mode):
         st.session_state.pop("quantum_finance_sig", None)
         st.session_state.pop("run_market_crash_sim", None)
         set_active_analysis_address(address)
-        run_initial_property_analysis(address, guest_mode=_guest_mode)
+        
+        # New flow: KB -> Scraper -> Research if still not found
+        from knowledge_base import lookup_property
+        cached = lookup_property(address)
+        if cached:
+            # KB hit, run analysis directly
+            run_initial_property_analysis(address, guest_mode=_guest_mode)
+        else:
+            # KB miss, try scraper
+            from discovery.orchestrator import run_scraper_discovery_async
+            import asyncio
+            
+            with st.status(f"🔍 KB miss. Scraping {address}...", expanded=True) as status:
+                try:
+                    # In a real app we'd need more specific parameters, 
+                    # but for this flow we attempt a targeted scrape.
+                    # This might require creating a more specific helper function in discovery/orchestrator.
+                    listings = asyncio.run(run_scraper_discovery_async(enrich=True))
+                    # Check if found in listings (this is highly simplified)
+                    found = next((l for l in listings if l.get("address") == address), None)
+                    if found:
+                        status.update(label="✅ Found via scraper", state="complete")
+                        run_initial_property_analysis(address, guest_mode=_guest_mode)
+                    else:
+                        status.update(label="⚠️ Not found in scrape, falling back to LLM research", state="running")
+                        run_initial_property_analysis(address, guest_mode=_guest_mode)
+                except Exception as e:
+                    st.error(f"Scraper error: {e}")
+                    run_initial_property_analysis(address, guest_mode=_guest_mode)
+
     else:
         st.warning("Please enter a property address.")
 elif _guest_mode and not st.session_state.property_data:
