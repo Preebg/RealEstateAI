@@ -432,7 +432,7 @@ class TestDailyQuotaDetection(unittest.TestCase):
                     generate_with_retry(DISCOVERY_MODEL, "prompt")
                 mock_sleep.assert_not_called()
 
-    def test_discovery_switches_to_gemma_on_flash_lite_quota(self):
+    def test_discovery_switches_to_gemma_on_flash_quota(self):
         payload = json.dumps([_VERIFIED_DISCOVERY_ROW])
         quota_err = errors.ClientError(
             429,
@@ -447,7 +447,7 @@ class TestDailyQuotaDetection(unittest.TestCase):
 
         def fake_generate(model, contents, **kwargs):
             calls.append(model)
-            if model == "gemini-2.5-flash-lite":
+            if model in ("gemini-2.5-flash", "gemini-2.5-flash-lite"):
                 raise quota_err
             return _discovery_generate_return(payload)
 
@@ -457,7 +457,7 @@ class TestDailyQuotaDetection(unittest.TestCase):
         self.assertEqual(calls[0], DISCOVERY_MODEL)
         self.assertEqual(
             DISCOVERY_MODEL_CHAIN,
-            ("gemini-2.5-flash-lite", "gemma-4-26b-a4b-it"),
+            ("gemini-2.5-flash", "gemini-2.5-flash-lite", "gemma-4-26b-a4b-it"),
         )
         self.assertTrue(any(model == "gemma-4-26b-a4b-it" for model in calls))
 
@@ -4066,7 +4066,7 @@ class TestDiscoveryScraper(unittest.TestCase):
             {"DISCOVERY_BACKEND": "", "HARVESTER_USE_SCRAPER": ""},
             clear=False,
         ):
-            self.assertEqual(resolve_discovery_backend(), "scraper")
+            self.assertEqual(resolve_discovery_backend(), "gemini")
 
     def _mock_portal_http(self):
         """Return a ScraperHttpClient backed by fixture-driven httpx responses."""

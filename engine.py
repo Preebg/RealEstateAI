@@ -48,8 +48,9 @@ from quantum_portfolio import (
 _log = get_logger("engine")
 
 # --- Model routing (harvester + underwriter) ---
-DISCOVERY_MODEL = "gemini-2.5-flash-lite"
+DISCOVERY_MODEL = "gemini-2.5-flash"
 DISCOVERY_FALLBACK_MODELS: tuple[str, ...] = (
+    "gemini-2.5-flash-lite",
     "gemma-4-26b-a4b-it",
 )
 DISCOVERY_MODEL_CHAIN: tuple[str, ...] = (
@@ -78,6 +79,7 @@ SYNTHESIS_FALLBACK_MODEL = SYNTHESIS_FALLBACK_MODELS[-1]
 
 # Accuracy workflow: discovery Maps tiers, property value, coordinate catch.
 MAPS_GROUNDED_DISCOVERY_MODELS: tuple[str, ...] = (
+    "gemini-2.5-flash",
     "gemini-2.5-flash-lite",
 )
 PROPERTY_VALUE_MODEL = "gemma-4-26b-a4b-it"
@@ -3099,8 +3101,8 @@ def discover_hot_market_listings(
     Stage 1 (Discovery): Search Grounding across prioritized hot markets.
     Returns up to MAX_DISCOVERY_LISTINGS listings (< max_price).
 
-    Model order: gemini-2.5-flash-lite -> gemma-4-26b-a4b-it
-    Flash-lite enables Maps grounding; Gemma is search-only.
+    Model order: gemini-2.5-flash -> gemini-2.5-flash-lite -> gemma-4-26b-a4b-it
+    Gemini tiers enable Maps grounding; Gemma is search-only.
     (tier 3 resolves to gemma-4-26b-a4b-it on the hosted API).
 
     Regional-first: sequential geography agents (one API call at a time), then

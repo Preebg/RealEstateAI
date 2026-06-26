@@ -46,12 +46,12 @@ INVESTMENT_PARAMS = {
 }
 
 # Active models for this run (updated when RPD fallback triggers).
-_active_discovery_model = "scraper"
+_active_discovery_model = engine.DISCOVERY_MODEL
 _active_research_model = engine.RESEARCH_MODEL
 _active_synthesis_model = engine.SYNTHESIS_MODEL
 
 def resolve_discovery_backend() -> str:
-    """Return ``scraper`` (default) or ``gemini`` from DISCOVERY_BACKEND."""
+    """Return ``gemini`` (default) or ``scraper`` from DISCOVERY_BACKEND."""
     raw = os.getenv("DISCOVERY_BACKEND")
     if raw is not None and raw.strip():
         backend = raw.strip().lower()
@@ -62,7 +62,7 @@ def resolve_discovery_backend() -> str:
         return "scraper"
     if legacy in ("0", "false", "no", "off"):
         return "gemini"
-    return "scraper"
+    return "gemini"
 
 
 @dataclass
@@ -768,6 +768,21 @@ async def run_harvester_pipeline_async(admin_user_id: str) -> dict[str, Any]:
             enrich=True,
             persist=False,
         )
+        if not listings:
+            print(
+                "[discovery] Scraper returned 0 listings (portal 403/bot blocks are common). "
+                "Falling back to Gemini hot-market search...",
+                flush=True,
+            )
+            listings = await asyncio.to_thread(
+                lambda: engine.discover_hot_market_listings(
+                    exclude_addresses=scanned_addresses,
+                )
+            )
+            if listings:
+                used_model = str(listings[0].get("discovery_model", "")).strip()
+                if used_model:
+                    _active_discovery_model = used_model
     else:
 
         def _run_discovery() -> list[dict[str, Any]]:
@@ -971,10 +986,10 @@ def _render_streamlit_app() -> None:
 
     st.info(
         f"Harvester uses Supabase as the source of truth (no local SQLite). Default "
-        f"DISCOVERY_BACKEND=scraper runs live Redfin, Realtor, and Zillow search "
-        f"in-memory (cross-source merge for accuracy). Set DISCOVERY_BACKEND=gemini "
-        f"for LLM hot-market search (≤{engine.MAX_DISCOVERY_LISTINGS} listings under "
-        f"${engine.MAX_DISCOVERY_PRICE:,}). Research runs with up to "
+        f"DISCOVERY_BACKEND=gemini runs LLM hot-market search via {engine.DISCOVERY_MODEL} "
+        f"(≤{engine.MAX_DISCOVERY_LISTINGS} listings under ${engine.MAX_DISCOVERY_PRICE:,}). "
+        f"Set DISCOVERY_BACKEND=scraper to try Redfin/Realtor/Zillow HTTP search "
+        f"(auto-falls back to Gemini when portals return 403). Research runs with up to "
         f"{engine.MAX_CONCURRENT_RESEARCH_AGENTS} concurrent workers; synthesis starts "
         f"as each research job completes (rate-limited to "
         f"{engine.HARVESTER_RPM_PER_MODEL} calls/min per model). "
