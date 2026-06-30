@@ -4549,5 +4549,136 @@ class TestConfigSecrets(unittest.TestCase):
         self.assertEqual(mock_getaddrinfo.call_args_list[0].args[2], socket.AF_INET)
 
 
+class PropertyNotificationsTests(unittest.TestCase):
+    def test_qualifies_for_deal_alert_requires_positive_cashflow(self) -> None:
+        from property_notifications import qualifies_for_deal_alert
+
+        self.assertFalse(
+            qualifies_for_deal_alert(
+                monthly_net_cash_flow=0.0,
+                cash_on_cash=8.0,
+                year_built=1995,
+            )
+        )
+        self.assertTrue(
+            qualifies_for_deal_alert(
+                monthly_net_cash_flow=100.0,
+                cash_on_cash=8.0,
+                year_built=1995,
+            )
+        )
+
+    def test_qualifies_for_deal_alert_requires_year_after_1980(self) -> None:
+        from property_notifications import qualifies_for_deal_alert
+
+        self.assertFalse(
+            qualifies_for_deal_alert(
+                monthly_net_cash_flow=100.0,
+                cash_on_cash=8.0,
+                year_built=1980,
+            )
+        )
+        self.assertTrue(
+            qualifies_for_deal_alert(
+                monthly_net_cash_flow=100.0,
+                cash_on_cash=8.0,
+                year_built=1981,
+            )
+        )
+
+    def test_qualifies_for_deal_alert_requires_coc_above_five(self) -> None:
+        from property_notifications import qualifies_for_deal_alert
+
+        self.assertFalse(
+            qualifies_for_deal_alert(
+                monthly_net_cash_flow=100.0,
+                cash_on_cash=5.0,
+                year_built=1995,
+            )
+        )
+        self.assertTrue(
+            qualifies_for_deal_alert(
+                monthly_net_cash_flow=100.0,
+                cash_on_cash=5.01,
+                year_built=1995,
+            )
+        )
+
+    def test_is_great_match_after_2010(self) -> None:
+        from property_notifications import is_great_match
+
+        self.assertFalse(is_great_match(2010))
+        self.assertTrue(is_great_match(2011))
+
+    def test_resolve_listing_url_prefers_trusted_portals(self) -> None:
+        from property_notifications import resolve_listing_url
+
+        row = {
+            "listing_url": "https://www.zillow.com/homedetails/example/123_zpid/",
+            "source_url": "https://example.com/not-a-portal",
+        }
+        self.assertEqual(
+            resolve_listing_url(row),
+            "https://www.zillow.com/homedetails/example/123_zpid/",
+        )
+
+    def test_build_discord_payload_includes_great_match_label(self) -> None:
+        from property_notifications import build_discord_payload
+
+        payload = build_discord_payload(
+            address="10 Park Ave, Rochester, NY",
+            property_data={"price": 250000},
+            monthly_net_cash_flow=350.0,
+            cash_on_cash=7.5,
+            year_built=2015,
+            share_url="https://capeigen.streamlit.app?share=abc",
+            listing_url="https://www.redfin.com/CA/San-Diego/example/home/123",
+        )
+        self.assertIn("Great match!", payload["content"])
+        self.assertIn("CapEigen share link", payload["embeds"][0]["description"])
+        self.assertIn("Listing", payload["embeds"][0]["description"])
+
+    @patch("property_notifications.send_discord_webhook", return_value=True)
+    @patch("property_notifications._mark_discord_alert_sent")
+    @patch("property_notifications._already_sent_discord_alert", return_value=False)
+    @patch("property_notifications.resolve_discord_webhook_url", return_value="https://discord.test/hook")
+    def test_maybe_send_posts_when_criteria_met(
+        self,
+        _mock_webhook_url: object,
+        _mock_dedup: object,
+        _mock_mark: object,
+        mock_send: object,
+    ) -> None:
+        from property_notifications import maybe_send_qualified_deal_alert
+
+        with patch(
+            "share_access.create_headless_property_share_url",
+            return_value="https://capeigen.streamlit.app?share=token",
+        ) as share_fn:
+            sent = maybe_send_qualified_deal_alert(
+                {
+                    "address": "10 Park Ave, Rochester, NY",
+                    "price": 200000,
+                    "original_ai_rent": 2200,
+                    "tax_rate": 1.2,
+                    "insurance": 120,
+                    "hoa": 0,
+                    "original_ai_maint": 4,
+                    "ai_vacancy_rate": 5,
+                    "ai_management_fee": 10,
+                    "year_built": 2015,
+                    "listing_url": "https://www.zillow.com/homedetails/example/123_zpid/",
+                },
+                property_id="00000000-0000-4000-8000-000000000001",
+                finance_metrics={
+                    "monthly_net_cash_flow": 400.0,
+                    "cash_on_cash": 8.0,
+                },
+            )
+        self.assertTrue(sent)
+        mock_send.assert_called_once()
+        share_fn.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()

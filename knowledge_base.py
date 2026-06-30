@@ -1346,15 +1346,21 @@ def save_knowledge_base(
     if canonical_response is None:
         return None
 
-    if not save_override:
-        return canonical_response
-
     address = property_data.get("address")
     property_id = None
     if canonical_response.data:
         row = canonical_response.data[0]
         if row.get("id"):
             property_id = str(row["id"])
+    if property_id:
+        from property_notifications import maybe_send_qualified_deal_alert
+
+        notify_payload = dict(property_data)
+        notify_payload["id"] = property_id
+        maybe_send_qualified_deal_alert(notify_payload, property_id=property_id)
+
+    if not save_override:
+        return canonical_response
     if not property_id:
         property_id = resolve_canonical_property_id(str(address or ""))
 
@@ -1750,6 +1756,12 @@ def save_harvest_property(
                 persist_comps_to_canonical(
                     persist_payload,
                     use_service_client=True,
+                )
+                from property_notifications import maybe_send_qualified_deal_alert
+
+                maybe_send_qualified_deal_alert(
+                    persist_payload,
+                    property_id=str(property_id),
                 )
     return response
 
