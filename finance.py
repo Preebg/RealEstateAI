@@ -46,6 +46,9 @@ MONTHLY_INSURANCE_ANNUAL_THRESHOLD = 400.0
 # Quick monthly rent estimate when listing/AI rent is missing (1% rule).
 DEFAULT_RENT_TO_PRICE_RATIO = 0.01
 
+# LLMs sometimes return purchase price in thousands as monthly rent (e.g. $2,499,000 → $2,499).
+PRICE_THOUSANDS_RENT_MIN_PRICE = 10_000.0
+
 
 def _positive_currency(value: Any) -> float:
     """Parse a numeric field and return it only when strictly positive."""
@@ -62,6 +65,25 @@ def _positive_currency(value: Any) -> float:
     return parsed if parsed > 0 else 0.0
 
 
+def _property_price_for_rent(property_data: dict[str, Any]) -> float:
+    return _positive_currency(property_data.get("price")) or _positive_currency(
+        property_data.get("predicted_value")
+    )
+
+
+def is_price_thousands_rent_artifact(rent: float, price: float) -> bool:
+    """
+    True when rent equals purchase price expressed in thousands (common LLM mistake).
+
+    Example: price $2,499,000 with rent $2,499 should be rejected and re-estimated.
+    """
+    if rent <= 0 or price < PRICE_THOUSANDS_RENT_MIN_PRICE:
+        return False
+    price_in_thousands = price / 1000.0
+    tolerance = max(1.0, price_in_thousands * 0.005)
+    return abs(rent - price_in_thousands) <= tolerance
+
+
 def resolve_monthly_rent(
     property_data: dict[str, Any],
     *,
@@ -72,9 +94,11 @@ def resolve_monthly_rent(
 
     Priority: saved rent → AI baseline → listing research → rental comps → 1% rule.
     """
+    price = _property_price_for_rent(property_data)
+
     for key in ("rent", "original_ai_rent"):
         candidate = _positive_currency(property_data.get(key))
-        if candidate > 0:
+        if candidate > 0 and not is_price_thousands_rent_artifact(candidate, price):
             return round(candidate, 2)
 
     research_data = research if isinstance(research, dict) else {}
@@ -92,9 +116,6 @@ def resolve_monthly_rent(
             if candidate > 0:
                 return round(candidate, 2)
 
-    price = _positive_currency(property_data.get("price")) or _positive_currency(
-        property_data.get("predicted_value")
-    )
     if price > 0:
         return round(price * DEFAULT_RENT_TO_PRICE_RATIO, 2)
 

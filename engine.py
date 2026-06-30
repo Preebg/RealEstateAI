@@ -21,7 +21,9 @@ from google import genai
 from google.genai import errors, types
 from app_logging import get_logger
 from finance import (
+    analyze_investment,
     calculate_10yr_appreciation,
+    is_price_thousands_rent_artifact,
     normalize_monthly_insurance,
     normalize_percent_rate,
     normalize_tax_rate_percent,
@@ -236,6 +238,29 @@ def _region_scaled_target(region_key: str) -> int:
     )
 MIN_PREFERRED_YEAR_BUILT = 1985
 MAX_DISCOVERY_PRICE = 250_000
+# Standard loan assumptions for automated single-property cash-flow sanity checks.
+DEFAULT_UNDERWRITING_DOWN_PAYMENT_PCT = 25.0
+DEFAULT_UNDERWRITING_INTEREST_RATE = 6.0
+DEFAULT_UNDERWRITING_LOAN_TERM = 30
+DEFAULT_UNDERWRITING_CLOSING_COSTS_PCT = 3.0
+SUSPICIOUS_MONTHLY_CASH_FLOW_THRESHOLD = 500.0
+_CASH_FLOW_RECHECK_KEYS = frozenset(
+    {
+        "price",
+        "year",
+        "rent",
+        "tax_rate",
+        "hoa",
+        "insurance",
+        "maint_percent",
+        "predicted_value",
+        "prediction_reasoning",
+        "vacancy_rate",
+        "management_fee",
+        "property_label",
+        "summary",
+    }
+)
 _TRUSTED_LISTING_DOMAINS = ("zillow.com", "redfin.com", "realtor.com")
 _LISTING_DETAIL_URL_MARKERS = (
     "homedetails",
@@ -2751,6 +2776,10 @@ def _sanitize_synthesis_numerics(data: dict[str, Any]) -> None:
             parsed = normalize_tax_rate_percent(parsed)
         elif key in ("vacancy_rate", "management_fee", "maint_percent"):
             parsed = normalize_percent_rate(parsed)
+        elif key == "rent":
+            price = safe_float(data.get("price")) or safe_float(data.get("predicted_value"))
+            if is_price_thousands_rent_artifact(parsed, price):
+                parsed = 0.0
         data[key] = int(parsed) if key in _INTEGER_SYNTHESIS_KEYS else parsed
 
 
@@ -3952,6 +3981,148 @@ def _synthesis_fallback_payload(research: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def _estimate_headless_monthly_cash_flow(property_data: dict[str, Any]) -> float:
+    """Estimate monthly net cash flow using default underwriting loan assumptions."""
+    price = safe_float(property_data.get("price"))
+    rent = resolve_monthly_rent(property_data)
+    if price <= 0 or rent <= 0:
+        return 0.0
+
+    vacancy = safe_float(property_data.get("vacancy_rate"))
+    if vacancy <= 0:
+        vacancy = safe_float(property_data.get("ai_vacancy_rate"), 5.0)
+    mgmt = safe_float(property_data.get("management_fee"))
+    if mgmt <= 0:
+        mgmt = safe_float(property_data.get("ai_management_fee"), 10.0)
+
+    analysis = analyze_investment(
+        price=price,
+        down_payment_pct=DEFAULT_UNDERWRITING_DOWN_PAYMENT_PCT,
+        interest_rate=DEFAULT_UNDERWRITING_INTEREST_RATE,
+        loan_term=DEFAULT_UNDERWRITING_LOAN_TERM,
+        closing_costs_pct=DEFAULT_UNDERWRITING_CLOSING_COSTS_PCT,
+        tax_rate=safe_float(property_data.get("tax_rate")),
+        monthly_insurance=safe_float(property_data.get("insurance")),
+        monthly_hoa=safe_float(property_data.get("hoa")),
+        maint_percent=safe_float(property_data.get("maint_percent"), 4.0),
+        monthly_rent=rent,
+        vacancy_reserve_pct=vacancy,
+        management_fee_pct=mgmt,
+    )
+    return round(analysis["monthly_net_cash_flow"], 2)
+
+
+def _cash_flow_recheck_prompt(
+    address: str,
+    property_data: dict[str, Any],
+    *,
+    research: dict[str, Any] | None,
+    estimated_cash_flow: float,
+) -> str:
+    research_block = json.dumps(research or {}, indent=2)
+    draft = {
+        key: property_data.get(key)
+        for key in _CASH_FLOW_RECHECK_KEYS
+        if property_data.get(key) is not None
+    }
+    return f"""You are a senior real estate underwriter auditing a first-pass analysis for:
+{address}
+
+The draft underwriting implies ${estimated_cash_flow:,.0f}/mo net cash flow using standard assumptions
+(25% down, 6% interest, 30-year loan, 3% closing costs). That is unusually high for a single
+residential rental and likely indicates bad inputs — especially rent, price, tax_rate, or insurance.
+
+COMMON ERRORS TO FIX:
+- Rent confused with list price or list price ÷ 1000 (e.g. $2,499,000 → $2,499 rent).
+- Rent Zestimate used instead of listing-stated gross rent for multifamily.
+- tax_rate returned as decimal (0.034) instead of percent (3.4).
+- Annual insurance premium left as monthly (values above ~$400/mo are often annual ÷ 12 errors in reverse).
+- List price used when actual taxes/insurance don't match that price tier.
+
+RESEARCH DATA (ground truth anchors):
+{research_block}
+
+DRAFT UNDERWRITING JSON:
+{json.dumps(draft, indent=2)}
+
+Re-verify every field against the research and listing facts. Return ONLY a corrected JSON object
+with these keys (same schema as draft; omit keys you cannot improve):
+{{
+  "price": number,
+  "year": number,
+  "rent": number,
+  "tax_rate": number,
+  "hoa": number,
+  "insurance": number,
+  "summary": "string",
+  "maint_percent": number,
+  "predicted_value": number,
+  "prediction_reasoning": "string",
+  "vacancy_rate": number,
+  "management_fee": number,
+  "property_label": "string"
+}}
+
+No currency symbols, commas, or markdown outside JSON."""
+
+
+def _recheck_property_if_suspicious_cash_flow(
+    property_data: dict[str, Any],
+    *,
+    address: str,
+    research: dict[str, Any] | None = None,
+    model: str | None = None,
+    session: GenaiSession | None = None,
+) -> dict[str, Any]:
+    """Ask the synthesis model to re-verify inputs when cash flow looks unrealistically high."""
+    if property_data.get("cash_flow_rechecked"):
+        return property_data
+
+    estimated = _estimate_headless_monthly_cash_flow(property_data)
+    if estimated <= SUSPICIOUS_MONTHLY_CASH_FLOW_THRESHOLD:
+        return property_data
+
+    _log.warning(
+        "cash_flow_recheck_triggered",
+        address=address,
+        estimated_cash_flow=estimated,
+    )
+
+    active_model = _resolve_model_slug(model or SYNTHESIS_MODEL)
+    prompt = _cash_flow_recheck_prompt(
+        address,
+        property_data,
+        research=research,
+        estimated_cash_flow=estimated,
+    )
+    try:
+        raw = generate_with_retry(
+            active_model,
+            prompt,
+            use_search=False,
+            session=session,
+        )
+        corrected = _extract_json(raw)
+    except Exception as exc:
+        _log.warning("cash_flow_recheck_failed", address=address, error=str(exc))
+        property_data["cash_flow_rechecked"] = True
+        return property_data
+
+    if not isinstance(corrected, dict):
+        property_data["cash_flow_rechecked"] = True
+        return property_data
+
+    for key in _CASH_FLOW_RECHECK_KEYS:
+        if key in corrected and corrected[key] is not None:
+            property_data[key] = corrected[key]
+
+    property_data["cash_flow_rechecked"] = True
+    _sanitize_synthesis_numerics(property_data)
+    backfill_property_rent(property_data, research=research)
+    canonicalize_year_built_fields(property_data)
+    return property_data
+
+
 def _finalize_synthesis_payload(
     address: str,
     research: dict[str, Any],
@@ -3983,6 +4154,11 @@ def _finalize_synthesis_payload(
     _sanitize_synthesis_numerics(data)
     backfill_property_rent(data, research=research)
     canonicalize_year_built_fields(data)
+    data = _recheck_property_if_suspicious_cash_flow(
+        data,
+        address=address,
+        research=research,
+    )
     enriched = enrich_with_forecast(data)
     if geospatial:
         enriched = attach_geospatial_to_property(enriched, geospatial)
@@ -4602,6 +4778,11 @@ def get_final_analysis(
     if not isinstance(research_dict, dict):
         research_dict = None
     backfill_property_rent(property_data, research=research_dict)
+    property_data = _recheck_property_if_suspicious_cash_flow(
+        property_data,
+        address=address,
+        research=research_dict,
+    )
     enriched = enrich_with_forecast(property_data)
     return attach_data_provenance(
         ensure_comps_analysis_field(enriched),

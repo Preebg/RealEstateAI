@@ -568,18 +568,22 @@ def backfill_missing_year_built_catalog(
 
 def get_ai_baseline_rent(record: dict[str, Any]) -> float:
     """AI-suggested monthly rent (falls back to saved rent for legacy rows)."""
-    from finance import resolve_monthly_rent
+    from finance import is_price_thousands_rent_artifact, resolve_monthly_rent
+
+    price = _safe_property_float(record.get("price")) or _safe_property_float(
+        record.get("predicted_value")
+    )
 
     if record.get("original_ai_rent") is not None:
         try:
             baseline = float(record["original_ai_rent"])
-            if baseline > 0:
+            if baseline > 0 and not is_price_thousands_rent_artifact(baseline, price):
                 return baseline
         except (TypeError, ValueError):
             pass
     try:
         rent = float(record.get("rent") or 0)
-        if rent > 0:
+        if rent > 0 and not is_price_thousands_rent_artifact(rent, price):
             return rent
     except (TypeError, ValueError):
         pass
@@ -592,7 +596,15 @@ def backfill_property_rent(
     research: dict[str, Any] | None = None,
 ) -> float:
     """Ensure property_data carries a positive monthly rent when estimable."""
-    from finance import resolve_monthly_rent
+    from finance import is_price_thousands_rent_artifact, resolve_monthly_rent
+
+    price = _safe_property_float(property_data.get("price")) or _safe_property_float(
+        property_data.get("predicted_value")
+    )
+    for key in ("rent", "original_ai_rent"):
+        current = _safe_property_float(property_data.get(key))
+        if current > 0 and is_price_thousands_rent_artifact(current, price):
+            property_data.pop(key, None)
 
     resolved = resolve_monthly_rent(property_data, research=research)
     if resolved <= 0:

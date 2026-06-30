@@ -1384,6 +1384,41 @@ class TestRentResolution(unittest.TestCase):
         self.assertAlmostEqual(record["original_ai_rent"], 2_000.0)
         self.assertAlmostEqual(get_ai_baseline_rent(record), 2_000.0)
 
+    def test_price_thousands_rent_artifact_detected(self):
+        from finance import is_price_thousands_rent_artifact
+
+        self.assertTrue(is_price_thousands_rent_artifact(2_499, 2_499_000))
+        self.assertTrue(is_price_thousands_rent_artifact(250, 250_000))
+        self.assertFalse(is_price_thousands_rent_artifact(2_500, 250_000))
+        self.assertFalse(is_price_thousands_rent_artifact(24_990, 2_499_000))
+
+    def test_resolve_monthly_rent_rejects_price_thousands_artifact(self):
+        from finance import resolve_monthly_rent
+
+        self.assertAlmostEqual(
+            resolve_monthly_rent({"price": 2_499_000, "rent": 2_499}),
+            24_990.0,
+        )
+
+    def test_backfill_property_rent_corrects_price_thousands_artifact(self):
+        from knowledge_base import backfill_property_rent, get_ai_baseline_rent
+
+        record = {"price": 2_499_000, "rent": 2_499, "original_ai_rent": 2_499}
+        backfill_property_rent(record)
+        self.assertAlmostEqual(record["rent"], 24_990.0)
+        self.assertAlmostEqual(record["original_ai_rent"], 24_990.0)
+        self.assertAlmostEqual(get_ai_baseline_rent(record), 24_990.0)
+
+    def test_sanitize_synthesis_rent_rejects_price_thousands_artifact(self):
+        from engine import _sanitize_synthesis_numerics
+        from knowledge_base import backfill_property_rent
+
+        data = {"price": 2_499_000, "rent": 2_499}
+        _sanitize_synthesis_numerics(data)
+        self.assertEqual(data["rent"], 0.0)
+        backfill_property_rent(data)
+        self.assertAlmostEqual(data["rent"], 24_990.0)
+
     def test_apply_rent_comps_fills_missing_rent(self):
         from rent_comps_analysis import apply_rent_comps_adjustment
 
@@ -1396,6 +1431,88 @@ class TestRentResolution(unittest.TestCase):
         self.assertTrue(apply_rent_comps_adjustment(property_data, rent_comps))
         self.assertEqual(property_data["rent"], 1650)
         self.assertEqual(property_data["original_ai_rent"], 1650)
+
+
+class TestCashFlowRecheck(unittest.TestCase):
+    def test_estimate_headless_monthly_cash_flow_high_rent(self):
+        from engine import (
+            SUSPICIOUS_MONTHLY_CASH_FLOW_THRESHOLD,
+            _estimate_headless_monthly_cash_flow,
+        )
+
+        prop = {
+            "price": 100_000,
+            "rent": 3_000,
+            "tax_rate": 2.0,
+            "insurance": 80,
+            "hoa": 0,
+            "maint_percent": 4,
+            "vacancy_rate": 5,
+            "management_fee": 10,
+        }
+        cash_flow = _estimate_headless_monthly_cash_flow(prop)
+        self.assertGreater(cash_flow, SUSPICIOUS_MONTHLY_CASH_FLOW_THRESHOLD)
+
+    def test_recheck_skipped_when_cash_flow_below_threshold(self):
+        from unittest.mock import patch
+
+        from engine import _recheck_property_if_suspicious_cash_flow
+
+        prop = {
+            "price": 400_000,
+            "rent": 2_000,
+            "tax_rate": 2.5,
+            "insurance": 150,
+            "hoa": 0,
+            "maint_percent": 4,
+            "vacancy_rate": 5,
+            "management_fee": 10,
+        }
+        with patch("engine.generate_with_retry") as mock_generate:
+            result = _recheck_property_if_suspicious_cash_flow(
+                dict(prop),
+                address="123 Main St",
+            )
+        mock_generate.assert_not_called()
+        self.assertNotIn("cash_flow_rechecked", result)
+
+    def test_recheck_runs_when_cash_flow_above_threshold(self):
+        import json
+        from unittest.mock import patch
+
+        from engine import _recheck_property_if_suspicious_cash_flow
+
+        prop = {
+            "price": 100_000,
+            "rent": 3_000,
+            "tax_rate": 2.0,
+            "insurance": 80,
+            "hoa": 0,
+            "maint_percent": 4,
+            "vacancy_rate": 5,
+            "management_fee": 10,
+        }
+        corrected = {
+            "rent": 1_200,
+            "price": 100_000,
+            "tax_rate": 2.0,
+            "insurance": 80,
+            "hoa": 0,
+            "maint_percent": 4,
+            "vacancy_rate": 5,
+            "management_fee": 10,
+        }
+        with patch(
+            "engine.generate_with_retry",
+            return_value=json.dumps(corrected),
+        ) as mock_generate:
+            result = _recheck_property_if_suspicious_cash_flow(
+                dict(prop),
+                address="123 Main St",
+            )
+        mock_generate.assert_called_once()
+        self.assertEqual(result["rent"], 1_200)
+        self.assertTrue(result.get("cash_flow_rechecked"))
 
 
 class TestTaxRateNormalization(unittest.TestCase):
