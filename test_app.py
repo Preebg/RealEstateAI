@@ -7,7 +7,7 @@ import unittest
 import gc
 import shutil
 from contextlib import contextmanager
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1841,7 +1841,11 @@ class TestScannedAddressDetection(unittest.TestCase):
         }
         with patch("knowledge_base._fetch_canonical_properties", return_value=[row]):
             with patch("knowledge_base._fetch_user_overrides_map", return_value={}):
-                hit = lookup_property("123 main st, rochester, ny 14607")
+                with patch(
+                    "knowledge_base._fetch_property_detail",
+                    return_value={**row, "comps_analysis": {"comp_count": 2}},
+                ):
+                    hit = lookup_property("123 main st, rochester, ny 14607")
         self.assertIsNotNone(hit)
         self.assertTrue(hit.get("from_kb"))
         self.assertEqual(hit["price"], 200000)
@@ -1879,8 +1883,52 @@ class TestScannedAddressDetection(unittest.TestCase):
                 matches = search_kb_addresses("28 grant")
         self.assertEqual(matches, ["28 Grant Ave, Rochester, NY"])
 
+    def test_active_property_cutoff_is_30_days_ago(self):
+        from knowledge_base import ACTIVE_PROPERTY_ARCHIVE_DAYS, _active_property_cutoff_iso
 
-class TestResolveCanonicalPropertyId(unittest.TestCase):
+        cutoff = datetime.fromisoformat(_active_property_cutoff_iso())
+        expected = datetime.now(timezone.utc) - timedelta(days=ACTIVE_PROPERTY_ARCHIVE_DAYS)
+        self.assertLess(abs((cutoff - expected).total_seconds()), 5)
+
+    def test_fetch_canonical_properties_applies_active_cutoff(self):
+        from unittest.mock import MagicMock, patch
+
+        from knowledge_base import (
+            ACTIVE_PROPERTY_LIST_SELECT,
+            _fetch_canonical_properties,
+        )
+
+        mock_client = MagicMock()
+        mock_table = mock_client.table.return_value
+        mock_select = mock_table.select.return_value
+        mock_gte = mock_select.gte.return_value
+        mock_order = mock_gte.order.return_value
+        mock_order.range.return_value.execute.return_value = MagicMock(data=[])
+
+        with patch("knowledge_base.get_client", return_value=mock_client):
+            _fetch_canonical_properties()
+
+        mock_client.table.assert_called_with("properties")
+        mock_table.select.assert_called_with(ACTIVE_PROPERTY_LIST_SELECT)
+        gte_args = mock_select.gte.call_args[0]
+        self.assertEqual(gte_args[0], "timestamp")
+        self.assertIsInstance(gte_args[1], str)
+
+    def test_archive_stale_properties_calls_rpc(self):
+        from unittest.mock import MagicMock, patch
+
+        from knowledge_base import archive_stale_properties
+
+        mock_client = MagicMock()
+        mock_client.rpc.return_value.execute.return_value = MagicMock(data=3)
+        with patch("authenticate.get_service_client", return_value=mock_client):
+            with patch("knowledge_base.invalidate_kb_cache") as invalidate_mock:
+                moved = archive_stale_properties()
+        self.assertEqual(moved, 3)
+        mock_client.rpc.assert_called_with(
+            "archive_stale_properties", {"p_age_days": 30}
+        )
+        invalidate_mock.assert_called_once()
     def test_prefers_valid_property_id_over_stale_cache(self):
         from unittest.mock import patch
 

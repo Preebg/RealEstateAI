@@ -40,7 +40,10 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
+from datetime import datetime, timedelta, timezone
 from supabase import Client
+
+from knowledge_base import ACTIVE_PROPERTY_ARCHIVE_DAYS
 
 from engine import (
     PROPERTY_VALUE_TRIGGERED_MODEL,
@@ -534,11 +537,14 @@ def get_supabase_client() -> Client:
 
 
 def fetch_outreach_candidates(supabase: Client, *, limit: int | None = None) -> list[dict[str, Any]]:
-    """Scan undrafted properties in timestamp order until enough pass all filters."""
+    """Scan undrafted active properties in timestamp order until enough pass all filters."""
     eligible: list[dict[str, Any]] = []
     page_size = 200
     offset = 0
     target = limit if limit is not None else None
+    cutoff = (
+        datetime.now(timezone.utc) - timedelta(days=ACTIVE_PROPERTY_ARCHIVE_DAYS)
+    ).isoformat()
 
     while target is None or len(eligible) < target:
         end = offset + page_size - 1
@@ -546,6 +552,7 @@ def fetch_outreach_candidates(supabase: Client, *, limit: int | None = None) -> 
             supabase.table("properties")
             .select("*")
             .eq("email_drafted", False)
+            .gte("timestamp", cutoff)
             .order("timestamp", desc=False)
             .range(offset, end)
             .execute()

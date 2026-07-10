@@ -29,6 +29,7 @@ from knowledge_base import (
     get_harvest_complete_addresses,
     get_kb_raw_data,
     get_market_pulse,
+    archive_stale_properties,
     is_property_harvest_complete,
     normalize_address_key,
     one_year_roi_unreliable_reason,
@@ -725,6 +726,18 @@ async def run_harvester_pipeline_async(admin_user_id: str) -> dict[str, Any]:
         if len(purged) > 5:
             print(f"  - ... and {len(purged) - 5} more")
         log.info("harvest_unreliable_purge_complete", purged=len(purged))
+
+    archived = await asyncio.to_thread(archive_stale_properties)
+    if archived:
+        from portfolio_map_page import invalidate_portfolio_cache
+
+        invalidate_portfolio_cache()
+        print(
+            f"Archived {archived} properties older than 30 days "
+            "(moved to archived_properties)."
+        )
+        log.info("harvest_archive_stale_complete", archived=archived)
+        report["archived"] = archived
 
     complete_keys = get_harvest_complete_addresses(admin_user_id)
     scanned_keys = set(complete_keys)

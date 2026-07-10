@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import re
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID
 
@@ -24,6 +25,51 @@ from finance import (
 log = configure_logging("knowledge_base")
 
 KB_CACHE_TTL_SECONDS = 300
+ACTIVE_PROPERTY_ARCHIVE_DAYS = 30
+
+ACTIVE_PROPERTY_LIST_COLUMNS = (
+    "id",
+    "address",
+    "user_id",
+    "zip_code",
+    "state_code",
+    "price",
+    "year_built",
+    "rent",
+    "tax_rate",
+    "hoa",
+    "insurance",
+    "predicted_value",
+    "location_score",
+    "property_label",
+    "property_category",
+    "from_kb",
+    "quantum_risk_score",
+    "market_city",
+    "square_footage",
+    "property_condition",
+    "appreciation_forecast",
+    "forecast_rate",
+    "forecast_growth",
+    "ai_vacancy_rate",
+    "ai_management_fee",
+    "monthly_net_cash_flow",
+    "original_ai_rent",
+    "original_ai_maint",
+    "maint_percent",
+    "latitude",
+    "longitude",
+    "geocode_confidence",
+    "geocode_source",
+    "primary_image_url",
+    "listing_status",
+    "days_on_market",
+    "view_count",
+    "timestamp",
+    "environmental_risk",
+)
+
+ACTIVE_PROPERTY_LIST_SELECT = ",".join(ACTIVE_PROPERTY_LIST_COLUMNS)
 
 try:
     import streamlit as st
@@ -82,8 +128,14 @@ def _resolve_user_id(user_id: str | None) -> str | None:
     return None
 
 
+def _active_property_cutoff_iso() -> str:
+    """ISO timestamp for the oldest visible catalog row (exclusive archive boundary)."""
+    cutoff = datetime.now(timezone.utc) - timedelta(days=ACTIVE_PROPERTY_ARCHIVE_DAYS)
+    return cutoff.isoformat()
+
+
 def _fetch_canonical_properties() -> list[dict[str, Any]]:
-    """Return all shared canonical property rows (one per address)."""
+    """Return active shared canonical property rows (last 30 days only)."""
     if in_streamlit_app():
         from share_access import fetch_guest_portfolio, is_guest_viewer
 
@@ -94,12 +146,14 @@ def _fetch_canonical_properties() -> list[dict[str, Any]]:
     page_size = 500
     offset = 0
     rows: list[dict[str, Any]] = []
+    cutoff = _active_property_cutoff_iso()
     try:
         while True:
             end = offset + page_size - 1
             response = (
                 supabase.table("properties")
-                .select("*")
+                .select(ACTIVE_PROPERTY_LIST_SELECT)
+                .gte("timestamp", cutoff)
                 .order("timestamp", desc=False)
                 .range(offset, end)
                 .execute()
@@ -113,6 +167,81 @@ def _fetch_canonical_properties() -> list[dict[str, Any]]:
         report_error(log, "kb_canonical_fetch_failed", exc)
         return rows
     return rows
+
+
+def _fetch_property_detail(
+    *,
+    property_id: str | None = None,
+    address: str | None = None,
+) -> dict[str, Any] | None:
+    """Fetch one active property with full analysis payloads (single-row egress)."""
+    if not property_id and not address:
+        return None
+
+    supabase = get_client()
+    cutoff = _active_property_cutoff_iso()
+    try:
+        query = (
+            supabase.table("properties")
+            .select("*")
+            .gte("timestamp", cutoff)
+            .limit(1)
+        )
+        if property_id:
+            query = query.eq("id", property_id)
+        else:
+            query = query.eq("address", str(address).strip())
+        response = query.execute()
+    except APIError as exc:
+        report_error(
+            log,
+            "kb_property_detail_fetch_failed",
+            exc,
+            property_id=property_id,
+            address=address,
+        )
+        return None
+
+    rows = response.data or []
+    return rows[0] if rows else None
+
+
+def archive_stale_properties(
+    *,
+    age_days: int = ACTIVE_PROPERTY_ARCHIVE_DAYS,
+) -> int:
+    """
+    Move catalog rows older than ``age_days`` into ``archived_properties``.
+
+    Requires the Supabase service role (harvester / admin automation).
+    """
+    from authenticate import get_service_client
+
+    client = get_service_client()
+    if client is None:
+        log.warning("archive_stale_properties_skipped", reason="no_service_client")
+        return 0
+
+    try:
+        response = client.rpc(
+            "archive_stale_properties", {"p_age_days": age_days}
+        ).execute()
+    except APIError as exc:
+        report_error(log, "archive_stale_properties_failed", exc)
+        return 0
+
+    moved = response.data
+    if isinstance(moved, list):
+        moved = moved[0] if moved else 0
+    try:
+        count = int(moved or 0)
+    except (TypeError, ValueError):
+        count = 0
+
+    if count:
+        invalidate_kb_cache()
+        log.info("archive_stale_properties_success", moved=count, age_days=age_days)
+    return count
 
 
 def _fetch_user_overrides_map(user_id: str) -> dict[str, dict[str, Any]]:
@@ -308,11 +437,20 @@ def lookup_property(address: str, user_id: str | None = None) -> dict[str, Any] 
 
     data = get_kb_raw_data(user_id)
     hit = data.get(normalize_address_key(address))
-    if hit:
-        record = _normalize_record_numerics(hit)
-        record["from_kb"] = True
-        return record
-    return None
+    if not hit:
+        return None
+
+    prop_id = hit.get("id")
+    if prop_id:
+        detail = _fetch_property_detail(property_id=str(prop_id))
+        if detail:
+            record = _normalize_record_numerics(detail)
+            record["from_kb"] = True
+            return record
+
+    record = _normalize_record_numerics(hit)
+    record["from_kb"] = True
+    return record
 
 
 RENT_OUTLIER_DEVIATION_PCT = 50.0
@@ -1967,6 +2105,8 @@ __all__ = [
     "delete_canonical_property_by_id",
     "delete_unreliable_property",
     "purge_unreliable_one_year_roi_properties",
+    "archive_stale_properties",
+    "ACTIVE_PROPERTY_ARCHIVE_DAYS",
     "get_kb_context",
     "get_market_pulse",
     "get_telemetry_stats",
