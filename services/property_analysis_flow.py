@@ -4,54 +4,89 @@ from __future__ import annotations
 
 from typing import Any
 
-import streamlit as st
-
 from engine import get_final_analysis, get_initial_analysis, safe_float
 from finance import analyze_investment
 from knowledge_base import lookup_property
-from services.deferred_analysis import (
-    build_deferred_task_queue,
-    set_active_analysis_address,
-)
+from services.deferred_analysis import build_deferred_task_queue
+
+
+class AnalysisError(Exception):
+    """Raised when property research cannot produce a usable listing."""
+
+
+def start_property_analysis(
+    address: str,
+    *,
+    guest_mode: bool = False,
+    user_id: str | None = None,
+) -> dict[str, Any]:
+    """
+    Headless fast path: KB pull or AI research, then prepare deferred task list.
+
+    Returns ``{property_data, deferred_tasks, from_kb}`` without Streamlit state.
+    """
+    cleaned = str(address or "").strip()
+    if not cleaned:
+        raise AnalysisError("Address is required")
+
+    cached = lookup_property(cleaned, user_id=user_id)
+    if cached:
+        initial_data = cached
+        from_kb = True
+        research_results = None
+    else:
+        initial_data, from_kb, research_results = get_initial_analysis(cleaned)
+
+    if not from_kb and safe_float(initial_data.get("price")) == 0:
+        raise AnalysisError(
+            "The AI could not find a valid listing price. "
+            "Please verify the address and try again."
+        )
+
+    final_result = get_final_analysis(
+        initial_data,
+        cleaned,
+        research_results,
+        skip_comps=True,
+    )
+    final_result["from_kb"] = from_kb
+    final_result["address"] = cleaned
+    queue = build_deferred_task_queue(final_result, guest_mode=guest_mode)
+    return {
+        "property_data": final_result,
+        "deferred_tasks": queue,
+        "from_kb": from_kb,
+    }
 
 
 def run_initial_property_analysis(address: str, *, guest_mode: bool = False) -> None:
     """
-    Fast path: AI research or KB pull, then defer comps / quantum / charts.
+    Streamlit wrapper: research property, set session state, then rerun.
 
-    Sets ``st.session_state.property_data`` and queues background work, then reruns
-    so the main analysis page can render before heavy simulations run.
+    Prefer ``start_property_analysis`` for FastAPI / headless callers.
     """
+    import streamlit as st
+
+    from services.deferred_analysis import set_active_analysis_address
+
     with st.status("🔍 Researching property and estimating value...", expanded=True) as status:
-        cached = lookup_property(address)
-        if cached:
+        try:
+            result = start_property_analysis(address, guest_mode=guest_mode)
+        except AnalysisError as exc:
+            st.error(str(exc))
+            st.stop()
+            return
+
+        from_kb = bool(result.get("from_kb"))
+        if from_kb:
             status.update(label="⚡ Instant Pull from Knowledge Base", state="running")
-            initial_data = cached
-            from_kb = True
-            research_results = None
         else:
             status.update(label="🔍 No cache hit — running AI research...", state="running")
-            initial_data, from_kb, research_results = get_initial_analysis(address)
-
-        if not from_kb and safe_float(initial_data.get("price")) == 0:
-            st.error(
-                "Error Fetching Property Data... The AI could not find a valid listing "
-                "price. Please verify the address and try again."
-            )
-            st.stop()
 
         status.update(label="📋 Preparing analysis view...", state="running")
-        final_result = get_final_analysis(
-            initial_data,
-            address,
-            research_results,
-            skip_comps=True,
-        )
-        final_result["from_kb"] = from_kb
-        final_result["address"] = address
+        final_result = result["property_data"]
+        queue = result["deferred_tasks"]
         set_active_analysis_address(address)
-
-        queue = build_deferred_task_queue(final_result, guest_mode=guest_mode)
         st.session_state.property_data = final_result
         st.session_state.deferred_tasks = queue
         st.session_state.deferred_tasks_total = len(queue)

@@ -1,0 +1,14 @@
+.git
+.venv
+venv
+__pycache__
+*.pyc
+web/node_modules
+web/dist
+.streamlit/secrets.toml
+.env
+.cursor
+reports
+data
+db
+*.log

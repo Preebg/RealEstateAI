@@ -4,40 +4,75 @@
 
 ### Product overview
 
-**CapEigen** is a Python Streamlit app (`AIUnderwriterv2.py`) for AI-assisted real-estate underwriting. Auth and data use **Supabase**; property research uses **Google Gemini**. See `docs/HARVESTER_SETUP.md` for the optional batch harvester (`harvester.py`).
+**CapEigen** is an AI-assisted real-estate underwriting product:
+
+- **Frontend:** React (Vite) SPA in `web/`, deployed on **Netlify**
+- **Backend:** FastAPI in `api/`, run via **Docker** / `docker-compose` (Railway/Fly/Cloud Run–ready)
+- **Data / auth:** Supabase; property research via Google Gemini
+
+Domain logic lives in root Python modules (`engine.py`, `finance.py`, `knowledge_base.py`, …). The legacy Streamlit app (`AIUnderwriterv2.py`) remains in-repo for reference but is **not** the primary entry.
+
+See `docs/HARVESTER_SETUP.md` for the optional batch harvester (`harvester.py`).
 
 ### PATH
 
-`pip install --user` puts CLI tools under `~/.local/bin`. Add it before running Streamlit or pytest:
+`pip install --user` puts CLI tools under `~/.local/bin`. Add it before running uvicorn or pytest:
 
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-### Secrets (required for the UI)
+### Secrets
 
-Create `.streamlit/secrets.toml` (gitignored) with at least:
+Copy `.env.example` to `.env` for the API:
 
 | Key | Purpose |
 |-----|---------|
 | `GEMINI_API_KEY` | Gemini API |
 | `SUPABASE_URL` | Supabase project URL |
 | `SUPABASE_KEY` | Supabase anon/publishable key |
-| `OAUTH_REDIRECT_URL` | Optional locally; defaults to `http://localhost:8501` |
+| `SUPABASE_SERVICE_ROLE_KEY` | Trusted jobs (harvester, some admin paths) |
+| `ADMIN_USER_ID` | Admin UUID for model-validation API |
+| `CORS_ORIGINS` | Comma-separated frontend origins |
 
-The app reads some values via `st.secrets` (not only `os.environ`), so a `secrets.toml` file is required even when env vars are set.
+Frontend (`web/.env`):
 
-Harvester-only keys: `ADMIN_USER_ID`, `SUPABASE_SERVICE_ROLE_KEY` (`docs/HARVESTER_SETUP.md`).
+| Key | Purpose |
+|-----|---------|
+| `VITE_SUPABASE_URL` | Same Supabase URL |
+| `VITE_SUPABASE_ANON_KEY` | Anon key (browser-safe) |
+| `VITE_API_URL` | Public API base URL (empty in local Vite to use `/api` proxy) |
 
-### Run the app
+Add your Netlify URL to Supabase Auth redirect URLs.
+
+### Run locally
+
+**API (Docker):**
+
+```bash
+docker compose up --build
+# http://localhost:8000/api/health
+```
+
+**API (without Docker):**
 
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
-cd /workspace
-streamlit run AIUnderwriterv2.py --server.enableCORS false --server.enableXsrfProtection false
+pip install -r requirements.txt
+uvicorn api.main:app --reload --port 8000
 ```
 
-Dev server: **http://localhost:8501**
+**Frontend:**
+
+```bash
+cd web
+cp .env.example .env
+npm install
+npm run dev
+# http://localhost:5173
+```
+
+**Netlify:** builds `web/` via `netlify.toml`. Set `VITE_*` env vars in the Netlify UI. Point `VITE_API_URL` at your deployed API.
 
 ### Lint / test / typecheck
 
@@ -48,23 +83,24 @@ export PATH="$HOME/.local/bin:$PATH"
 export GEMINI_API_KEY=fake_key_for_ci
 ruff check .
 mypy quantum_portfolio.py engine.py
-pytest test_app.py -v
+pytest test_app.py test_api.py -v
+cd web && npm ci && npm run build
 ```
-
-CI sets `GEMINI_API_KEY=fake_key_for_ci` because tests mock external APIs.
 
 ### Services
 
 | Service | Required? | Notes |
 |---------|-----------|-------|
-| Streamlit app | Yes | Single dev process on port 8501 |
+| Netlify SPA (`web/`) | Yes | Primary UI |
+| FastAPI (`api/`) | Yes | Docker on port 8000 |
 | Supabase (cloud) | Yes for real login/data | No local DB in repo |
 | Gemini API | Yes for property analysis | Mocked in unit tests |
-| Harvester | No | Separate CLI/Streamlit job |
+| Harvester | No | CLI / optional Streamlit control panel |
 
 ### Gotchas
 
-- Python **3.11+** expected (devcontainer uses 3.11; cloud VM may have 3.12).
-- No `docker-compose` or local Supabase — all backend is hosted.
-- Full E2E (login, search, save) needs **real** Supabase + Gemini credentials; placeholder secrets only prove the login shell loads.
-- `verify_app.py` references legacy `APP_PASSWORD`; production auth is in `authenticate.py` (Supabase OAuth + email/password).
+- Python **3.11+** expected (Dockerfile uses 3.11).
+- Analysis / quantum jobs run **asynchronously** — poll `GET /api/analysis/{job_id}`.
+- Multi-replica API needs an external job store (current jobs are in-process memory).
+- Full E2E needs real Supabase + Gemini credentials.
+- Legacy: `streamlit run AIUnderwriterv2.py` may still work for comparison during migration.

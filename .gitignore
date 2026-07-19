@@ -33,3 +33,7 @@ ARCHITECTURE.md
 README.md
 data/
 db/
+web/node_modules/
+web/dist/
+web/.env
+.netlify/

@@ -7,6 +7,7 @@ import hashlib
 import os
 import secrets
 import datetime
+from contextvars import ContextVar, Token
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
@@ -26,6 +27,11 @@ from legal import APP_NAME, APP_TAGLINE, get_privacy_policy_text, get_terms_of_s
 log = configure_logging("authenticate")
 
 _GOOGLE_G_LOGO_PATH = Path(__file__).resolve().parent / "assets" / "google-g-logo.png"
+
+# Set by FastAPI request middleware so knowledge_base uses the caller's JWT.
+_request_supabase_client: ContextVar[Client | None] = ContextVar(
+    "request_supabase_client", default=None
+)
 
 
 def _render_google_signin_button(oauth_url: str) -> None:
@@ -842,8 +848,26 @@ def restore_session_from_tokens() -> None:
             _clear_auth_state()
 
 
+def set_request_supabase_client(client: Client | None) -> Token:
+    """Bind a per-request Supabase client (FastAPI). Returns a reset token."""
+    return _request_supabase_client.set(client)
+
+
+def reset_request_supabase_client(token: Token) -> None:
+    """Clear the per-request Supabase client binding."""
+    _request_supabase_client.reset(token)
+
+
+def get_request_supabase_client() -> Client | None:
+    """Return the FastAPI-bound client when present."""
+    return _request_supabase_client.get()
+
+
 def get_authenticated_client() -> Client | None:
     """Supabase client with the logged-in user's JWT (required for RLS)."""
+    request_client = _request_supabase_client.get()
+    if request_client is not None:
+        return request_client
     if _headless_mode():
         return None
     access = st.session_state.get("sb_access_token")

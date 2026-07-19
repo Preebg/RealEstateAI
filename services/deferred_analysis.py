@@ -167,7 +167,8 @@ def sync_quantum_recompute_queue(
     st.session_state.quantum_finance_sig = None
 
 
-def _run_comps_task(address: str, property_info: dict[str, Any]) -> None:
+def _run_comps_task(address: str, property_info: dict[str, Any]) -> list[str]:
+    """Run comps fetch. Returns any newly required follow-up task names."""
     from comps_analysis import ensure_comps_analysis_field
 
     ensure_comps_analysis_field(property_info)
@@ -177,11 +178,15 @@ def _run_comps_task(address: str, property_info: dict[str, Any]) -> None:
     from knowledge_base import persist_comps_to_canonical
 
     persist_comps_to_canonical(property_info)
+    follow_ups: list[str] = []
     if property_info.pop("_forecast_display_cache", None) is not None:
-        queue = list(st.session_state.get("deferred_tasks") or [])
-        if "forecast_chart" not in queue:
-            queue.append("forecast_chart")
-            st.session_state.deferred_tasks = queue
+        follow_ups.append("forecast_chart")
+    return follow_ups
+
+
+def run_comps_task(address: str, property_info: dict[str, Any]) -> list[str]:
+    """Public headless comps runner. Mutates *property_info*."""
+    return _run_comps_task(address, property_info)
 
 
 def _run_quantum_task(
@@ -190,7 +195,7 @@ def _run_quantum_task(
     monthly_net_cash_flow: float,
     forecast_rate: float,
     location_score: float,
-) -> None:
+) -> str:
     quantum = calculate_quantum_risk(
         monthly_net_cash_flow,
         forecast_rate,
@@ -198,7 +203,23 @@ def _run_quantum_task(
     )
     property_info["quantum_risk"] = quantum
     property_info["quantum_risk_score"] = quantum["overall_success_pct"]
-    st.session_state.quantum_finance_sig = finance_task_signature(
+    return finance_task_signature(
+        monthly_net_cash_flow=monthly_net_cash_flow,
+        forecast_rate=forecast_rate,
+        location_score=location_score,
+    )
+
+
+def run_quantum_task(
+    property_info: dict[str, Any],
+    *,
+    monthly_net_cash_flow: float,
+    forecast_rate: float,
+    location_score: float,
+) -> str:
+    """Public headless quantum runner. Returns finance signature string."""
+    return _run_quantum_task(
+        property_info,
         monthly_net_cash_flow=monthly_net_cash_flow,
         forecast_rate=forecast_rate,
         location_score=location_score,
@@ -216,16 +237,26 @@ def _run_forecast_chart_task(property_info: dict[str, Any]) -> None:
     )
 
 
-def _execute_task(
+def run_forecast_chart_task(property_info: dict[str, Any]) -> None:
+    """Public headless forecast chart runner."""
+    _run_forecast_chart_task(property_info)
+
+
+def execute_deferred_task(
     task: str,
     *,
     address: str,
     property_info: dict[str, Any],
     finance_context: dict[str, Any] | None,
-) -> None:
+) -> list[str]:
+    """
+    Run one deferred task without Streamlit. Mutates *property_info*.
+
+    Returns follow-up task names that should be appended to the queue.
+    """
     if task == "comps":
-        _run_comps_task(address, property_info)
-    elif task == "quantum":
+        return _run_comps_task(address, property_info)
+    if task == "quantum":
         if finance_context is None:
             raise ValueError("finance_context is required for quantum task")
         _run_quantum_task(
@@ -234,10 +265,32 @@ def _execute_task(
             forecast_rate=finance_context["forecast_rate"],
             location_score=finance_context["location_score"],
         )
-    elif task == "forecast_chart":
+        return []
+    if task == "forecast_chart":
         _run_forecast_chart_task(property_info)
-    else:
-        raise ValueError(f"Unknown deferred task: {task}")
+        return []
+    raise ValueError(f"Unknown deferred task: {task}")
+
+
+def _execute_task(
+    task: str,
+    *,
+    address: str,
+    property_info: dict[str, Any],
+    finance_context: dict[str, Any] | None,
+) -> None:
+    follow_ups = execute_deferred_task(
+        task,
+        address=address,
+        property_info=property_info,
+        finance_context=finance_context,
+    )
+    if follow_ups:
+        queue = list(st.session_state.get("deferred_tasks") or [])
+        for name in follow_ups:
+            if name not in queue:
+                queue.append(name)
+        st.session_state.deferred_tasks = queue
 
 
 def pending_tasks() -> list[str]:
@@ -283,6 +336,12 @@ def _complete_deferred_task(
                     property_info=property_info,
                     finance_context=finance_context,
                 )
+                if task == "quantum" and finance_context:
+                    st.session_state.quantum_finance_sig = finance_task_signature(
+                        monthly_net_cash_flow=finance_context["monthly_net_cash_flow"],
+                        forecast_rate=finance_context["forecast_rate"],
+                        location_score=finance_context["location_score"],
+                    )
                 st.session_state.property_data = property_info
                 st.session_state[DEFERRED_TASKS_KEY] = queue[1:]
                 status.update(label=f"✅ {label}", state="complete")
@@ -299,6 +358,12 @@ def _complete_deferred_task(
             property_info=property_info,
             finance_context=finance_context,
         )
+        if task == "quantum" and finance_context:
+            st.session_state.quantum_finance_sig = finance_task_signature(
+                monthly_net_cash_flow=finance_context["monthly_net_cash_flow"],
+                forecast_rate=finance_context["forecast_rate"],
+                location_score=finance_context["location_score"],
+            )
         st.session_state.property_data = property_info
         st.session_state[DEFERRED_TASKS_KEY] = queue[1:]
     except Exception as exc:

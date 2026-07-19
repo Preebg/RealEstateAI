@@ -1,0 +1,1 @@
+"""CapEigen FastAPI application package."""
