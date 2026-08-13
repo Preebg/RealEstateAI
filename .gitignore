@@ -26,7 +26,6 @@ tests/*
 docs/QUANTUM_METHOD.md
 docs/DATA_PIPELINE.md
 ARCHITECTURE.md
-README.md
 data/
 # Local Postgres volume (schema lives in docker/postgres/)
 db/

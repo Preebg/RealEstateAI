@@ -52,9 +52,9 @@ services:
       - .env
     environment:
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173}
-      # Always use the compose DNS name inside the API container (host .env may say 127.0.0.1).
-      DATABASE_REST_URL: http://rest-gateway:3001
-      SUPABASE_AUTH_URL: ${SUPABASE_AUTH_URL:-${SUPABASE_URL}}
+      # Default: local PostgREST. Set DATABASE_REST_URL_DOCKER= (empty) to use hosted Supabase data.
+      DATABASE_REST_URL: "${DATABASE_REST_URL_DOCKER:-http://rest-gateway:3001}"
+      SUPABASE_AUTH_URL: "${SUPABASE_AUTH_URL:-${SUPABASE_URL}}"
     volumes:
       # Hot-reload domain code during local development
       - ./:/app

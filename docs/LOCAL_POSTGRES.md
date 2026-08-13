@@ -21,9 +21,10 @@ Auth stays remote (`SUPABASE_URL` / `SUPABASE_AUTH_URL`). Do **not** point the b
 cd C:\Projects\RealEstateAI
 copy .env.example .env
 # Fill SUPABASE_* (Auth), ADMIN_USER_ID, GEMINI_API_KEY
-# For local data, add:
-# DATABASE_REST_URL=http://127.0.0.1:3001
-# SUPABASE_SERVICE_ROLE_KEY=local-service-key
+# For local data on the host harvester, add:
+#   DATABASE_REST_URL=http://127.0.0.1:3001
+#   SUPABASE_SERVICE_ROLE_KEY=local-service-key
+# Compose API defaults to DATABASE_REST_URL_DOCKER=http://rest-gateway:3001
 
 docker compose up --build -d postgres postgrest rest-gateway api
 ```

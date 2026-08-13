@@ -5,7 +5,6 @@ from __future__ import annotations
 import os
 from contextvars import ContextVar, Token
 from urllib.parse import urlsplit
-from typing import Any
 
 from supabase import Client, create_client
 

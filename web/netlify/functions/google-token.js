@@ -1,28 +1,26 @@
 /**
  * Netlify function: exchange Google auth code (PKCE) for an id_token.
- * Keeps the client secret off the browser and OAuth redirect on CapEigen.
+ * Also kept under web/ in case site base resolves functions relative to base.
  */
 const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token'
 
-export async function handler(event) {
+exports.handler = async function handler(event) {
   if (event.httpMethod === 'OPTIONS') {
-    return {
-      statusCode: 204,
-      headers: corsHeaders(),
-      body: '',
-    }
+    return { statusCode: 204, headers: corsHeaders(), body: '' }
   }
 
   if (event.httpMethod !== 'POST') {
     return json(405, { detail: 'Method not allowed' })
   }
 
-  const clientId = (process.env.GOOGLE_WEB_CLIENT_ID || process.env.VITE_GOOGLE_CLIENT_ID || '').trim()
-  const clientSecret = (process.env.GOOGLE_WEB_CLIENT_SECRET || '').trim()
+  const clientId = String(
+    process.env.GOOGLE_WEB_CLIENT_ID || process.env.VITE_GOOGLE_CLIENT_ID || '',
+  ).trim()
+  const clientSecret = String(process.env.GOOGLE_WEB_CLIENT_SECRET || '').trim()
   if (!clientId || !clientSecret) {
     return json(503, {
       detail:
-        'Google OAuth secret missing on Netlify. Site settings → Environment variables → add GOOGLE_WEB_CLIENT_ID and GOOGLE_WEB_CLIENT_SECRET, then redeploy.',
+        'Google OAuth secret missing on Netlify. Site configuration → Environment variables → add GOOGLE_WEB_CLIENT_ID and GOOGLE_WEB_CLIENT_SECRET, then clear cache and redeploy.',
     })
   }
 
@@ -64,9 +62,11 @@ export async function handler(event) {
 
   const payload = await googleRes.json().catch(() => ({}))
   if (!googleRes.ok) {
-    return json(400, {
-      detail: payload.error_description || payload.error || 'Google token exchange failed',
-    })
+    const detail =
+      (typeof payload.error_description === 'string' && payload.error_description) ||
+      (typeof payload.error === 'string' && payload.error) ||
+      'Google token exchange failed'
+    return json(400, { detail })
   }
 
   if (!payload.id_token || typeof payload.id_token !== 'string') {

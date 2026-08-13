@@ -29,12 +29,10 @@ def _discovery_generate_return(payload: str) -> tuple[str, list[str]]:
 
 os.environ.setdefault("GEMINI_API_KEY", "fake_key_for_ci")
 
-from engine import (
+from engine import (  # noqa: E402
     calculate_quantum_probability,
     calculate_quantum_risk,
     clear_quantum_risk_cache,
-)
-from engine import (
     DISCOVERY_FALLBACK_MODEL,
     DISCOVERY_MODEL,
     DISCOVERY_MODEL_CHAIN,
@@ -54,7 +52,7 @@ from engine import (
     _repair_discovery_address,
     _build_listings_from_raw,
 )
-from finance import (
+from finance import (  # noqa: E402
     DEFAULT_METRO_CAGR,
     LOCATION_ADJUSTMENT_BAND,
     METRO_HISTORICAL_CAGR,
@@ -64,7 +62,7 @@ from finance import (
     monte_carlo_appreciation_forecast,
     resolve_metro_base_rate,
 )
-from quantum_portfolio import ALIGNMENT_SCORE_KEYS
+from quantum_portfolio import ALIGNMENT_SCORE_KEYS  # noqa: E402
 
 QUANTUM_RISK_KEYS = ALIGNMENT_SCORE_KEYS
 
@@ -2271,15 +2269,18 @@ class TestHeadlessDbClient(unittest.TestCase):
             "SUPABASE_SERVICE_ROLE_KEY": "service-role-key",
             "SUPABASE_URL": "https://example.supabase.co",
             "SUPABASE_KEY": "anon-key",
+            "DATABASE_REST_URL": "",
+            "SUPABASE_AUTH_URL": "",
         }
         with patch.dict(os.environ, env, clear=False):
             with patch("authenticate.get_authenticated_client", return_value=None):
                 with patch(
                     "authenticate.create_client", return_value=mock_service
                 ) as create:
-                    from authenticate import get_db_client
+                    # Reload helpers so optional URL getters see cleared local URL.
+                    import authenticate as auth_mod
 
-                    client = get_db_client()
+                    client = auth_mod.get_db_client()
                     self.assertIs(client, mock_service)
                     create.assert_called_once_with(
                         "https://example.supabase.co", "service-role-key"

@@ -105,13 +105,9 @@ export function readGoogleOAuthCallback(): GoogleOAuthCallbackParts {
   }
 }
 
-/** Local Vite proxies /api → FastAPI. On Netlify, hit the function directly (avoids /api → FastAPI proxies). */
+/** CapEigen token exchange — Netlify rewrites this to the google-token function in prod. */
 function googleExchangeEndpoint(): string {
-  const host = window.location.hostname
-  if (host === 'localhost' || host === '127.0.0.1') {
-    return '/api/auth/google/exchange'
-  }
-  return '/.netlify/functions/google-token'
+  return '/api/auth/google/exchange'
 }
 
 /** Exchange the auth code via CapEigen backend (FastAPI locally / Netlify function in prod). */
@@ -126,17 +122,23 @@ export async function exchangeGoogleAuthCode(parts: GoogleOAuthCallbackParts): P
     }),
   })
 
-  const payload = (await res.json().catch(() => ({}))) as {
-    id_token?: string
-    detail?: string
+  const raw = await res.text()
+  let payload: { id_token?: string; detail?: unknown } = {}
+  try {
+    payload = raw ? (JSON.parse(raw) as { id_token?: string; detail?: unknown }) : {}
+  } catch {
+    throw new Error(
+      `Google token exchange failed (HTTP ${res.status}). ` +
+        'Redeploy Netlify with the google-token function and set GOOGLE_WEB_CLIENT_SECRET.',
+    )
   }
 
   if (!res.ok) {
-    throw new Error(
+    const detail =
       typeof payload.detail === 'string'
         ? payload.detail
-        : 'Google token exchange failed. Check GOOGLE_WEB_CLIENT_SECRET and redirect URIs.',
-    )
+        : `Google token exchange failed (HTTP ${res.status}).`
+    throw new Error(detail)
   }
 
   if (!payload.id_token) {

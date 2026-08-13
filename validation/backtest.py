@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import sys
 from dataclasses import dataclass, field
-from io import BytesIO, StringIO
 from pathlib import Path
 from typing import BinaryIO, TextIO
 

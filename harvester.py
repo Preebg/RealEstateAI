@@ -27,7 +27,6 @@ from knowledge_base import (
     get_admin_uid,
     get_harvest_complete_addresses,
     get_kb_raw_data,
-    get_market_pulse,
     archive_stale_properties,
     is_property_harvest_complete,
     normalize_address_key,
