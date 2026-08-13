@@ -2,12 +2,31 @@ import { getGoogleClientId, generateGoogleNonce } from './googleGis'
 
 const NONCE_KEY = 'capeigen_google_oauth_nonce'
 const STATE_KEY = 'capeigen_google_oauth_state'
+const VERIFIER_KEY = 'capeigen_google_oauth_verifier'
 
 export function googleOAuthRedirectUri(): string {
   return `${window.location.origin}/auth/google/callback`
 }
 
-/** Start Google OIDC on *our* domain so the account chooser shows CapEigen, not supabase.co. */
+function base64UrlEncode(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer)
+  let binary = ''
+  for (let i = 0; i < bytes.length; i += 1) {
+    binary += String.fromCharCode(bytes[i]!)
+  }
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '')
+}
+
+function generateCodeVerifier(): string {
+  return base64UrlEncode(crypto.getRandomValues(new Uint8Array(32)).buffer)
+}
+
+async function generateCodeChallenge(verifier: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier))
+  return base64UrlEncode(digest)
+}
+
+/** Start Google OAuth on CapEigen (authorization code + PKCE). No Supabase redirect URI. */
 export async function startGoogleOAuthRedirect(): Promise<void> {
   const clientId = getGoogleClientId()
   if (!clientId) {
@@ -16,39 +35,50 @@ export async function startGoogleOAuthRedirect(): Promise<void> {
 
   const { nonce } = await generateGoogleNonce()
   const state = crypto.randomUUID()
+  const verifier = generateCodeVerifier()
+  const challenge = await generateCodeChallenge(verifier)
+
   sessionStorage.setItem(NONCE_KEY, nonce)
   sessionStorage.setItem(STATE_KEY, state)
+  sessionStorage.setItem(VERIFIER_KEY, verifier)
 
   const params = new URLSearchParams({
     client_id: clientId,
     redirect_uri: googleOAuthRedirectUri(),
-    response_type: 'id_token',
-    response_mode: 'fragment',
+    response_type: 'code',
     scope: 'openid email profile',
-    nonce,
     state,
+    nonce,
+    code_challenge: challenge,
+    code_challenge_method: 'S256',
     prompt: 'select_account',
+    access_type: 'online',
   })
 
   window.location.assign(`https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`)
 }
 
-export function readGoogleOAuthCallback(): {
-  idToken: string
+export type GoogleOAuthCallbackParts = {
+  code: string
+  codeVerifier: string
   nonce: string
-} {
-  const hash = window.location.hash.startsWith('#')
-    ? window.location.hash.slice(1)
-    : window.location.hash
-  const params = new URLSearchParams(hash)
+  redirectUri: string
+}
+
+/** Read `?code=` from the CapEigen callback and pair it with the stored PKCE verifier. */
+export function readGoogleOAuthCallback(): GoogleOAuthCallbackParts {
+  const params = new URLSearchParams(window.location.search)
   const error = params.get('error')
   if (error) {
     throw new Error(params.get('error_description') || error)
   }
 
-  const idToken = params.get('id_token')
-  if (!idToken) {
-    throw new Error('Google did not return an ID token. Check Authorized redirect URIs.')
+  const code = params.get('code')
+  if (!code) {
+    throw new Error(
+      'Google did not return an authorization code. Add this exact redirect URI in Google Cloud: ' +
+        googleOAuthRedirectUri(),
+    )
   }
 
   const state = params.get('state')
@@ -58,11 +88,51 @@ export function readGoogleOAuthCallback(): {
   }
 
   const nonce = sessionStorage.getItem(NONCE_KEY)
-  if (!nonce) {
-    throw new Error('Missing sign-in nonce. Try signing in again.')
+  const codeVerifier = sessionStorage.getItem(VERIFIER_KEY)
+  if (!nonce || !codeVerifier) {
+    throw new Error('Missing sign-in session data. Try signing in again.')
   }
 
   sessionStorage.removeItem(STATE_KEY)
   sessionStorage.removeItem(NONCE_KEY)
-  return { idToken, nonce }
+  sessionStorage.removeItem(VERIFIER_KEY)
+
+  return {
+    code,
+    codeVerifier,
+    nonce,
+    redirectUri: googleOAuthRedirectUri(),
+  }
+}
+
+/** Exchange the auth code via CapEigen backend (FastAPI locally / Netlify function in prod). */
+export async function exchangeGoogleAuthCode(parts: GoogleOAuthCallbackParts): Promise<string> {
+  const res = await fetch('/api/auth/google/exchange', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      code: parts.code,
+      code_verifier: parts.codeVerifier,
+      redirect_uri: parts.redirectUri,
+    }),
+  })
+
+  const payload = (await res.json().catch(() => ({}))) as {
+    id_token?: string
+    detail?: string
+  }
+
+  if (!res.ok) {
+    throw new Error(
+      typeof payload.detail === 'string'
+        ? payload.detail
+        : 'Google token exchange failed. Check GOOGLE_WEB_CLIENT_SECRET and redirect URIs.',
+    )
+  }
+
+  if (!payload.id_token) {
+    throw new Error('Token exchange did not return an id_token')
+  }
+
+  return payload.id_token
 }

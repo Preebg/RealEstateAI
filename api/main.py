@@ -10,7 +10,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from api.deps import client_from_jwt
-from api.routes import analysis, compare_pdf, guest, health, properties, validation
+from api.routes import analysis, auth_google, compare_pdf, guest, health, properties, validation
 from authenticate import reset_request_supabase_client, set_request_supabase_client
 from config_secrets import load_streamlit_secrets_into_environ
 
@@ -62,6 +62,7 @@ async def bind_supabase_jwt(request: Request, call_next):  # type: ignore[no-unt
 
 
 app.include_router(health.router)
+app.include_router(auth_google.router)
 app.include_router(properties.router)
 app.include_router(analysis.router)
 app.include_router(guest.router)

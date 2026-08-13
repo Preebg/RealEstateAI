@@ -2,9 +2,17 @@
   base = "web"
   command = "npm run build"
   publish = "dist"
+  functions = "netlify/functions"
 
 [build.environment]
   NODE_VERSION = "20"
+
+# CapEigen-owned Google OAuth token exchange (secret stays on Netlify).
+[[redirects]]
+  from = "/api/auth/google/exchange"
+  to = "/.netlify/functions/google-token"
+  status = 200
+  force = true
 
 [[redirects]]
   from = "/*"
