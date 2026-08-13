@@ -46,6 +46,7 @@ class AnalysisJobResponse(BaseModel):
     completed_tasks: list[str] = Field(default_factory=list)
     error: str | None = None
     address: str | None = None
+    from_kb: bool = False
 
 
 class FinanceRecalcRequest(BaseModel):

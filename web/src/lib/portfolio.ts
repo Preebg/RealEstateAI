@@ -26,6 +26,7 @@ const LIST_SELECT = [
   'strategy_tag',
   'property_label',
   'property_category',
+  'timestamp',
 ].join(',')
 
 function activeCutoffIso(): string {
@@ -113,6 +114,91 @@ function rowToItem(row: Record<string, unknown>): PortfolioItem {
       (row.strategy_tag as string | undefined) ||
       (row.property_label as string | undefined) ||
       (row.property_category as string | undefined),
+    added_at: row.timestamp != null ? String(row.timestamp) : undefined,
+  }
+}
+
+function sameLocalDay(a: Date, b: Date): boolean {
+  return (
+    a.getFullYear() === b.getFullYear() &&
+    a.getMonth() === b.getMonth() &&
+    a.getDate() === b.getDate()
+  )
+}
+
+/** Format a catalog timestamp in the viewer's local timezone (matches viewer_timezone.format_added_at). */
+export function formatAddedAt(iso?: string, now = new Date()): string {
+  if (!iso) return '—'
+  const dt = new Date(iso)
+  if (Number.isNaN(dt.getTime())) return '—'
+
+  const hour24 = dt.getHours()
+  const hour = hour24 % 12 || 12
+  const minute = String(dt.getMinutes()).padStart(2, '0')
+  const timeStr = `${hour}:${minute} ${hour24 < 12 ? 'AM' : 'PM'}`
+  if (sameLocalDay(dt, now)) return timeStr
+
+  const yesterday = new Date(now)
+  yesterday.setDate(yesterday.getDate() - 1)
+  if (sameLocalDay(dt, yesterday)) return `Yesterday, ${timeStr}`
+
+  const month = dt.toLocaleString('en-US', { month: 'short' })
+  if (dt.getFullYear() === now.getFullYear()) {
+    return `${month} ${dt.getDate()}, ${timeStr}`
+  }
+  return `${month} ${dt.getDate()}, ${dt.getFullYear()}, ${timeStr}`
+}
+
+export function propertySearchPath(item: { address?: string; id?: string }): string {
+  const params = new URLSearchParams()
+  if (item.address) params.set('address', item.address)
+  if (item.id) params.set('id', item.id)
+  const qs = params.toString()
+  return qs ? `/search?${qs}` : '/search'
+}
+
+/**
+ * Load one catalog property for Individual Search (no FastAPI required).
+ */
+export async function fetchPropertyDetail(opts: {
+  id?: string | null
+  address?: string | null
+}): Promise<Record<string, unknown> | null> {
+  const {
+    data: { session },
+  } = await supabase.auth.getSession()
+  if (!session) {
+    throw new Error('Sign in to load the property.')
+  }
+
+  const id = opts.id?.trim()
+  const address = opts.address?.trim()
+  if (!id && !address) return null
+
+  const cutoff = activeCutoffIso()
+  let query = supabase.from('properties').select('*').gte('timestamp', cutoff).limit(1)
+  if (id) {
+    query = query.eq('id', id)
+  } else if (address) {
+    query = query.eq('address', address)
+  }
+
+  const { data, error } = await query
+  if (error) {
+    throw new Error(error.message || 'Failed to load property from Supabase')
+  }
+  const row = (data as unknown as Array<Record<string, unknown>> | null)?.[0]
+  if (!row) return null
+
+  const rent = resolveRent(row)
+  return {
+    ...row,
+    from_kb: true,
+    property_id: row.id,
+    rent: rent ?? row.rent,
+    sqft: row.square_footage ?? row.sqft,
+    strategy:
+      row.strategy_tag || row.property_label || row.property_category || row.strategy,
   }
 }
 
@@ -140,7 +226,7 @@ export async function fetchPortfolio(): Promise<{
       .from('properties')
       .select(LIST_SELECT)
       .gte('timestamp', cutoff)
-      .order('timestamp', { ascending: true })
+      .order('timestamp', { ascending: false })
       .range(offset, offset + PAGE_SIZE - 1)
 
     if (error) {

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import {
@@ -11,6 +11,15 @@ import {
   YAxis,
 } from 'recharts'
 import { apiFetch, type AnalysisJob, type FinanceResult } from '../lib/api'
+import {
+  analyzeInvestment,
+  flattenFinanceNumbers,
+  normalizeMonthlyInsurance,
+  normalizePercentRate,
+  normalizeTaxRatePercent,
+  type FinanceMetrics,
+} from '../lib/finance'
+import { fetchPropertyDetail } from '../lib/portfolio'
 
 type Assumptions = {
   down_payment_pct: number
@@ -35,16 +44,68 @@ function money(n: number) {
   return `$${Math.round(n).toLocaleString()}`
 }
 
+function moneyExact(n: number) {
+  const abs = Math.abs(n).toLocaleString(undefined, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })
+  return n < 0 ? `-$${abs}` : `$${abs}`
+}
+
+function addressesMatch(a?: unknown, b?: unknown): boolean {
+  return String(a || '').trim().toLowerCase() === String(b || '').trim().toLowerCase()
+}
+
+function assumptionsFromProperty(property: Record<string, unknown>): Assumptions {
+  return {
+    down_payment_pct: 25,
+    interest_rate: 6,
+    loan_term: 30,
+    closing_costs_pct: 3,
+    tax_rate: normalizeTaxRatePercent(num(property.tax_rate, 1.2)),
+    monthly_insurance: normalizeMonthlyInsurance(num(property.insurance, 150)),
+    monthly_hoa: num(property.hoa, 0),
+    maint_percent: num(property.maint_percent ?? property.original_ai_maint, 1),
+    monthly_rent: num(
+      property.rent ?? property.estimated_rent ?? property.original_ai_rent,
+      0,
+    ),
+    vacancy_reserve_pct: normalizePercentRate(
+      num(property.vacancy_rate ?? property.ai_vacancy_rate, 5),
+    ),
+    management_fee_pct: normalizePercentRate(
+      num(property.management_fee ?? property.ai_management_fee, 8),
+    ),
+  }
+}
+
+function cashFlowRows(assumptions: Assumptions, finance: FinanceMetrics) {
+  return [
+    ['Gross monthly rent', moneyExact(assumptions.monthly_rent), false],
+    ['Mortgage payment (P&I)', moneyExact(-finance.monthly_mortgage), false],
+    ['Property taxes', moneyExact(-finance.monthly_taxes), false],
+    ['Insurance', moneyExact(-finance.monthly_insurance), false],
+    ['HOA fee', moneyExact(-finance.monthly_hoa), false],
+    ['Maintenance (CapEx)', moneyExact(-finance.calculated_monthly_maint), false],
+    ['Vacancy reserve', moneyExact(-finance.actual_vacancy_reserve), false],
+    ['Management fee', moneyExact(-finance.actual_management_fee), false],
+    ['Total costs', moneyExact(-finance.total_monthly_expenses), true],
+    ['Cash flow monthly', moneyExact(finance.monthly_net_cash_flow), true],
+  ] as const
+}
+
 export function SearchPage() {
   const [params] = useSearchParams()
-  const [query, setQuery] = useState(params.get('address') || '')
+  const paramAddress = params.get('address') || ''
+  const paramId = params.get('id') || ''
+  const [query, setQuery] = useState(paramAddress)
   const [suggestions, setSuggestions] = useState<string[]>([])
   const [jobId, setJobId] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [assumptions, setAssumptions] = useState<Assumptions | null>(null)
-  const [finance, setFinance] = useState<Record<string, number> | null>(null)
   const [shareUrl, setShareUrl] = useState<string | null>(null)
+  const autoStartedKey = useRef<string | null>(null)
 
   const jobQuery = useQuery({
     queryKey: ['analysis', jobId],
@@ -56,77 +117,64 @@ export function SearchPage() {
     queryFn: () => apiFetch<AnalysisJob>(`/api/analysis/${jobId}`),
   })
 
-  const property = jobQuery.data?.property_data
+  const kbQuery = useQuery({
+    queryKey: ['kb-property', paramId, paramAddress],
+    enabled: Boolean(paramId || paramAddress),
+    queryFn: () => fetchPropertyDetail({ id: paramId || null, address: paramAddress || null }),
+  })
+
+  const jobProperty = jobQuery.data?.property_data
+  const kbProperty = kbQuery.data
+  const property =
+    jobProperty ??
+    (kbProperty && addressesMatch(kbProperty.address, query) ? kbProperty : null)
+
+  const finance = useMemo(() => {
+    if (!property || !assumptions) return null
+    return analyzeInvestment({
+      ...assumptions,
+      price: num(property.price ?? property.predicted_value),
+    })
+  }, [property, assumptions])
 
   useEffect(() => {
     document.title = 'Individual Search · CapEigen'
   }, [])
 
   useEffect(() => {
-    const addr = params.get('address')
-    if (addr) setQuery(addr)
-  }, [params])
+    if (paramAddress) setQuery(paramAddress)
+  }, [paramAddress])
 
   useEffect(() => {
     if (!property || assumptions) return
-    setAssumptions({
-      down_payment_pct: 25,
-      interest_rate: 6,
-      loan_term: 30,
-      closing_costs_pct: 3,
-      tax_rate: num(property.tax_rate, 1.2),
-      monthly_insurance: num(property.insurance, 150),
-      monthly_hoa: num(property.hoa, 0),
-      maint_percent: num(
-        property.maint_percent ?? property.original_ai_maint,
-        1,
-      ),
-      monthly_rent: num(
-        property.rent ?? property.estimated_rent ?? property.original_ai_rent,
-        0,
-      ),
-      vacancy_reserve_pct: num(
-        property.vacancy_rate ?? property.ai_vacancy_rate,
-        5,
-      ),
-      management_fee_pct: num(
-        property.management_fee ?? property.ai_management_fee,
-        8,
-      ),
-    })
+    setAssumptions(assumptionsFromProperty(property))
   }, [property, assumptions])
 
   useEffect(() => {
-    if (!property || !assumptions) return
-    const price = num(property.price ?? property.predicted_value)
+    if (!property || !assumptions || !jobId || !finance) return
     let cancelled = false
     ;(async () => {
       try {
-        const res = await apiFetch<FinanceResult>('/api/finance/recalc', {
+        await apiFetch<FinanceResult>('/api/finance/recalc', {
           method: 'POST',
           body: JSON.stringify({
             ...assumptions,
-            price,
+            price: num(property.price ?? property.predicted_value),
             job_id: jobId,
             location_score: num(property.location_score, 5),
             forecast_rate: num(property.forecast_rate, 0),
           }),
         })
+      } catch {
         if (!cancelled) {
-          const flat: Record<string, number> = {}
-          Object.entries(res.finance).forEach(([k, v]) => {
-            if (typeof v === 'number') flat[k] = v
-          })
-          setFinance(flat)
+          // Client-side breakdown is already on screen.
         }
-      } catch (err) {
-        if (!cancelled) setError(err instanceof Error ? err.message : 'Finance failed')
       }
     })()
     return () => {
       cancelled = true
     }
-  }, [property, assumptions, jobId])
+  }, [property, assumptions, jobId, finance])
 
   async function searchAddresses(q: string) {
     setQuery(q)
@@ -149,9 +197,9 @@ export function SearchPage() {
     if (!target) return
     setBusy(true)
     setError(null)
-    setAssumptions(null)
-    setFinance(null)
     setShareUrl(null)
+    const sameListing = addressesMatch(property?.address, target)
+    if (!sameListing) setAssumptions(null)
     try {
       const res = await apiFetch<{ job_id: string }>('/api/analysis/start', {
         method: 'POST',
@@ -161,22 +209,42 @@ export function SearchPage() {
       setQuery(target)
       setSuggestions([])
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Analysis failed')
+      const catalogHit =
+        addressesMatch(paramAddress, target) &&
+        (kbQuery.isLoading || Boolean(kbQuery.data) || Boolean(paramId))
+      if (!catalogHit) {
+        setError(err instanceof Error ? err.message : 'Analysis failed')
+      }
     } finally {
       setBusy(false)
     }
   }
 
+  useEffect(() => {
+    const addr = paramAddress.trim()
+    if (!addr) return
+    const key = `${paramId}|${addr}`
+    if (autoStartedKey.current === key) return
+    autoStartedKey.current = key
+    void startAnalysis(addr)
+    // Auto-run once per home-page click-through. startAnalysis is recreated each render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [paramAddress, paramId])
+
   async function downloadPdf() {
-    if (!property || !finance) return
+    if (!property || !finance || !assumptions) return
+    const rows = cashFlowRows(assumptions, finance)
     const blob = await apiFetch<Blob>('/api/pdf', {
       method: 'POST',
       body: JSON.stringify({
         address: property.address || query,
         property_info: property,
-        metrics: finance,
-        table_data: [],
-        params: assumptions || {},
+        metrics: flattenFinanceNumbers(finance as unknown as Record<string, unknown>),
+        table_data: {
+          Description: rows.map(([label]) => label),
+          Amount: rows.map(([, amount]) => amount),
+        },
+        params: assumptions,
         location_score: num(property.location_score, 5),
         quantum_risk: property.quantum_risk,
         forecast_display: property._forecast_display_cache,
@@ -228,6 +296,7 @@ export function SearchPage() {
   const deferred = jobQuery.data?.deferred_tasks ?? []
   const total = jobQuery.data?.deferred_tasks_total || 0
   const done = Math.max(total - deferred.length, 0)
+  const fromKb = Boolean(jobQuery.data?.from_kb || (property && !jobProperty && kbProperty))
 
   return (
     <div className="grid gap-6 lg:grid-cols-[300px_1fr]">
@@ -326,6 +395,9 @@ export function SearchPage() {
         {jobQuery.data?.error && (
           <p className="text-sm text-amber-700">{jobQuery.data.error}</p>
         )}
+        {kbQuery.isLoading && paramAddress && !property && (
+          <p className="text-sm text-muted">Loading property from catalog…</p>
+        )}
 
         {jobId && deferred.length > 0 && (
           <div className="rounded-xl border border-border bg-white p-3 text-sm">
@@ -349,7 +421,7 @@ export function SearchPage() {
                   {String(property.address || query)}
                 </h2>
                 <p className="text-sm text-muted">
-                  {jobQuery.data?.from_kb ? 'Loaded from knowledge base' : 'AI research'}
+                  {fromKb ? 'Loaded from knowledge base' : 'AI research'}
                   {jobQuery.data?.status === 'running' ? ' · still computing…' : ''}
                 </p>
               </div>
@@ -380,10 +452,7 @@ export function SearchPage() {
               {[
                 ['Price', money(num(property.price ?? property.predicted_value))],
                 ['Monthly rent', money(assumptions?.monthly_rent ?? 0)],
-                [
-                  'Cash flow / mo',
-                  money(finance?.monthly_net_cash_flow ?? 0),
-                ],
+                ['Cash flow / mo', money(finance?.monthly_net_cash_flow ?? 0)],
                 ['Cap rate', `${num(finance?.cap_rate).toFixed(2)}%`],
                 ['Cash on cash', `${num(finance?.cash_on_cash).toFixed(2)}%`],
                 [
@@ -406,6 +475,35 @@ export function SearchPage() {
                 </div>
               ))}
             </div>
+
+            {finance && assumptions && (
+              <div>
+                <h3 className="mb-2 font-display text-lg font-semibold">
+                  Monthly cash flow breakdown
+                </h3>
+                <div className="overflow-x-auto rounded-xl border border-border">
+                  <table className="min-w-full text-sm">
+                    <thead className="bg-surface text-muted">
+                      <tr>
+                        <th className="px-3 py-2 text-left font-medium">Description</th>
+                        <th className="px-3 py-2 text-right font-medium">Monthly amount</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {cashFlowRows(assumptions, finance).map(([label, amount, emphasis]) => (
+                        <tr
+                          key={label}
+                          className={`border-t border-border ${emphasis ? 'bg-surface/60 font-semibold' : ''}`}
+                        >
+                          <td className="px-3 py-2">{label}</td>
+                          <td className="px-3 py-2 text-right tabular-nums">{amount}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
 
             {forecastChart.length > 0 && (
               <div className="h-64">

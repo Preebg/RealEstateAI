@@ -5,7 +5,9 @@ import L from 'leaflet'
 import { Link } from 'react-router-dom'
 import {
   fetchPortfolio,
+  formatAddedAt,
   numericBounds,
+  propertySearchPath,
   rangeActive,
   type RangeBounds,
 } from '../lib/portfolio'
@@ -436,9 +438,12 @@ export function HomePage() {
                   <p>Price: {money(p.price ?? p.predicted_value)}</p>
                   <p>Rent: {money(p.rent)}/mo</p>
                   <p>Yield: {pct(p.rental_yield)}</p>
+                  <p title={p.added_at ? new Date(p.added_at).toLocaleString() : undefined}>
+                    Added: {formatAddedAt(p.added_at)}
+                  </p>
                   <Link
                     className="text-primary underline"
-                    to={`/search?address=${encodeURIComponent(p.address || '')}`}
+                    to={propertySearchPath(p)}
                   >
                     Analyze
                   </Link>
@@ -458,6 +463,7 @@ export function HomePage() {
             <thead className="bg-surface text-muted">
               <tr>
                 <th className="px-3 py-2 font-medium">Address</th>
+                <th className="px-3 py-2 font-medium">Added</th>
                 <th className="px-3 py-2 font-medium">Price</th>
                 <th className="px-3 py-2 font-medium">Rent</th>
                 <th className="px-3 py-2 font-medium">Yield</th>
@@ -472,10 +478,16 @@ export function HomePage() {
                   <td className="px-3 py-2">
                     <Link
                       className="text-primary hover:underline"
-                      to={`/search?address=${encodeURIComponent(p.address || '')}`}
+                      to={propertySearchPath(p)}
                     >
                       {p.address}
                     </Link>
+                  </td>
+                  <td
+                    className="px-3 py-2 whitespace-nowrap text-muted"
+                    title={p.added_at ? new Date(p.added_at).toLocaleString() : undefined}
+                  >
+                    {formatAddedAt(p.added_at)}
                   </td>
                   <td className="px-3 py-2">{money(p.price ?? p.predicted_value)}</td>
                   <td className="px-3 py-2">{money(p.rent)}</td>
@@ -491,7 +503,7 @@ export function HomePage() {
               ))}
               {filtered.length === 0 && !isLoading && (
                 <tr>
-                  <td colSpan={7} className="px-3 py-6 text-center text-muted">
+                  <td colSpan={8} className="px-3 py-6 text-center text-muted">
                     No properties match the current filters. Widen a range or reset.
                   </td>
                 </tr>

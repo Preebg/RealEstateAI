@@ -109,4 +109,5 @@ export type PortfolioItem = {
   quantum_success?: number
   strategy?: string
   id?: string
+  added_at?: string
 }
