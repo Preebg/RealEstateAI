@@ -23,7 +23,7 @@ def start_property_analysis(
     """
     Headless fast path: KB pull or AI research, then prepare deferred task list.
 
-    Returns ``{property_data, deferred_tasks, from_kb}`` without Streamlit state.
+    Returns ``{property_data, deferred_tasks, from_kb}`` without UI state.
     """
     cleaned = str(address or "").strip()
     if not cleaned:
@@ -57,48 +57,6 @@ def start_property_analysis(
         "deferred_tasks": queue,
         "from_kb": from_kb,
     }
-
-
-def run_initial_property_analysis(address: str, *, guest_mode: bool = False) -> None:
-    """
-    Streamlit wrapper: research property, set session state, then rerun.
-
-    Prefer ``start_property_analysis`` for FastAPI / headless callers.
-    """
-    import streamlit as st
-
-    from services.deferred_analysis import set_active_analysis_address
-
-    with st.status("🔍 Researching property and estimating value...", expanded=True) as status:
-        try:
-            result = start_property_analysis(address, guest_mode=guest_mode)
-        except AnalysisError as exc:
-            st.error(str(exc))
-            st.stop()
-            return
-
-        from_kb = bool(result.get("from_kb"))
-        if from_kb:
-            status.update(label="⚡ Instant Pull from Knowledge Base", state="running")
-        else:
-            status.update(label="🔍 No cache hit — running AI research...", state="running")
-
-        status.update(label="📋 Preparing analysis view...", state="running")
-        final_result = result["property_data"]
-        queue = result["deferred_tasks"]
-        set_active_analysis_address(address)
-        st.session_state.property_data = final_result
-        st.session_state.deferred_tasks = queue
-        st.session_state.deferred_tasks_total = len(queue)
-
-        done_label = (
-            "✅ Loaded from Knowledge Base — opening analysis..."
-            if from_kb
-            else "✅ Research complete — opening analysis..."
-        )
-        status.update(label=done_label, state="complete")
-
-    st.rerun()
 
 
 def initialize_hitl_baselines(property_info: dict[str, Any], monthly_rent: float, ai_maint_percent: float) -> None:

@@ -5,7 +5,7 @@ __pycache__
 *.pyc
 web/node_modules
 web/dist
-.streamlit/secrets.toml
+.streamlit
 .env
 .cursor
 reports

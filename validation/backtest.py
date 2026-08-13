@@ -49,7 +49,7 @@ class MetricSummary:
 
 @dataclass
 class BacktestReport:
-    """Full backtest output for CLI, tests, and Streamlit."""
+    """Full backtest output for CLI and tests."""
 
     row_count: int
     price: MetricSummary
@@ -280,122 +280,5 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def render_backtest_page() -> None:
-    """Streamlit UI for uploading a comps CSV and viewing metrics."""
-    import streamlit as st
-
-    from authenticate import get_logged_in_user
-    from knowledge_base import get_admin_uid
-    from ui_theme import render_page_hero
-
-    render_page_hero(
-        "Model Validation",
-        "Measure prediction accuracy against historical comps — MAPE, RMSE, and calibration plots.",
-    )
-
-    user = get_logged_in_user()
-    admin_uid = get_admin_uid()
-    if admin_uid and (not user or user["id"] != admin_uid):
-        st.warning(
-            "This page is intended for the project admin. "
-            "You can still run backtests locally via "
-            "`python -m validation.backtest path/to/comps.csv`."
-        )
-
-    with st.expander("CSV schema", expanded=False):
-        st.markdown(
-            "Required columns (one row per comp):\n\n"
-            "| Column | Description |\n"
-            "|--------|-------------|\n"
-            "| `address` | Property identifier (anonymize for sharing) |\n"
-            "| `actual_sale_price` | Closed sale price or appraised value ($) |\n"
-            "| `actual_monthly_rent` | Observed or lease rent ($/mo) |\n"
-            "| `analysis_date` | Date you ran the model (YYYY-MM-DD) |\n"
-            "| `predicted_price` | Model sale-price estimate at analysis time |\n"
-            "| `predicted_rent` | Model rent estimate at analysis time |"
-        )
-        st.code(", ".join(REQUIRED_COLUMNS))
-
-    fixture_path = Path(__file__).resolve().parent.parent / "tests" / "fixtures" / "backtest_sample.csv"
-    if fixture_path.is_file():
-        with st.expander("Load sample fixture (for demo)", expanded=False):
-            if st.button("Use sample fixture data"):
-                st.session_state["_backtest_fixture_bytes"] = fixture_path.read_bytes()
-                st.rerun()
-
-    uploaded = st.file_uploader("Historical comps CSV", type=["csv"])
-    fixture_bytes = st.session_state.pop("_backtest_fixture_bytes", None)
-    source = uploaded
-    if source is None and fixture_bytes:
-        source = BytesIO(fixture_bytes)
-
-    if source is None:
-        st.info("Upload a CSV or load the sample fixture to run a backtest.")
-        return
-
-    try:
-        report = run_backtest(source, make_plot=True)
-    except BacktestSchemaError as exc:
-        st.error(str(exc))
-        return
-
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Comps", report.row_count)
-    if report.price.mape_pct is not None:
-        col2.metric("Price MAPE", f"{report.price.mape_pct:.1f}%")
-    if report.rent.mape_pct is not None:
-        col3.metric("Rent MAPE", f"{report.rent.mape_pct:.1f}%")
-
-    m1, m2 = st.columns(2)
-    with m1:
-        st.subheader("Sale price")
-        if report.price.n:
-            st.write(f"**MAPE:** {report.price.mape_pct:.2f}%")
-            st.write(f"**RMSE:** ${report.price.rmse:,.0f}")
-            st.caption(f"{report.price.n} comps with valid price pairs")
-        else:
-            st.caption("No valid price pairs.")
-    with m2:
-        st.subheader("Monthly rent")
-        if report.rent.n:
-            st.write(f"**MAPE:** {report.rent.mape_pct:.2f}%")
-            st.write(f"**RMSE:** ${report.rent.rmse:,.0f}")
-            st.caption(f"{report.rent.n} comps with valid rent pairs")
-        else:
-            st.caption("No valid rent pairs.")
-
-    if report.calibration_figure is not None:
-        st.subheader("Calibration plots")
-        st.pyplot(report.calibration_figure, clear_figure=True)
-
-    with st.expander("Preview data"):
-        st.dataframe(report.frame, use_container_width=True)
-
-    metrics_csv = StringIO()
-    metrics_csv.write("metric,n,mape_pct,rmse\n")
-    for metric in (report.price, report.rent):
-        mape = "" if metric.mape_pct is None else f"{metric.mape_pct:.4f}"
-        rmse = "" if metric.rmse is None else f"{metric.rmse:.4f}"
-        metrics_csv.write(f"{metric.label},{metric.n},{mape},{rmse}\n")
-    st.download_button(
-        "Download metrics summary (CSV)",
-        data=metrics_csv.getvalue(),
-        file_name="backtest_metrics.csv",
-        mime="text/csv",
-    )
-
-
-def _running_under_streamlit() -> bool:
-    import os
-
-    return bool(os.environ.get("STREAMLIT_RUNTIME_ENV"))
-
-
 if __name__ == "__main__":
-    if _running_under_streamlit():
-        import streamlit as st
-
-        st.set_page_config(page_title="Model Backtest", page_icon="📊", layout="wide")
-        render_backtest_page()
-    else:
-        raise SystemExit(main())
+    raise SystemExit(main())

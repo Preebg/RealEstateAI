@@ -1,4 +1,4 @@
-"""Read-only guest access via share links (no account required)."""
+"""Read-only guest access via share links (headless helpers for API / jobs)."""
 
 from __future__ import annotations
 
@@ -7,7 +7,6 @@ import secrets
 from typing import Any
 from urllib.parse import urlencode, urlsplit
 
-import streamlit as st
 from postgrest.exceptions import APIError
 
 from app_logging import configure_logging, report_error
@@ -16,32 +15,6 @@ log = configure_logging("share_access")
 
 GUEST_SHARE_TOKEN_KEY = "guest_share_token"
 GUEST_LANDING_ADDRESS_KEY = "guest_landing_address"
-
-
-def _query_param(name: str) -> str | None:
-    value = st.query_params.get(name)
-    if isinstance(value, list):
-        return value[0] if value else None
-    return str(value) if value is not None else None
-
-
-def get_guest_share_token() -> str | None:
-    """Active share token for this browser session, if any."""
-    token = st.session_state.get(GUEST_SHARE_TOKEN_KEY)
-    if token and str(token).strip():
-        return str(token).strip()
-    return None
-
-
-def is_guest_viewer() -> bool:
-    """True when the user entered via a valid share link (read-only, no account)."""
-    return bool(get_guest_share_token())
-
-
-def is_authenticated_or_guest() -> bool:
-    from authenticate import get_logged_in_user
-
-    return bool(get_logged_in_user()) or is_guest_viewer()
 
 
 def _validate_share_token(token: str) -> dict[str, Any] | None:
@@ -65,59 +38,16 @@ def _validate_share_token(token: str) -> dict[str, Any] | None:
     return payload
 
 
-def activate_guest_session_from_query() -> bool:
-    """
-    If ?share=TOKEN is present and valid, persist guest mode in session_state.
-    Returns True when guest mode is active after this call.
-    """
-    from authenticate import get_logged_in_user
-
-    if get_logged_in_user():
-        st.session_state.pop(GUEST_SHARE_TOKEN_KEY, None)
-        st.session_state.pop(GUEST_LANDING_ADDRESS_KEY, None)
-        return False
-
-    token = _query_param("share") or get_guest_share_token()
-    if not token:
-        return False
-
-    meta = _validate_share_token(token)
-    if not meta:
-        st.session_state.pop(GUEST_SHARE_TOKEN_KEY, None)
-        return False
-
-    st.session_state[GUEST_SHARE_TOKEN_KEY] = str(token).strip()
-    address = meta.get("address")
-    if address and GUEST_LANDING_ADDRESS_KEY not in st.session_state:
-        st.session_state[GUEST_LANDING_ADDRESS_KEY] = str(address)
-    return True
-
-
-def get_guest_landing_address() -> str | None:
-    address = st.session_state.get(GUEST_LANDING_ADDRESS_KEY)
-    if address and str(address).strip():
-        return str(address).strip()
-    return None
-
-
-def consume_guest_landing_address() -> str | None:
-    address = st.session_state.pop(GUEST_LANDING_ADDRESS_KEY, None)
-    if address and str(address).strip():
-        return str(address).strip()
-    return None
-
-
-def fetch_guest_portfolio() -> list[dict[str, Any]]:
-    """Canonical properties visible to a guest share session."""
-    token = get_guest_share_token()
-    if not token:
+def fetch_guest_portfolio_for_token(token: str) -> list[dict[str, Any]]:
+    """Canonical properties visible to an explicit guest share token."""
+    if not token or not str(token).strip():
         return []
     from authenticate import get_supabase
 
     supabase = get_supabase()
     try:
         response = supabase.rpc(
-            "get_guest_portfolio", {"p_share_token": token}
+            "get_guest_portfolio", {"p_share_token": str(token).strip()}
         ).execute()
     except APIError as exc:
         report_error(log, "guest_portfolio_fetch_failed", exc)
@@ -125,19 +55,19 @@ def fetch_guest_portfolio() -> list[dict[str, Any]]:
     return response.data or []
 
 
-def fetch_guest_property(
+def fetch_guest_property_for_token(
+    token: str,
     *,
     property_id: str | None = None,
     address: str | None = None,
 ) -> dict[str, Any] | None:
-    """Load one property for a guest, optionally with sharer's assumptions."""
-    token = get_guest_share_token()
-    if not token:
+    """Load one property for an explicit guest share token."""
+    if not token or not str(token).strip():
         return None
     from authenticate import get_supabase
 
     supabase = get_supabase()
-    params: dict[str, Any] = {"p_share_token": token}
+    params: dict[str, Any] = {"p_share_token": str(token).strip()}
     if property_id:
         params["p_property_id"] = property_id
     if address:
@@ -182,7 +112,7 @@ def ensure_property_saved_for_share(
     """
     Return a canonical property UUID for sharing, upserting to Supabase when needed.
 
-    Share links reference ``properties.id``; fresh analyses may only exist in session
+    Share links reference ``properties.id``; fresh analyses may only exist in memory
     until they are saved to the shared catalog.
     """
     from authenticate import get_logged_in_user
@@ -324,12 +254,22 @@ def build_share_url_with_base(share_token: str, base_url: str) -> str:
     return f"{origin}?{urlencode({'share': share_token})}"
 
 
-def build_share_url(share_token: str) -> str:
+def build_share_url(share_token: str, *, base_url: str | None = None) -> str:
     """Full URL a friend can open without signing in."""
-    from authenticate import _current_app_url, _get_redirect_url
+    import os
 
-    base = _current_app_url() or _get_redirect_url()
-    return build_share_url_with_base(share_token, base)
+    from authenticate import _normalize_app_url
+
+    resolved = (base_url or "").strip()
+    if not resolved:
+        for key in ("APP_URL", "OAUTH_REDIRECT_URL", "FRONTEND_URL"):
+            raw = os.getenv(key)
+            if raw and str(raw).strip():
+                resolved = _normalize_app_url(str(raw).strip())
+                break
+    if not resolved:
+        resolved = "http://localhost:5173"
+    return build_share_url_with_base(share_token, resolved)
 
 
 def _save_share_comps_snapshot_with_client(
@@ -379,7 +319,7 @@ def create_headless_property_share_url(
     """
     Create a guest share link from CLI jobs (outreach, harvester).
 
-    Requires SUPABASE_SERVICE_ROLE_KEY and ADMIN_USER_ID in Streamlit secrets.
+    Requires SUPABASE_SERVICE_ROLE_KEY and ADMIN_USER_ID in the environment.
     """
     from authenticate import get_service_client
     from knowledge_base import get_admin_uid, is_valid_uuid
@@ -437,17 +377,3 @@ def create_headless_property_share_url(
 
     log.info("headless_share_created", property_id=property_id, created_by=creator)
     return build_share_url_with_base(token, app_base_url)
-
-
-def render_guest_sidebar() -> None:
-    """Sidebar for read-only guest viewers."""
-    st.markdown("### Guest view")
-    st.caption(
-        "You're viewing a shared link. Browse properties read-only — "
-        "sign in to save or run new analyses."
-    )
-    if st.button("Sign in for full access", key="guest_sign_in_cta", use_container_width=True):
-        st.session_state.pop(GUEST_SHARE_TOKEN_KEY, None)
-        if "share" in st.query_params:
-            del st.query_params["share"]
-        st.rerun()

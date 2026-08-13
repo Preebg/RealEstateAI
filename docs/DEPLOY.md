@@ -19,8 +19,8 @@ If you see `Unexpected token '<'… is not valid JSON`, the SPA called `/api/*` 
 2. `docker compose up --build` locally, or build/push the `Dockerfile` to any container host (Fly, Cloud Run, Render, etc.).
 3. Confirm `GET /api/health` returns `{"status":"ok",...}`.
 
-## Cutover from Streamlit Cloud
+## Cutover notes
 
 1. Deploy API + Netlify SPA and verify login + Individual Search.
-2. Point the product domain at Netlify; retire Streamlit Cloud traffic.
-3. Keep `AIUnderwriterv2.py` only as a legacy reference until a follow-up cleanup PR.
+2. Point the product domain at Netlify.
+3. CapEigen is FastAPI (`api/`) + React (`web/`) only.

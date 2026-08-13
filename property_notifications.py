@@ -25,7 +25,7 @@ DEFAULT_DOWN_PAYMENT_PCT = 25.0
 DEFAULT_INTEREST_RATE = 6.0
 DEFAULT_LOAN_TERM = 30
 DEFAULT_CLOSING_COSTS_PCT = 3.0
-DEFAULT_APP_URL = "https://capeigen.streamlit.app"
+DEFAULT_APP_URL = "https://capeigen.netlify.app"
 
 _TRUSTED_LISTING_HOSTS = frozenset(
     {
@@ -72,31 +72,15 @@ def _is_trusted_listing_url(url: str) -> bool:
 
 
 def resolve_discord_webhook_url() -> str | None:
-    """Read DISCORD_WEBHOOK_URL from the environment or Streamlit secrets."""
-    env_value = normalize_secret_value(os.getenv("DISCORD_WEBHOOK_URL"))
-    if env_value:
-        return env_value
-    try:
-        import streamlit as st
-
-        secret_value = normalize_secret_value(st.secrets.get("DISCORD_WEBHOOK_URL"))
-    except Exception:
-        return None
-    return secret_value
+    """Read DISCORD_WEBHOOK_URL from the environment."""
+    return normalize_secret_value(os.getenv("DISCORD_WEBHOOK_URL"))
 
 
 def _resolve_app_base_url() -> str:
     from authenticate import _is_localhost_url, _normalize_app_url
 
-    for key in ("APP_URL", "OAUTH_REDIRECT_URL"):
+    for key in ("APP_URL", "OAUTH_REDIRECT_URL", "FRONTEND_URL"):
         raw = normalize_secret_value(os.getenv(key))
-        if not raw:
-            try:
-                import streamlit as st
-
-                raw = normalize_secret_value(st.secrets.get(key))
-            except Exception:
-                raw = None
         if not raw:
             continue
         normalized = _normalize_app_url(raw)

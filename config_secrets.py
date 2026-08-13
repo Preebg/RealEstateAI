@@ -48,67 +48,45 @@ def resolve_hostname(hostname: str, *, label: str) -> None:
     """
     Verify DNS can resolve hostname on this machine.
 
-    Tries IPv4 first (common fix on Windows harvest hosts with broken IPv6 DNS).
+    Raises ValueError with a clear message when resolution fails.
     """
-    host = hostname.strip().rstrip(".")
-    if not host:
-        raise ValueError(f"{label} hostname is empty")
-
-    last_error: socket.gaierror | None = None
-    for family in (socket.AF_INET, socket.AF_UNSPEC):
-        try:
-            socket.getaddrinfo(host, None, family, socket.SOCK_STREAM)
-            return
-        except socket.gaierror as exc:
-            last_error = exc
-
-    raise OSError(
-        f"DNS lookup failed for {label} host {host!r} (getaddrinfo: {last_error}). "
-        "On the harvest machine, confirm internet access, DNS settings, firewall, "
-        "and that SUPABASE_URL in .streamlit/secrets.toml has no extra quotes or spaces."
-    ) from last_error
-
-
-def verify_https_endpoint(url: str, *, label: str) -> str:
-    """Normalize an HTTPS URL and confirm its hostname resolves."""
-    cleaned = normalize_secret_value(url)
-    if not cleaned:
-        raise ValueError(f"{label} is empty")
-
-    parsed = urlparse(cleaned)
-    hostname = parsed.hostname
-    if parsed.scheme not in {"http", "https"} or not hostname:
-        raise ValueError(f"{label} must be a valid http(s) URL (got {cleaned!r})")
-
-    resolve_hostname(hostname, label=label)
-    return cleaned.rstrip("/")
+    try:
+        socket.getaddrinfo(hostname, None, socket.AF_INET)
+    except socket.gaierror as exc:
+        raise ValueError(
+            f"{label} hostname {hostname!r} does not resolve on this machine ({exc}). "
+            "Check DNS / VPN / SUPABASE_URL."
+        ) from exc
 
 
 def _parse_secrets_toml(path: Path) -> dict[str, Any]:
+    """Parse a flat TOML secrets file into a dict of stringifiable values."""
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # Python < 3.11
+        import tomli as tomllib  # type: ignore[no-redef]
+
     with path.open("rb") as secrets_file:
-        try:
-            import tomllib
-
-            return tomllib.load(secrets_file)
-        except ImportError:
-            import tomli
-
-            return tomli.load(secrets_file)
+        return tomllib.load(secrets_file)
 
 
-def load_streamlit_secrets_into_environ(
+def load_local_secrets_into_environ(
     *,
     secrets_path: Path | None = None,
     overwrite_blank_env: bool = True,
 ) -> bool:
     """
-    Load .streamlit/secrets.toml into os.environ for headless CLI runs.
+    Optionally load a local TOML secrets file into ``os.environ``.
+
+    Primary configuration is ``.env`` / process environment. When ``secrets_path``
+    is provided (tests) or a ``secrets.toml`` exists next to this module, values
+    fill blank env keys only.
 
     Returns True when a secrets file was found and parsed.
     """
     import os
 
-    path = secrets_path or Path(__file__).resolve().parent / ".streamlit" / "secrets.toml"
+    path = secrets_path or Path(__file__).resolve().parent / "secrets.toml"
     if not path.exists():
         return False
 

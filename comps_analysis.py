@@ -367,6 +367,31 @@ def apply_comp_implied_market_value(
     return True
 
 
+def ensure_comps_analysis(property_info: dict[str, Any]) -> dict[str, Any]:
+    """Ensure comps payload exists; recompute summary when comps are loaded."""
+    ensure_comps_analysis_field(property_info)
+    comps = property_info["comps_analysis"]
+    if not comps.get("comparable_properties"):
+        return property_info
+
+    needs_recompute = comps_analysis_needs_recompute(comps)
+
+    if not needs_recompute:
+        apply_comp_implied_market_value(property_info, comps)
+        return property_info
+
+    refreshed = evaluate_comps_against_subject(
+        {
+            "comparable_properties": comps.get("comparable_properties"),
+            "market_summary": comps.get("market_summary", ""),
+        },
+        property_info,
+    )
+    property_info["comps_analysis"] = refreshed
+    apply_comp_implied_market_value(property_info, refreshed)
+    return property_info
+
+
 def apply_comps_valuation_adjustment(
     property_data: dict[str, Any],
     comps_analysis: dict[str, Any],

@@ -17,7 +17,7 @@ from app_logging import configure_logging, report_error
 from discovery.normalize import listing_dict_to_scraped, scraped_to_research_dict
 from discovery.orchestrator import run_scraper_discovery_async
 from config_secrets import (
-    load_streamlit_secrets_into_environ,
+    load_local_secrets_into_environ,
     normalize_secret_value,
     normalize_supabase_url,
     resolve_hostname,
@@ -200,32 +200,23 @@ def headless_cash_flow(property_data: dict[str, Any]) -> float:
 
 
 def _load_local_secrets() -> None:
-    """Load .streamlit/secrets.toml into os.environ for headless CLI runs."""
-    secrets_path = Path(__file__).resolve().parent / ".streamlit" / "secrets.toml"
+    """Optionally load root ``secrets.toml`` into os.environ (tests / optional local file)."""
+    secrets_path = Path(__file__).resolve().parent / "secrets.toml"
     if not secrets_path.exists():
-        log.info("secrets_toml_missing", path=str(secrets_path))
         return
 
-    if not load_streamlit_secrets_into_environ(secrets_path=secrets_path):
+    if not load_local_secrets_into_environ(secrets_path=secrets_path):
         log.error("secrets_toml_parse_failed", path=str(secrets_path))
         print(f"Warning: could not parse {secrets_path}")
 
 
-def _secret_from_env_or_streamlit(name: str) -> str | None:
-    value = normalize_secret_value(os.getenv(name))
-    if value:
-        return value
-    if os.environ.get("STREAMLIT_RUNTIME_ENV"):
-        import streamlit as st
-
-        secret = st.secrets.get(name)
-        return normalize_secret_value(secret)
-    return None
+def _secret_from_env(name: str) -> str | None:
+    return normalize_secret_value(os.getenv(name))
 
 
 def _validate_harvest_network() -> bool:
     """Confirm Supabase (and scraper hosts) resolve on this machine."""
-    raw_url = _secret_from_env_or_streamlit("SUPABASE_URL")
+    raw_url = _secret_from_env("SUPABASE_URL")
     if not raw_url:
         return False
 
@@ -261,25 +252,25 @@ def validate_harvest_config() -> str | None:
     missing = [
         name
         for name in ("GEMINI_API_KEY", "SUPABASE_URL", "SUPABASE_KEY", "ADMIN_USER_ID")
-        if not _secret_from_env_or_streamlit(name)
+        if not _secret_from_env(name)
     ]
     if missing:
         log.error("harvest_config_missing", missing=missing)
         print(
             "Missing required configuration: "
             + ", ".join(missing)
-            + "\nAdd them to .streamlit/secrets.toml or set as environment variables."
+            + "\nAdd them to environment variables or a local .env / optional legacy secrets TOML."
         )
         return None
 
     admin_uid = get_admin_uid()
     if not admin_uid:
-        raw_admin = _secret_from_env_or_streamlit("ADMIN_USER_ID") or ""
+        raw_admin = _secret_from_env("ADMIN_USER_ID") or ""
         log.error("harvest_admin_uid_invalid", admin_user_id=raw_admin)
         print(
             "ADMIN_USER_ID is missing or not a valid UUID.\n"
             "1. Supabase Dashboard -> Authentication -> Users -> copy your User UID\n"
-            "2. Add to .streamlit/secrets.toml: ADMIN_USER_ID = \"your-uuid-here\"\n"
+            "2. Set ADMIN_USER_ID in the environment (or optional legacy secrets TOML)\n"
             "   Watch for typos: letter 'l' vs digit '1', letter 'O' vs zero '0'.\n"
             f"   Current value: {raw_admin!r}"
         )
@@ -296,9 +287,8 @@ def validate_harvest_config() -> str | None:
             "SUPABASE_SERVICE_ROLE_KEY is required for headless harvest.\n"
             "RLS blocks the anon key when no user session is present.\n"
             "Supabase Dashboard -> Project Settings -> API -> service_role (secret)\n"
-            "Add to .streamlit/secrets.toml:\n"
-            "  SUPABASE_SERVICE_ROLE_KEY = \"your-service-role-key\"\n"
-            "Keep SUPABASE_KEY as the anon/public key for the Streamlit app."
+            "Set SUPABASE_SERVICE_ROLE_KEY in the environment.\n"
+            "Keep SUPABASE_KEY as the anon/public key for the React web app."
         )
         return None
 
@@ -802,7 +792,7 @@ async def run_harvester_pipeline_async(admin_user_id: str) -> dict[str, Any]:
 
     purged = await asyncio.to_thread(purge_unreliable_one_year_roi_properties)
     if purged:
-        from portfolio_map_page import invalidate_portfolio_cache
+        from portfolio_geo import invalidate_portfolio_cache
 
         invalidate_portfolio_cache()
         print(
@@ -817,7 +807,7 @@ async def run_harvester_pipeline_async(admin_user_id: str) -> dict[str, Any]:
 
     archived = await asyncio.to_thread(archive_stale_properties)
     if archived:
-        from portfolio_map_page import invalidate_portfolio_cache
+        from portfolio_geo import invalidate_portfolio_cache
 
         invalidate_portfolio_cache()
         print(
@@ -987,7 +977,7 @@ async def run_harvester_pipeline_async(admin_user_id: str) -> dict[str, Any]:
 
 
 def run_harvester_pipeline(admin_user_id: str) -> dict[str, Any]:
-    """Sync entry point for CLI and Streamlit."""
+    """Sync entry point for the CLI harvester."""
     return asyncio.run(run_harvester_pipeline_async(admin_user_id))
 
 
@@ -1049,100 +1039,8 @@ def main() -> None:
         raise
 
 
-# ---------------------------------------------------------------------------
-# Streamlit control panel (streamlit run harvester.py)
-# ---------------------------------------------------------------------------
-
-def _render_streamlit_app() -> None:
-    import streamlit as st
-    from market_pulse import render_market_pulse
-
-    st.set_page_config(page_title="Hot Market Harvester", page_icon="🌾")
-    st.title("🌾 Hot Market Harvester")
-    st.caption(
-        "Upstate NY (priority: Rochester, Syracuse, Buffalo, Albany) → Philadelphia, "
-        "Pittsburgh, Orlando, Tampa, Miami → Charlotte, Raleigh, Charleston • "
-        "Discovery → research → synthesis "
-        f"(DISCOVERY_BACKEND={resolve_discovery_backend()}; "
-        f"≤{engine.MAX_CONCURRENT_RESEARCH_AGENTS} concurrent research workers)"
-    )
-
-    render_market_pulse()
-    st.divider()
-
-    admin_user_id = validate_harvest_config()
-    if not admin_user_id:
-        st.error(
-            "Set GEMINI_API_KEY, SUPABASE_URL, SUPABASE_KEY, and ADMIN_USER_ID in "
-            ".streamlit/secrets.toml or environment variables."
-        )
-        st.stop()
-
-    st.caption(f"Saving as admin: `{admin_user_id[:8]}...`")
-
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Discovery Model", _active_discovery_model)
-    col2.metric("Research Model", _active_research_model)
-    col3.metric("Synthesis Model", _active_synthesis_model)
-
-    st.info(
-        f"Harvester uses Supabase as the source of truth (no local SQLite). Default "
-        f"DISCOVERY_BACKEND=gemini runs LLM hot-market search via {engine.DISCOVERY_MODEL} "
-        f"(≤{engine.MAX_DISCOVERY_LISTINGS} listings under ${engine.MAX_DISCOVERY_PRICE:,}). "
-        f"Set DISCOVERY_BACKEND=scraper to try Redfin/Realtor/Zillow HTTP search "
-        f"(auto-falls back to Gemini when portals return 403). Research runs with up to "
-        f"{engine.MAX_CONCURRENT_RESEARCH_AGENTS} concurrent workers; synthesis starts "
-        f"as each research job completes (rate-limited to "
-        f"{engine.HARVESTER_RPM_PER_MODEL} calls/min per model). "
-        f"Synthesis skips Poor condition or price > ${engine.MAX_SYNTHESIS_PRICE:,}."
-    )
-
-    if st.button("🚀 Run Full Harvest", type="primary"):
-        with st.status("Running 3-stage harvest...", expanded=True) as status:
-            report = run_harvester_pipeline(admin_user_id)
-            status.update(label="Harvest complete", state="complete")
-
-        market_summary = ", ".join(
-            f"{len(report[name.lower()])} {name}"
-            for name, _, _ in engine.HOT_MARKETS
-            if report.get(name.lower())
-        )
-        st.success(
-            f"Saved {len(report['saved'])} properties"
-            + (f" ({market_summary})" if market_summary else "")
-        )
-        if not report["saved"]:
-            st.warning(
-                "No properties were saved this run. Check the status log above — common causes: "
-                "all listings already in Supabase, discovery found nothing new, listings were "
-                "skipped (price/condition), or synthesis failed."
-            )
-
-        if report["skipped"]:
-            with st.expander(f"Skipped ({len(report['skipped'])})"):
-                st.dataframe(report["skipped"], use_container_width=True)
-        if report["already_scanned"]:
-            with st.expander(f"Already scanned ({len(report['already_scanned'])})"):
-                st.dataframe(report["already_scanned"], use_container_width=True)
-        if report["failed"]:
-            with st.expander(f"Failed ({len(report['failed'])})"):
-                st.dataframe(report["failed"], use_container_width=True)
-
-        st.rerun()
-
-    with st.expander("Raw Market Pulse Data"):
-        st.json(get_market_pulse())
-
-
-def _running_under_streamlit() -> bool:
-    return bool(os.environ.get("STREAMLIT_RUNTIME_ENV"))
-
-
 if __name__ == "__main__":
-    if _running_under_streamlit():
-        _render_streamlit_app()
-    else:
-        try:
-            main()
-        except SystemExit as exc:
-            raise SystemExit(exc.code) from exc
+    try:
+        main()
+    except SystemExit as exc:
+        raise SystemExit(exc.code) from exc

@@ -105,9 +105,18 @@ export function readGoogleOAuthCallback(): GoogleOAuthCallbackParts {
   }
 }
 
+/** Local Vite proxies /api → FastAPI. On Netlify, hit the function directly (avoids /api → FastAPI proxies). */
+function googleExchangeEndpoint(): string {
+  const host = window.location.hostname
+  if (host === 'localhost' || host === '127.0.0.1') {
+    return '/api/auth/google/exchange'
+  }
+  return '/.netlify/functions/google-token'
+}
+
 /** Exchange the auth code via CapEigen backend (FastAPI locally / Netlify function in prod). */
 export async function exchangeGoogleAuthCode(parts: GoogleOAuthCallbackParts): Promise<string> {
-  const res = await fetch('/api/auth/google/exchange', {
+  const res = await fetch(googleExchangeEndpoint(), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({

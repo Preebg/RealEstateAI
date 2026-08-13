@@ -1,5 +1,3 @@
-exclude = ["OGAIUnderwriter.py"]
-
 # Keep the pre-0.16 default rule set. Ruff 0.16+ enables hundreds of extra
 # rules by default; without an explicit select, unpinned CI installs break.
 [lint]

@@ -10,7 +10,7 @@ from uuid import UUID
 from postgrest.exceptions import APIError
 
 from app_logging import configure_logging, report_error
-from authenticate import get_db_client, get_logged_in_user, in_streamlit_app
+from authenticate import get_db_client, get_logged_in_user
 from finance import (
     MAX_RELIABLE_ONE_YEAR_ROI_PCT,
     analyze_investment,
@@ -71,12 +71,6 @@ ACTIVE_PROPERTY_LIST_COLUMNS = (
 
 ACTIVE_PROPERTY_LIST_SELECT = ",".join(ACTIVE_PROPERTY_LIST_COLUMNS)
 
-try:
-    import streamlit as st
-except ImportError:
-    st = None  # type: ignore[misc, assignment]
-
-
 def is_valid_uuid(value: str | None) -> bool:
     """Return True when value is a well-formed UUID (Supabase auth user id)."""
     if not value or not str(value).strip():
@@ -89,28 +83,23 @@ def is_valid_uuid(value: str | None) -> bool:
 
 
 def _get_secret(name: str) -> str:
-    """Resolve credentials from environment first, then Streamlit secrets."""
+    """Resolve credentials from the process environment."""
     value = os.getenv(name)
     if value:
         return value
-    if st is not None and name in st.secrets:
-        return str(st.secrets[name])
     raise EnvironmentError(
-        f"{name} not set. Export it or add to Streamlit secrets."
+        f"{name} not set. Export it or add it to your local environment / .env."
     )
 
 
 def get_admin_uid() -> str | None:
     """
     Admin UID — can read all harvested rows in addition to their own.
-    Set ADMIN_USER_ID in Streamlit secrets or environment.
+    Set ADMIN_USER_ID in the environment.
     """
     uid = os.getenv("ADMIN_USER_ID", "").strip()
     if uid:
         return uid if is_valid_uuid(uid) else None
-    if st is not None and "ADMIN_USER_ID" in st.secrets:
-        secret_uid = str(st.secrets["ADMIN_USER_ID"]).strip()
-        return secret_uid if is_valid_uuid(secret_uid) else None
     return None
 
 
@@ -122,10 +111,8 @@ def get_client():
 def _resolve_user_id(user_id: str | None) -> str | None:
     if user_id and is_valid_uuid(user_id):
         return str(user_id).strip()
-    if in_streamlit_app():
-        user = get_logged_in_user()
-        return user["id"] if user else None
-    return None
+    user = get_logged_in_user()
+    return user["id"] if user else None
 
 
 def _active_property_cutoff_iso() -> str:
@@ -136,12 +123,6 @@ def _active_property_cutoff_iso() -> str:
 
 def _fetch_canonical_properties() -> list[dict[str, Any]]:
     """Return active shared canonical property rows (last 30 days only)."""
-    if in_streamlit_app():
-        from share_access import fetch_guest_portfolio, is_guest_viewer
-
-        if is_guest_viewer():
-            return fetch_guest_portfolio()
-
     supabase = get_client()
     page_size = 500
     offset = 0
@@ -344,7 +325,7 @@ def resolve_canonical_property_id(
     Return a properties.id that currently exists in the database.
 
     Validates the supplied id against Postgres, then falls back to a fresh
-    address lookup after clearing stale Streamlit KB cache when needed.
+    address lookup after clearing stale KB cache when needed.
     """
     candidate = str(property_id).strip() if property_id else None
     if candidate and is_valid_uuid(candidate) and _property_exists_in_db(candidate):
@@ -365,13 +346,11 @@ def resolve_canonical_property_id(
     return None
 
 
-def _kb_cache_scope_key(user_id: str | None) -> str:
-    """Stable Streamlit cache key for scoped KB reads."""
-    if in_streamlit_app():
-        from share_access import is_guest_viewer
+_KB_CACHE: dict[str, Any] = {}
 
-        if is_guest_viewer():
-            return "guest"
+
+def _kb_cache_scope_key(user_id: str | None) -> str:
+    """Stable cache key for scoped KB reads."""
     uid = _resolve_user_id(user_id)
     return f"user:{uid}" if uid else "shared"
 
@@ -388,35 +367,20 @@ def _build_kb_raw_data(user_id: str | None = None) -> dict[str, dict[str, Any]]:
     }
 
 
-if st is not None:
-
-    @st.cache_data(ttl=KB_CACHE_TTL_SECONDS, show_spinner=False)
-    def _get_kb_raw_data_cached(scope_key: str) -> dict[str, dict[str, Any]]:
-        if scope_key == "guest":
-            return _build_kb_raw_data(None)
-        if scope_key.startswith("user:"):
-            return _build_kb_raw_data(scope_key[5:])
-        return _build_kb_raw_data(None)
-
-
 def invalidate_kb_cache() -> None:
-    """Clear cached KB reads (portfolio map invalidation calls this too)."""
-    if st is not None:
-        try:
-            _get_kb_raw_data_cached.clear()
-        except Exception:
-            pass
-        try:
-            _get_market_pulse_cached.clear()
-        except Exception:
-            pass
+    """Clear cached KB reads (portfolio invalidation calls this too)."""
+    _KB_CACHE.clear()
 
 
 def get_kb_raw_data(user_id: str | None = None) -> dict[str, dict[str, Any]]:
     """Fetch properties keyed by normalized address for reliable lookup."""
-    if in_streamlit_app() and st is not None:
-        return _get_kb_raw_data_cached(_kb_cache_scope_key(user_id))
-    return _build_kb_raw_data(user_id)
+    scope = _kb_cache_scope_key(user_id)
+    cached = _KB_CACHE.get(f"raw:{scope}")
+    if cached is not None:
+        return cached
+    data = _build_kb_raw_data(user_id)
+    _KB_CACHE[f"raw:{scope}"] = data
+    return data
 
 
 def lookup_property(address: str, user_id: str | None = None) -> dict[str, Any] | None:
@@ -425,17 +389,6 @@ def lookup_property(address: str, user_id: str | None = None) -> dict[str, Any] 
         return None
 
     cleaned = address.strip()
-
-    if in_streamlit_app():
-        from share_access import fetch_guest_property, is_guest_viewer
-
-        if is_guest_viewer():
-            hit = fetch_guest_property(address=cleaned)
-            if hit:
-                record = _normalize_record_numerics(hit)
-                record["from_kb"] = True
-                return record
-            return None
 
     # Fast path: single-row fetch by exact stored address (avoids full catalog load).
     detail = _fetch_property_detail(address=cleaned)
@@ -897,14 +850,14 @@ def delete_canonical_property_by_id(property_id: str) -> bool:
     if not property_id or not is_valid_uuid(property_id):
         return False
 
-    if in_streamlit_app():
-        user = get_logged_in_user()
-        admin_uid = get_admin_uid()
-        if not user or not admin_uid or user["id"] != admin_uid:
+    user = get_logged_in_user()
+    admin_uid = get_admin_uid()
+    if user is not None:
+        if not admin_uid or user["id"] != admin_uid:
             log.warning(
                 "kb_canonical_delete_denied",
                 property_id=property_id,
-                user_id=user["id"] if user else None,
+                user_id=user["id"],
             )
             return False
 
@@ -1186,13 +1139,6 @@ def save_canonical_property(
     show_errors: bool = True,
 ) -> Any:
     """Upsert shared property facts (AI baselines + harvest metadata)."""
-    if in_streamlit_app():
-        from share_access import is_guest_viewer
-
-        if is_guest_viewer():
-            if show_errors and st is not None:
-                st.error("Sign in to save properties to the database.")
-            return None
 
     if not user_id or not is_valid_uuid(user_id):
         raise ValueError(f"user_id must be a valid UUID, got: {user_id!r}")
@@ -1204,11 +1150,6 @@ def save_canonical_property(
             address=property_data.get("address"),
             reason=unreliable_reason,
         )
-        if show_errors and st is not None:
-            st.warning(
-                f"Property not saved — {unreliable_reason}. "
-                "Existing catalog entries are kept; use Portfolio Map purge for cleanup."
-            )
         return None
 
     supabase = get_client()
@@ -1229,8 +1170,6 @@ def save_canonical_property(
             user_id=user_id,
             address=filtered_payload.get("address"),
         )
-        if show_errors and st is not None:
-            st.error(f"Failed to save property to Supabase: {exc}")
         return None
 
     invalidate_kb_cache()
@@ -1297,8 +1236,6 @@ def persist_comps_to_canonical(
 
         client = get_authenticated_client()
     if client is None:
-        if show_errors and st is not None:
-            st.error("Sign in to save comparable sales.")
         return False
 
     try:
@@ -1311,8 +1248,6 @@ def persist_comps_to_canonical(
             property_id=str(property_id),
             address=address,
         )
-        if show_errors and st is not None:
-            st.error(f"Could not save comparable sales: {exc}")
         return False
 
     if saved:
@@ -1346,8 +1281,6 @@ def persist_rent_comps_to_canonical(
 
     client = get_authenticated_client()
     if client is None:
-        if show_errors and st is not None:
-            st.error("Sign in to save comparable rentals.")
         return False
 
     params: dict[str, Any] = {
@@ -1367,8 +1300,6 @@ def persist_rent_comps_to_canonical(
             property_id=str(property_id),
             address=address,
         )
-        if show_errors and st is not None:
-            st.error(f"Could not save comparable rentals: {exc}")
         return False
 
     saved = bool(response.data)
@@ -1391,13 +1322,6 @@ def save_user_property_override(
     show_errors: bool = True,
 ) -> Any:
     """Upsert per-user underwriting assumptions for a canonical property."""
-    if in_streamlit_app():
-        from share_access import is_guest_viewer
-
-        if is_guest_viewer():
-            if show_errors and st is not None:
-                st.error("Sign in to save your assumptions.")
-            return None
 
     if not user_id or not is_valid_uuid(user_id):
         raise ValueError(f"user_id must be a valid UUID, got: {user_id!r}")
@@ -1416,11 +1340,6 @@ def save_user_property_override(
             property_id=property_id,
             address=address,
         )
-        if show_errors and st is not None:
-            st.error(
-                "This property is no longer in the shared catalog. "
-                "Re-analyze it and save again."
-            )
         return None
     property_id = resolved_id
 
@@ -1462,8 +1381,6 @@ def save_user_property_override(
             user_id=user_id,
             property_id=property_id,
         )
-        if show_errors and st is not None:
-            st.error(f"Failed to save your assumptions: {exc}")
         return None
 
     log.info(
@@ -1602,13 +1519,6 @@ def save_property_to_user_account(
     Ensures a canonical KB row exists when property_data is supplied.
     Optionally persists underwriting overrides. Returns property_id on success.
     """
-    if in_streamlit_app():
-        from share_access import is_guest_viewer
-
-        if is_guest_viewer():
-            if show_errors and st is not None:
-                st.error("Sign in to save properties to your account.")
-            return None
 
     if not user_id or not is_valid_uuid(user_id):
         raise ValueError(f"user_id must be a valid UUID, got: {user_id!r}")
@@ -1654,17 +1564,10 @@ def save_property_to_user_account(
         )
 
     if not resolved_id:
-        if show_errors and st is not None:
-            st.error("Could not resolve property ID for this address.")
         return None
 
     if not is_property_saved_for_user(user_id, resolved_id):
         if count_user_saved_properties(user_id) >= MAX_SAVED_PROPERTIES:
-            if show_errors and st is not None:
-                st.error(
-                    f"You can save at most {MAX_SAVED_PROPERTIES} properties. "
-                    "Remove one from your saved list to add another."
-                )
             return None
 
     supabase = get_client()
@@ -1681,8 +1584,6 @@ def save_property_to_user_account(
             user_id=user_id,
             property_id=resolved_id,
         )
-        if show_errors and st is not None:
-            st.error(f"Failed to save property to your account: {exc}")
         return None
 
     log.info(
@@ -1700,13 +1601,6 @@ def unsave_property_from_user_account(
     show_errors: bool = True,
 ) -> bool:
     """Remove a bookmarked property from the user's account."""
-    if in_streamlit_app():
-        from share_access import is_guest_viewer
-
-        if is_guest_viewer():
-            if show_errors and st is not None:
-                st.error("Sign in to manage saved properties.")
-            return False
 
     if not user_id or not is_valid_uuid(user_id):
         raise ValueError(f"user_id must be a valid UUID, got: {user_id!r}")
@@ -1726,8 +1620,6 @@ def unsave_property_from_user_account(
             user_id=user_id,
             property_id=property_id,
         )
-        if show_errors and st is not None:
-            st.error(f"Failed to remove saved property: {exc}")
         return False
 
     log.info(
@@ -1744,13 +1636,6 @@ def clear_all_saved_properties_from_user_account(
     show_errors: bool = True,
 ) -> bool:
     """Remove every bookmarked property from the user's account."""
-    if in_streamlit_app():
-        from share_access import is_guest_viewer
-
-        if is_guest_viewer():
-            if show_errors and st is not None:
-                st.error("Sign in to manage saved properties.")
-            return False
 
     if not user_id or not is_valid_uuid(user_id):
         raise ValueError(f"user_id must be a valid UUID, got: {user_id!r}")
@@ -1762,8 +1647,6 @@ def clear_all_saved_properties_from_user_account(
         ).execute()
     except APIError as exc:
         report_error(log, "kb_saved_clear_all_failed", exc, user_id=user_id)
-        if show_errors and st is not None:
-            st.error(f"Failed to clear saved properties: {exc}")
         return False
 
     log.info("kb_saved_clear_all_success", user_id=user_id)
@@ -1795,84 +1678,6 @@ def get_user_saved_properties(user_id: str | None = None) -> list[dict[str, Any]
         results.append(enriched)
     return results
 
-
-def render_user_saved_properties_sidebar() -> None:
-    """Sidebar list of bookmarked properties — click to reload or remove."""
-    if not in_streamlit_app() or st is None:
-        return
-
-    from app_nav import (
-        INDIVIDUAL_SEARCH_PAGE,
-        INDIVIDUAL_SEARCH_SCRIPT,
-        MAP_OPEN_ADDRESS_KEY,
-        NAV_TARGET_KEY,
-    )
-    from portfolio_map_page import invalidate_portfolio_cache
-
-    user = get_logged_in_user()
-    if not user:
-        return
-
-    saved = get_user_saved_properties(user["id"])
-    with st.expander("⭐ My Saved Properties", expanded=bool(saved)):
-        if not saved:
-            st.caption("Analyze a property and use **Save to My Account** to revisit it later.")
-            st.caption(f"You can save up to {MAX_SAVED_PROPERTIES} properties.")
-            return
-
-        st.caption(f"{len(saved)} of {MAX_SAVED_PROPERTIES} saved")
-
-        for prop in saved:
-            addr = str(prop.get("address") or "Unknown address")
-            price = prop.get("price")
-            label = f"{addr}"
-            if price is not None:
-                try:
-                    label = f"{addr} — ${float(price):,.0f}"
-                except (TypeError, ValueError):
-                    pass
-            prop_id = str(prop.get("id") or "")
-            key_suffix = str(prop.get("user_saved_id") or prop_id)
-            load_col, remove_col = st.columns([6, 1])
-            with load_col:
-                if st.button(
-                    label, key=f"saved_load_{key_suffix}", use_container_width=True
-                ):
-                    cleaned = str(addr or "").strip()
-                    if cleaned:
-                        st.session_state[MAP_OPEN_ADDRESS_KEY] = cleaned
-                    st.session_state[NAV_TARGET_KEY] = INDIVIDUAL_SEARCH_PAGE
-                    st.switch_page(INDIVIDUAL_SEARCH_SCRIPT)
-            with remove_col:
-                if st.button(
-                    "✕",
-                    key=f"saved_remove_{key_suffix}",
-                    help="Remove from saved list",
-                ):
-                    if prop_id and unsave_property_from_user_account(
-                        user["id"], prop_id, show_errors=True
-                    ):
-                        invalidate_portfolio_cache()
-                        st.toast(f"Removed {addr}", icon="🗑️")
-                        st.rerun()
-
-        if st.session_state.get("confirm_clear_saved"):
-            st.warning(f"Remove all {len(saved)} saved properties?")
-            yes_col, no_col = st.columns(2)
-            with yes_col:
-                if st.button("Yes, clear all", key="saved_clear_confirm", type="primary"):
-                    if clear_all_saved_properties_from_user_account(user["id"]):
-                        invalidate_portfolio_cache()
-                        st.session_state.pop("confirm_clear_saved", None)
-                        st.toast("Cleared all saved properties", icon="🗑️")
-                        st.rerun()
-            with no_col:
-                if st.button("Cancel", key="saved_clear_cancel"):
-                    st.session_state.pop("confirm_clear_saved", None)
-                    st.rerun()
-        elif st.button("Clear all saved properties", key="saved_clear_init"):
-            st.session_state["confirm_clear_saved"] = True
-            st.rerun()
 
 
 def save_harvest_property(
@@ -2000,22 +1805,16 @@ def _compute_market_pulse(user_id: str | None = None) -> dict[str, dict[str, Any
     return pulse
 
 
-if st is not None:
-
-    @st.cache_data(ttl=KB_CACHE_TTL_SECONDS, show_spinner=False)
-    def _get_market_pulse_cached(scope_key: str) -> dict[str, dict[str, Any]]:
-        if scope_key == "guest":
-            return _compute_market_pulse(None)
-        if scope_key.startswith("user:"):
-            return _compute_market_pulse(scope_key[5:])
-        return _compute_market_pulse(None)
-
-
 def get_market_pulse(user_id: str | None = None) -> dict[str, dict[str, Any]]:
-    """Aggregate per-metro stats for UI 'Market Pulse'."""
-    if in_streamlit_app() and st is not None:
-        return _get_market_pulse_cached(_kb_cache_scope_key(user_id))
-    return _compute_market_pulse(user_id)
+    """Aggregate per-metro stats for portfolio / API consumers."""
+    scope = _kb_cache_scope_key(user_id)
+    cached = _KB_CACHE.get(f"pulse:{scope}")
+    if cached is not None:
+        return cached
+    data = _compute_market_pulse(user_id)
+    _KB_CACHE[f"pulse:{scope}"] = data
+    return data
+
 
 
 def get_telemetry_stats(user_id: str | None = None) -> dict[str, Any]:
@@ -2071,7 +1870,6 @@ def get_telemetry_stats(user_id: str | None = None) -> dict[str, Any]:
     }
 
 
-from authenticate import render_auth_page  # noqa: E402 — re-export for legacy imports
 
 
 __all__ = [
@@ -2115,7 +1913,6 @@ __all__ = [
     "unsave_property_from_user_account",
     "clear_all_saved_properties_from_user_account",
     "get_user_saved_properties",
-    "render_user_saved_properties_sidebar",
     "save_harvest_property",
     "compute_one_year_roi_from_property",
     "one_year_roi_unreliable_reason",
@@ -2127,5 +1924,4 @@ __all__ = [
     "get_kb_context",
     "get_market_pulse",
     "get_telemetry_stats",
-    "render_auth_page",
 ]

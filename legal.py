@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import streamlit as st
-
 APP_NAME = "CapEigen"
 APP_TAGLINE = "AI rental underwriting with QAOA portfolio alignment."
 EFFECTIVE_DATE = "2025-06-09"
@@ -15,7 +13,7 @@ LEGAL_PATHS = frozenset({TERMS_PATH, PRIVACY_PATH})
 
 
 def get_terms_of_service_text() -> str:
-    """Terms of Service copy shown on the public legal page and sign-up dialog."""
+    """Terms of Service copy for public legal pages and sign-up flows."""
     return f"""
 ### Terms of Service
 
@@ -63,7 +61,7 @@ Questions about these terms may be directed to the operator of this portfolio pr
 
 
 def get_privacy_policy_text() -> str:
-    """Privacy Policy copy shown on the public legal page and sign-up dialog."""
+    """Privacy Policy copy for public legal pages and sign-up flows."""
     return f"""
 ### Privacy Policy
 
@@ -119,54 +117,3 @@ def legal_page_url(path: str) -> str:
         msg = f"Unknown legal page path: {path}"
         raise ValueError(msg)
     return f"?{LEGAL_QUERY_PARAM}={path}"
-
-
-def requested_legal_path() -> str | None:
-    """Return the legal page path from the current query string, if any."""
-    value = st.query_params.get(LEGAL_QUERY_PARAM)
-    if not value:
-        return None
-    cleaned = str(value).strip()
-    if cleaned in LEGAL_PATHS:
-        return cleaned
-    return None
-
-
-def render_legal_page(path: str) -> None:
-    """Render a standalone public legal page."""
-    from ui_theme import render_page_hero
-
-    if path == TERMS_PATH:
-        render_page_hero("Terms of Service", f"Legal terms for using {APP_NAME}.")
-        st.markdown(get_terms_of_service_text())
-    elif path == PRIVACY_PATH:
-        render_page_hero("Privacy Policy", f"How {APP_NAME} collects and uses your data.")
-        st.markdown(get_privacy_policy_text())
-    else:
-        st.error("Unknown legal page.")
-        return
-
-    st.caption(f"Last updated {EFFECTIVE_DATE}.")
-    _render_back_to_sign_in()
-
-
-def _render_back_to_sign_in() -> None:
-    """Return to the sign-in screen without st.page_link (avoids url_pathname KeyError)."""
-    if st.button("Back to sign in", key="legal_back_signin", type="secondary"):
-        if LEGAL_QUERY_PARAM in st.query_params:
-            del st.query_params[LEGAL_QUERY_PARAM]
-        st.rerun()
-
-
-def render_legal_footer_links(*, prefix: str = "") -> None:
-    """Footer links to the public Terms of Service and Privacy Policy pages."""
-    terms_href = legal_page_url(TERMS_PATH)
-    privacy_href = legal_page_url(PRIVACY_PATH)
-    st.markdown(
-        f'<p class="app-footer-legal">{prefix}'
-        f'<a href="{terms_href}">Terms of Service</a>'
-        f' &middot; '
-        f'<a href="{privacy_href}">Privacy Policy</a>'
-        f"</p>",
-        unsafe_allow_html=True,
-    )

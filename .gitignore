@@ -1,20 +1,14 @@
-venv/
-.venv/
 .env
 .env.*
 !.env.example
-.streamlit/secrets.toml
 .cursor/
 .agents/
 scripts/
 supabase/
 # Turnkey email digest (deferred — requires domain + Resend)
 turnkey.py
-components/turnkey_recommendations.py
 __pycache__/
 property_kb.json
-.streamlit/cache/
-.streamlit/oauth_pkce_pending.json
 .gmail_oauth_token.json
 .gemini_model_rpm.json
 .gemini_model_rpm.lock
@@ -23,7 +17,7 @@ harvester_scheduled.log
 reports/
 poised-epigram-493119-g0-64095d0f749b.json
 .aider*
-# Local-only docs and test fixtures (not required at runtime on Streamlit Cloud)
+# Local-only docs and test fixtures
 tests/*
 !tests/fixtures/
 !tests/fixtures/**

@@ -11,7 +11,7 @@ Run on your harvester machine (long-running; needs local Gmail OAuth once):
     python targeted_outreach_pipeline.py --fix-draft-urls
     python targeted_outreach_pipeline.py --fix-draft-urls --dry-run
 
-Credentials: st.secrets / .streamlit/secrets.toml
+Credentials: environment variables (or root ``.env`` / optional ``secrets.toml``)
 (GEMINI_API_KEY, SUPABASE_SERVICE_ROLE_KEY, Google OAuth; service role required to read/update catalog).
 
 Gemini calls share the same per-model RPM limiter as the harvester (see engine.MODEL_RPM_LIMITS).
@@ -34,7 +34,6 @@ from email.message import Message
 from pathlib import Path
 from typing import Any
 
-import streamlit as st
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -61,8 +60,7 @@ from share_access import create_headless_property_share_url
 
 GMAIL_SCOPES = ("https://www.googleapis.com/auth/gmail.compose",)
 TOKEN_PATH = Path(__file__).resolve().parent / ".gmail_oauth_token.json"
-SECRETS_PATH = Path(__file__).resolve().parent / ".streamlit" / "secrets.toml"
-DEFAULT_APP_URL = "https://capeigen.streamlit.app"
+DEFAULT_APP_URL = "https://capeigen.netlify.app"
 LEGACY_APP_URLS: tuple[str, ...] = ("https://realestateanalyzer.streamlit.app",)
 SIGNATURE_LINE = "Shaker HS 2027"
 _resolved_app_url: str | None = None
@@ -95,19 +93,18 @@ _APPRECIATION_PATTERNS: tuple[re.Pattern[str], ...] = (
 _EMAIL_PATTERN = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$")
 
 
-def _bootstrap_streamlit_secrets() -> None:
-    os.environ.setdefault("STREAMLIT_SECRETS_FILE", str(SECRETS_PATH))
-    if not SECRETS_PATH.is_file():
+def _bootstrap_local_secrets() -> None:
+    from config_secrets import load_local_secrets_into_environ
+
+    load_local_secrets_into_environ()
+    required = ("GEMINI_API_KEY", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY")
+    missing = [name for name in required if not (os.getenv(name) or "").strip()]
+    if missing:
         raise FileNotFoundError(
-            f"Missing {SECRETS_PATH}. Add Supabase, Gemini, and Google OAuth keys first."
+            "Missing required environment secrets: "
+            + ", ".join(missing)
+            + ". Set them in the environment or optional legacy secrets TOML."
         )
-    _ = st.secrets  # force load
-    # authenticate.get_service_client() reads os.environ in headless CLI mode
-    for key, value in st.secrets.items():
-        if os.getenv(key) or value is None:
-            continue
-        if isinstance(value, (str, int, float, bool)):
-            os.environ[key] = str(value)
 
 
 def resolve_app_url(*, force_refresh: bool = False) -> str:
@@ -132,17 +129,14 @@ def resolve_app_url(*, force_refresh: bool = False) -> str:
 
 
 def _optional_secret(name: str) -> str | None:
-    try:
-        value = st.secrets[name]
-    except (KeyError, TypeError):
-        return None
+    value = os.getenv(name)
     if value is None or not str(value).strip():
         return None
     return str(value).strip()
 
 
 def replace_legacy_app_urls(text: str, *, app_url: str | None = None) -> tuple[str, bool]:
-    """Swap retired Streamlit Cloud origins for the current app URL."""
+    """Swap retired CapEigen hosting origins for the current app URL."""
     current = app_url or resolve_app_url()
     changed = False
     updated = text
@@ -156,14 +150,11 @@ def replace_legacy_app_urls(text: str, *, app_url: str | None = None) -> tuple[s
 
 def _require_secret(*names: str) -> str:
     for name in names:
-        try:
-            value = st.secrets[name]
-        except (KeyError, TypeError):
-            continue
+        value = os.getenv(name)
         if value is not None and str(value).strip():
             return str(value).strip()
     raise KeyError(
-        f"None of {list(names)!r} found in Streamlit secrets. Add one to {SECRETS_PATH}."
+        f"None of {list(names)!r} found in the environment. Set one before running outreach."
     )
 
 
@@ -532,7 +523,7 @@ def get_supabase_client() -> Client:
         return client
     raise RuntimeError(
         "SUPABASE_SERVICE_ROLE_KEY is required for targeted outreach.\n"
-        f"Add it to {SECRETS_PATH} (Supabase Dashboard → Project Settings → API → service_role)."
+        "Add SUPABASE_SERVICE_ROLE_KEY to the environment (Supabase Dashboard → Project Settings → API → service_role)."
     )
 
 
@@ -639,32 +630,36 @@ def create_gmail_draft_with_attachment(
 
 def _replace_urls_in_message(message: Message, *, app_url: str) -> bool:
     """Replace legacy app URLs in a draft MIME message (plain-text parts only)."""
-    changed = False
+
+    def _rewrite_part(part: Message) -> bool:
+        payload = part.get_payload(decode=True)
+        if payload is None:
+            raw = part.get_payload()
+            if not isinstance(raw, str):
+                return False
+            text = raw
+        else:
+            charset = part.get_content_charset() or "utf-8"
+            text = payload.decode(charset, errors="replace")
+        updated, part_changed = replace_legacy_app_urls(text, app_url=app_url)
+        if not part_changed:
+            return False
+        part.set_payload(updated)
+        if "Content-Transfer-Encoding" in part:
+            del part["Content-Transfer-Encoding"]
+        part["Content-Transfer-Encoding"] = "8bit"
+        return True
+
     if message.is_multipart():
+        changed = False
         for part in message.walk():
             if part.get_content_type() != "text/plain":
                 continue
-            payload = part.get_payload(decode=True)
-            if payload is None:
-                continue
-            charset = part.get_content_charset() or "utf-8"
-            text = payload.decode(charset, errors="replace")
-            updated, part_changed = replace_legacy_app_urls(text, app_url=app_url)
-            if not part_changed:
-                continue
-            part.set_payload(updated, charset=charset)
-            changed = True
+            if _rewrite_part(part):
+                changed = True
         return changed
 
-    payload = message.get_payload(decode=True)
-    if payload is None:
-        return False
-    charset = message.get_content_charset() or "utf-8"
-    text = payload.decode(charset, errors="replace")
-    updated, changed = replace_legacy_app_urls(text, app_url=app_url)
-    if changed:
-        message.set_payload(updated, charset=charset)
-    return changed
+    return _rewrite_part(message)
 
 
 def fix_gmail_draft_urls(
@@ -739,7 +734,7 @@ def fix_gmail_draft_urls(
 
 
 def run_fix_draft_urls(*, dry_run: bool = False) -> dict[str, Any]:
-    _bootstrap_streamlit_secrets()
+    _bootstrap_local_secrets()
     resolve_app_url(force_refresh=True)
     gmail_service = get_gmail_service()
     report = fix_gmail_draft_urls(gmail_service, dry_run=dry_run)
@@ -936,7 +931,7 @@ def run_pipeline(
     agent1_model: str = AGENT1_MODEL,
     agent2_model: str = AGENT2_MODEL,
 ) -> dict[str, Any]:
-    _bootstrap_streamlit_secrets()
+    _bootstrap_local_secrets()
     resolve_app_url(force_refresh=True)
     _require_secret("GEMINI_API_KEY")
 

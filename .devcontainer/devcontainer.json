@@ -1,33 +1,44 @@
 {
-  "name": "Python 3",
-  // Or use a Dockerfile or Docker Compose file. More info: https://containers.dev/guide/dockerfile
+  "name": "CapEigen (API + Web)",
   "image": "mcr.microsoft.com/devcontainers/python:1-3.11-bookworm",
+  "features": {
+    "ghcr.io/devcontainers/features/node:1": {
+      "version": "20"
+    }
+  },
   "customizations": {
     "codespaces": {
       "openFiles": [
         "README.md",
-        "AIUnderwriterv2.py"
+        "api/main.py"
       ]
     },
     "vscode": {
       "settings": {},
       "extensions": [
         "ms-python.python",
-        "ms-python.vscode-pylance"
+        "ms-python.vscode-pylance",
+        "dbaeumer.vscode-eslint"
       ]
     }
   },
-  "updateContentCommand": "[ -f packages.txt ] && sudo apt update && sudo apt upgrade -y && sudo xargs apt install -y <packages.txt; [ -f requirements.txt ] && pip3 install --user -r requirements.txt; pip3 install --user streamlit; echo '✅ Packages installed and Requirements met'",
+  "updateContentCommand": "[ -f packages.txt ] && sudo apt update && sudo apt upgrade -y && sudo xargs apt install -y <packages.txt; [ -f requirements.txt ] && pip3 install --user -r requirements.txt; cd web && npm install; echo '✅ Packages installed'",
   "postAttachCommand": {
-    "server": "streamlit run AIUnderwriterv2.py --server.enableCORS false --server.enableXsrfProtection false"
+    "api": "uvicorn api.main:app --reload --host 0.0.0.0 --port 8000",
+    "web": "cd web && npm run dev -- --host 0.0.0.0 --port 5173"
   },
   "portsAttributes": {
-    "8501": {
-      "label": "Application",
+    "8000": {
+      "label": "CapEigen API",
+      "onAutoForward": "notify"
+    },
+    "5173": {
+      "label": "CapEigen Web",
       "onAutoForward": "openPreview"
     }
   },
   "forwardPorts": [
-    8501
+    8000,
+    5173
   ]
 }

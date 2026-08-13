@@ -324,14 +324,9 @@ def _get_api_key() -> str:
     key = os.getenv("GEMINI_API_KEY")
     if key:
         return key
-    try:
-        import streamlit as st
-
-        return str(st.secrets["GEMINI_API_KEY"])
-    except Exception as exc:
-        raise EnvironmentError(
-            "GEMINI_API_KEY not set. Export it or add to Streamlit secrets."
-        ) from exc
+    raise EnvironmentError(
+        "GEMINI_API_KEY not set. Export it or add it to your local environment / .env."
+    )
 
 
 def create_genai_session(api_key: str | None = None) -> GenaiSession:
@@ -1559,7 +1554,7 @@ def _geocode_hint_lat_lng(
     zip_code = parse_zipcode_from_address(address)
     if zip_code:
         try:
-            from portfolio_map_page import ZIP_CENTROIDS
+            from portfolio_geo import ZIP_CENTROIDS
 
             centroid = ZIP_CENTROIDS.get(zip_code)
             if centroid:
@@ -3352,7 +3347,7 @@ def _local_coordinate_fallback(
 ) -> tuple[float | None, float | None]:
     """ZIP centroid / market-center fallback when grounding agents fail."""
     from knowledge_base import parse_zipcode_from_address
-    from portfolio_map_page import resolve_coordinates_local
+    from portfolio_geo import resolve_coordinates_local
 
     normalized = str(address or "").strip()
     if not normalized:

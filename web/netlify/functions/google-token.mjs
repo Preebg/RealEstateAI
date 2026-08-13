@@ -22,7 +22,7 @@ export async function handler(event) {
   if (!clientId || !clientSecret) {
     return json(503, {
       detail:
-        'Google OAuth is not configured. Set GOOGLE_WEB_CLIENT_ID and GOOGLE_WEB_CLIENT_SECRET in Netlify.',
+        'Google OAuth secret missing on Netlify. Site settings → Environment variables → add GOOGLE_WEB_CLIENT_ID and GOOGLE_WEB_CLIENT_SECRET, then redeploy.',
     })
   }
 

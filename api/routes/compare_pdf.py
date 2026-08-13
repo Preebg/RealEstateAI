@@ -11,7 +11,7 @@ from api.deps import CurrentUser
 from api.schemas import CompareRequest, CompareResponse, PdfRequest
 from knowledge_base import lookup_property
 from pdf_generator import generate_property_pdf
-from property_compare_page import build_property_comparison_metrics
+from comparison_metrics import build_property_comparison_metrics
 
 router = APIRouter(tags=["exports"])
 

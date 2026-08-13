@@ -27,44 +27,44 @@ def _discovery_generate_return(payload: str) -> tuple[str, list[str]]:
     return payload, []
 
 
-# Mock streamlit before importing engine to avoid secrets errors
-with patch("streamlit.secrets", {"GEMINI_API_KEY": "fake_key"}):
-    from engine import (
-        calculate_quantum_probability,
-        calculate_quantum_risk,
-        clear_quantum_risk_cache,
-    )
-    from engine import (
-        DISCOVERY_FALLBACK_MODEL,
-        DISCOVERY_MODEL,
-        DISCOVERY_MODEL_CHAIN,
-        RESEARCH_MODEL,
-        discover_hot_market_listings,
-        DEFAULT_MODEL_RPM,
-        SharedModelRateLimiter,
-        is_daily_quota_exhausted,
-        model_rpm_limit,
-        research_property,
-        is_disallowed_property_type,
-        should_skip_synthesis,
-        synthesis_skip_reason,
-        research_stage_skip_reason,
-        is_plausible_discovery_address,
-        MAX_CONCURRENT_RESEARCH_AGENTS,
-        _repair_discovery_address,
-        _build_listings_from_raw,
-    )
-    from finance import (
-        DEFAULT_METRO_CAGR,
-        LOCATION_ADJUSTMENT_BAND,
-        METRO_HISTORICAL_CAGR,
-        calculate_10yr_appreciation,
-        expected_annual_appreciation_rate,
-        location_rate_adjustment,
-        monte_carlo_appreciation_forecast,
-        resolve_metro_base_rate,
-    )
-    from quantum_portfolio import ALIGNMENT_SCORE_KEYS
+os.environ.setdefault("GEMINI_API_KEY", "fake_key_for_ci")
+
+from engine import (
+    calculate_quantum_probability,
+    calculate_quantum_risk,
+    clear_quantum_risk_cache,
+)
+from engine import (
+    DISCOVERY_FALLBACK_MODEL,
+    DISCOVERY_MODEL,
+    DISCOVERY_MODEL_CHAIN,
+    RESEARCH_MODEL,
+    discover_hot_market_listings,
+    DEFAULT_MODEL_RPM,
+    SharedModelRateLimiter,
+    is_daily_quota_exhausted,
+    model_rpm_limit,
+    research_property,
+    is_disallowed_property_type,
+    should_skip_synthesis,
+    synthesis_skip_reason,
+    research_stage_skip_reason,
+    is_plausible_discovery_address,
+    MAX_CONCURRENT_RESEARCH_AGENTS,
+    _repair_discovery_address,
+    _build_listings_from_raw,
+)
+from finance import (
+    DEFAULT_METRO_CAGR,
+    LOCATION_ADJUSTMENT_BAND,
+    METRO_HISTORICAL_CAGR,
+    calculate_10yr_appreciation,
+    expected_annual_appreciation_rate,
+    location_rate_adjustment,
+    monte_carlo_appreciation_forecast,
+    resolve_metro_base_rate,
+)
+from quantum_portfolio import ALIGNMENT_SCORE_KEYS
 
 QUANTUM_RISK_KEYS = ALIGNMENT_SCORE_KEYS
 
@@ -741,7 +741,7 @@ class TestGeospatialEnrichment(unittest.TestCase):
         self.assertEqual(payload.get("geocode_source"), "local_fallback")
 
     def test_attach_coordinates_prefers_stored_coords(self):
-        from portfolio_map_page import attach_coordinates
+        from portfolio_geo import attach_coordinates
         import pandas as pd
 
         df = pd.DataFrame(
@@ -761,7 +761,7 @@ class TestGeospatialEnrichment(unittest.TestCase):
 
     def test_attach_coordinates_falls_back_when_lat_lon_are_nan(self):
         """Missing DB coords become NaN in float columns; must still geocode locally."""
-        from portfolio_map_page import attach_coordinates
+        from portfolio_geo import attach_coordinates
         import pandas as pd
 
         df = pd.DataFrame(
@@ -781,7 +781,7 @@ class TestGeospatialEnrichment(unittest.TestCase):
 
     def test_attach_coordinates_ignores_null_island_sentinel(self):
         """Failed geocoding stores (0, 0); map must fall back to ZIP/market coords."""
-        from portfolio_map_page import attach_coordinates
+        from portfolio_geo import attach_coordinates
         import pandas as pd
 
         df = pd.DataFrame(
@@ -1676,7 +1676,6 @@ class TestUnreliableForeclosureROI(unittest.TestCase):
         )
 
         with (
-            patch("knowledge_base.in_streamlit_app", return_value=False),
             patch(
                 "knowledge_base._fetch_canonical_properties",
                 return_value=[bad_row, good_row],
@@ -2114,7 +2113,7 @@ class TestZipcodeParsing(unittest.TestCase):
 
 class TestPropertyComparison(unittest.TestCase):
     def test_build_property_comparison_metrics(self):
-        from property_compare_page import build_property_comparison_metrics
+        from comparison_metrics import build_property_comparison_metrics
 
         prop = {
             "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
@@ -2263,7 +2262,7 @@ class TestUuidValidation(unittest.TestCase):
 
 
 class TestHeadlessDbClient(unittest.TestCase):
-    def test_headless_prefers_service_role_client(self):
+    def test_prefers_service_role_client_when_unauthenticated(self):
         import os
         from unittest.mock import MagicMock, patch
 
@@ -2274,131 +2273,31 @@ class TestHeadlessDbClient(unittest.TestCase):
             "SUPABASE_KEY": "anon-key",
         }
         with patch.dict(os.environ, env, clear=False):
-            with patch("authenticate._headless_mode", return_value=True):
-                with patch("authenticate.get_authenticated_client", return_value=None):
-                    with patch(
-                        "authenticate.create_client", return_value=mock_service
-                    ) as create:
-                        from authenticate import get_db_client
-
-                        client = get_db_client()
-                        self.assertIs(client, mock_service)
-                        create.assert_called_once_with(
-                            "https://example.supabase.co", "service-role-key"
-                        )
-
-    def test_streamlit_prefers_authenticated_client(self):
-        from unittest.mock import MagicMock, patch
-
-        mock_auth = MagicMock()
-        with patch("authenticate._headless_mode", return_value=False):
-            with patch(
-                "authenticate.get_authenticated_client", return_value=mock_auth
-            ):
-                with patch("authenticate.create_client") as create:
+            with patch("authenticate.get_authenticated_client", return_value=None):
+                with patch(
+                    "authenticate.create_client", return_value=mock_service
+                ) as create:
                     from authenticate import get_db_client
 
                     client = get_db_client()
-                    self.assertIs(client, mock_auth)
-                    create.assert_not_called()
-
-
-class TestOAuthRedirectUrl(unittest.TestCase):
-    def test_current_app_url_survives_context_url_key_error(self):
-        from unittest.mock import patch
-
-        with patch("authenticate._headless_mode", return_value=False):
-            with patch.object(
-                type(__import__("streamlit").context),
-                "url",
-                property(lambda self: (_ for _ in ()).throw(KeyError("url_pathname"))),
-            ):
-                with patch(
-                    "authenticate._origin_from_request_headers",
-                    return_value="https://capeigen.streamlit.app",
-                ):
-                    from authenticate import _current_app_url
-
-                    self.assertEqual(_current_app_url(), "https://capeigen.streamlit.app")
-
-    def test_prefers_live_app_url_over_localhost_secret(self):
-        from unittest.mock import patch
-
-        with patch("authenticate._headless_mode", return_value=False):
-            with patch(
-                "authenticate._current_app_url",
-                return_value="https://my-app.streamlit.app",
-            ):
-                with patch(
-                    "authenticate._configured_redirect_url",
-                    return_value="http://localhost:8501",
-                ):
-                    from authenticate import _get_redirect_url
-
-                    self.assertEqual(
-                        _get_redirect_url(), "https://my-app.streamlit.app"
+                    self.assertIs(client, mock_service)
+                    create.assert_called_once_with(
+                        "https://example.supabase.co", "service-role-key"
                     )
 
-    def test_prefers_live_app_url_over_stale_cloud_secret(self):
-        from unittest.mock import patch
-
-        with patch("authenticate._headless_mode", return_value=False):
-            with patch(
-                "authenticate._current_app_url",
-                return_value="https://capeigen.streamlit.app",
-            ):
-                with patch(
-                    "authenticate._configured_redirect_url",
-                    return_value="https://q-scout.streamlit.app",
-                ):
-                    from authenticate import _get_redirect_url
-
-                    self.assertEqual(
-                        _get_redirect_url(), "https://capeigen.streamlit.app"
-                    )
-
-    def test_uses_localhost_when_app_is_local(self):
-        from unittest.mock import patch
-
-        with patch("authenticate._headless_mode", return_value=False):
-            with patch(
-                "authenticate._current_app_url",
-                return_value="http://localhost:8501",
-            ):
-                with patch(
-                    "authenticate._configured_redirect_url",
-                    return_value="http://localhost:8501",
-                ):
-                    from authenticate import _get_redirect_url
-
-                    self.assertEqual(_get_redirect_url(), "http://localhost:8501")
-
-
-class TestHeadlessDetection(unittest.TestCase):
-    def test_streamlit_script_context_is_not_headless(self):
+    def test_prefers_authenticated_client_when_bound(self):
         from unittest.mock import MagicMock, patch
 
-        with patch.dict("os.environ", {}, clear=True):
-            with patch(
-                "streamlit.runtime.scriptrunner.get_script_run_ctx",
-                return_value=MagicMock(),
-            ):
-                from authenticate import _headless_mode, in_streamlit_app
+        mock_auth = MagicMock()
+        with patch(
+            "authenticate.get_authenticated_client", return_value=mock_auth
+        ):
+            with patch("authenticate.create_client") as create:
+                from authenticate import get_db_client
 
-                self.assertFalse(_headless_mode())
-                self.assertTrue(in_streamlit_app())
-
-    def test_cli_without_streamlit_context_is_headless(self):
-        from unittest.mock import patch
-
-        with patch.dict("os.environ", {}, clear=True):
-            with patch(
-                "streamlit.runtime.scriptrunner.get_script_run_ctx",
-                return_value=None,
-            ):
-                from authenticate import _headless_mode
-
-                self.assertTrue(_headless_mode())
+                client = get_db_client()
+                self.assertIs(client, mock_auth)
+                create.assert_not_called()
 
 
 class TestPropertyAge(unittest.TestCase):
@@ -2582,10 +2481,9 @@ class TestPortfolioMapGeocoding(unittest.TestCase):
         from unittest.mock import MagicMock
 
         sys.modules.setdefault("folium", MagicMock())
-        sys.modules.setdefault("streamlit_folium", MagicMock())
 
     def test_new_market_zip_centroids(self):
-        from portfolio_map_page import resolve_coordinates_local
+        from portfolio_geo import resolve_coordinates_local
 
         cases = [
             ("10 Main St, Orlando, FL 32801", "32801", "Orlando"),
@@ -2602,7 +2500,7 @@ class TestPortfolioMapGeocoding(unittest.TestCase):
             self.assertIsNotNone(lon, msg=address)
 
     def test_new_market_suburb_keyword_fallback(self):
-        from portfolio_map_page import resolve_coordinates_local
+        from portfolio_geo import resolve_coordinates_local
 
         lat, lon = resolve_coordinates_local(
             "100 Suburban Ln, Kissimmee, FL 34741",
@@ -2615,7 +2513,7 @@ class TestPortfolioMapGeocoding(unittest.TestCase):
         self.assertGreater(lat, 27.5)
 
     def test_dataframe_selected_rows_reads_dict_state(self):
-        from portfolio_map_page import _dataframe_selected_rows
+        from portfolio_geo import _dataframe_selected_rows
 
         rows = _dataframe_selected_rows({"selection": {"rows": [2], "columns": []}})
         self.assertEqual(rows, [2])
@@ -2628,7 +2526,6 @@ class TestPortfolioMapFilters(unittest.TestCase):
         from unittest.mock import MagicMock
 
         sys.modules.setdefault("folium", MagicMock())
-        sys.modules.setdefault("streamlit_folium", MagicMock())
 
     def _sample_df(self):
         import pandas as pd
@@ -2661,7 +2558,7 @@ class TestPortfolioMapFilters(unittest.TestCase):
         )
 
     def test_filter_by_state_and_city(self):
-        from portfolio_map_page import filter_portfolio_dataframe
+        from portfolio_geo import filter_portfolio_dataframe
 
         df = self._sample_df()
         filtered = filter_portfolio_dataframe(df, states=["NY"], cities=["Rochester"])
@@ -2669,7 +2566,7 @@ class TestPortfolioMapFilters(unittest.TestCase):
         self.assertEqual(filtered.iloc[0]["state_code"], "NY")
 
     def test_filter_by_price_and_roi_ranges(self):
-        from portfolio_map_page import filter_portfolio_dataframe
+        from portfolio_geo import filter_portfolio_dataframe
 
         df = self._sample_df()
         filtered = filter_portfolio_dataframe(
@@ -2683,7 +2580,7 @@ class TestPortfolioMapFilters(unittest.TestCase):
         self.assertEqual(filtered.iloc[0]["market_city"], "Charlotte")
 
     def test_build_portfolio_dataframe_includes_filter_fields(self):
-        from portfolio_map_page import build_portfolio_dataframe
+        from portfolio_geo import build_portfolio_dataframe
 
         props = [
             {
@@ -2704,7 +2601,7 @@ class TestPortfolioMapFilters(unittest.TestCase):
     def test_build_portfolio_dataframe_includes_added_at(self):
         from datetime import datetime, timezone
 
-        from portfolio_map_page import build_portfolio_dataframe
+        from portfolio_geo import build_portfolio_dataframe
 
         props = [
             {
@@ -2718,7 +2615,7 @@ class TestPortfolioMapFilters(unittest.TestCase):
         self.assertEqual(added_at, datetime(2025, 6, 11, 22, 53, tzinfo=timezone.utc))
 
     def test_build_portfolio_dataframe_includes_listing_metadata(self):
-        from portfolio_map_page import build_portfolio_dataframe
+        from portfolio_geo import build_portfolio_dataframe
 
         props = [
             {
@@ -2736,40 +2633,6 @@ class TestPortfolioMapFilters(unittest.TestCase):
         self.assertEqual(row["listing_status"], "For Sale")
         self.assertEqual(row["days_on_market"], 12)
         self.assertEqual(row["view_count"], 87)
-
-
-class TestPropertyListingPreview(unittest.TestCase):
-    def test_build_listing_metadata_chips_all_fields(self):
-        from components.property_listing_preview import build_listing_metadata_chips
-
-        chips = build_listing_metadata_chips(
-            listing_status="For Sale",
-            days_on_market=12,
-            view_count=87,
-        )
-        self.assertEqual(chips, ["For Sale", "12 days on market", "87 views"])
-
-    def test_build_listing_metadata_chips_omits_null_view_count(self):
-        from components.property_listing_preview import build_listing_metadata_chips
-
-        chips = build_listing_metadata_chips(
-            listing_status="Pending",
-            days_on_market=1,
-            view_count=None,
-        )
-        self.assertEqual(chips, ["Pending", "1 day on market"])
-
-    def test_render_listing_metadata_chips_html_escapes_values(self):
-        from components.property_listing_preview import render_listing_metadata_chips_html
-
-        html = render_listing_metadata_chips_html(
-            listing_status='For Sale <script>alert("x")</script>',
-            days_on_market=3,
-            view_count=5,
-        )
-        self.assertIn("listing-chip-row", html)
-        self.assertNotIn("<script>", html)
-        self.assertIn("3 days on market", html)
 
 
 class TestViewerTimezone(unittest.TestCase):
@@ -2808,7 +2671,7 @@ class TestViewerTimezone(unittest.TestCase):
 
         import pandas as pd
 
-        from portfolio_map_page import sort_portfolio
+        from portfolio_geo import sort_portfolio
 
         df = pd.DataFrame(
             {
@@ -2887,28 +2750,6 @@ class TestDeferredAnalysis(unittest.TestCase):
         queue = build_deferred_task_queue({"price": 200000}, guest_mode=True)
         self.assertNotIn("comps", queue)
         self.assertIn("quantum", queue)
-
-    def test_get_active_analysis_address_prefers_session_key(self):
-        import streamlit as st
-
-        from services.deferred_analysis import (
-            INDIVIDUAL_SEARCH_ADDRESS_KEY,
-            get_active_analysis_address,
-        )
-
-        st.session_state[INDIVIDUAL_SEARCH_ADDRESS_KEY] = "10 Park Ave"
-        st.session_state["property_data"] = {"address": "Other St"}
-        self.assertEqual(get_active_analysis_address(), "10 Park Ave")
-
-    def test_ensure_deferred_task_queue_does_not_rebuild_existing_queue(self):
-        import streamlit as st
-
-        from services.deferred_analysis import DEFERRED_TASKS_KEY, ensure_deferred_task_queue
-
-        st.session_state[DEFERRED_TASKS_KEY] = ["quantum"]
-        ensure_deferred_task_queue({"price": 200000}, guest_mode=False)
-        self.assertEqual(st.session_state[DEFERRED_TASKS_KEY], ["quantum"])
-
 
 class TestPersistCompsToCanonical(unittest.TestCase):
     def test_persist_skips_without_comps(self):
@@ -3158,7 +2999,7 @@ class TestCompsAnalysis(unittest.TestCase):
         self.assertFalse(comps_analysis_needs_recompute(fresh))
 
     def test_ensure_comps_analysis_recomputes_stale_summary(self):
-        from components.property_comps import ensure_comps_analysis
+        from comps_analysis import ensure_comps_analysis
         from engine import safe_float
 
         property_info = {
@@ -3396,14 +3237,13 @@ class TestSecurityHardening(unittest.TestCase):
         self.assertEqual(redacted["share_token"], "[redacted]")
         self.assertEqual(redacted["property_id"], "abc")
 
-    def test_delete_canonical_denied_for_non_admin_in_streamlit(self):
+    def test_delete_canonical_denied_for_non_admin_user(self):
         from unittest.mock import MagicMock, patch
 
         from knowledge_base import delete_canonical_property_by_id
 
         property_id = "7f35bc1e-9de5-484d-8f73-27fd3da733eb"
         with (
-            patch("knowledge_base.in_streamlit_app", return_value=True),
             patch("knowledge_base.get_logged_in_user", return_value={"id": "user-a"}),
             patch("knowledge_base.get_admin_uid", return_value="admin-b"),
             patch("knowledge_base.get_client") as mock_client,
@@ -3412,7 +3252,7 @@ class TestSecurityHardening(unittest.TestCase):
             self.assertFalse(delete_canonical_property_by_id(property_id))
             mock_client.assert_not_called()
 
-    def test_delete_canonical_allowed_for_admin_in_streamlit(self):
+    def test_delete_canonical_allowed_for_admin_user(self):
         from unittest.mock import MagicMock, patch
 
         from knowledge_base import delete_canonical_property_by_id
@@ -3421,7 +3261,6 @@ class TestSecurityHardening(unittest.TestCase):
         property_id = "11111111-1111-1111-1111-111111111111"
         mock_supabase = MagicMock()
         with (
-            patch("knowledge_base.in_streamlit_app", return_value=True),
             patch(
                 "knowledge_base.get_logged_in_user",
                 return_value={"id": admin_id, "email": "admin@example.com"},
@@ -3432,26 +3271,6 @@ class TestSecurityHardening(unittest.TestCase):
             patch("knowledge_base.log", MagicMock()),
         ):
             self.assertTrue(delete_canonical_property_by_id(property_id))
-
-    def test_read_pkce_verifier_ignores_query_param(self):
-        from unittest.mock import patch
-
-        import authenticate
-
-        with (
-            patch.object(authenticate.st, "session_state", {}),
-            patch.object(authenticate.st, "query_params", {"pkce_verifier": "leaked"}),
-            patch("authenticate._load_pending_pkce", return_value=None),
-        ):
-            self.assertIsNone(authenticate._read_pkce_verifier())
-
-    def test_oauth_redirect_rejects_untrusted_forwarded_host(self):
-        import authenticate
-
-        self.assertFalse(authenticate._is_trusted_app_host("evil.example.com"))
-        self.assertTrue(authenticate._is_trusted_app_host("localhost"))
-        self.assertTrue(authenticate._is_trusted_app_host("my-app.streamlit.app"))
-
 
 class TestOutreachAppUrls(unittest.TestCase):
     def test_replace_legacy_app_urls(self):
@@ -3477,46 +3296,6 @@ class TestOutreachAppUrls(unittest.TestCase):
         updated, changed = replace_legacy_app_urls(body, app_url=DEFAULT_APP_URL)
         self.assertFalse(changed)
         self.assertEqual(updated, body)
-
-    def test_ensure_signature_uses_current_app_url(self):
-        from targeted_outreach_pipeline import DEFAULT_APP_URL, _ensure_signature
-
-        body = "Hi — see https://realestateanalyzer.streamlit.app"
-        signed = _ensure_signature(
-            body,
-            "Best regards",
-            app_url=DEFAULT_APP_URL,
-        )
-        self.assertNotIn("realestateanalyzer", signed)
-        self.assertIn(DEFAULT_APP_URL, signed)
-
-    def test_replace_urls_in_multipart_draft(self):
-        from email.mime.application import MIMEApplication
-        from email.mime.multipart import MIMEMultipart
-        from email.mime.text import MIMEText
-
-        from targeted_outreach_pipeline import (
-            DEFAULT_APP_URL,
-            _replace_urls_in_message,
-        )
-
-        message = MIMEMultipart()
-        message["Subject"] = "Listing analysis"
-        message.attach(
-            MIMEText(
-                "Full report: https://realestateanalyzer.streamlit.app?share=xyz",
-                "plain",
-                "utf-8",
-            )
-        )
-        message.attach(MIMEApplication(b"%PDF", _subtype="pdf"))
-        changed = _replace_urls_in_message(message, app_url=DEFAULT_APP_URL)
-        self.assertTrue(changed)
-        plain_part = message.get_payload()[0]
-        payload = plain_part.get_payload(decode=True).decode("utf-8")
-        self.assertIn(DEFAULT_APP_URL, payload)
-        self.assertNotIn("realestateanalyzer", payload)
-
 
 class TestDiscoveryScraper(unittest.TestCase):
     _FIXTURES_DIR = Path(__file__).resolve().parent / "tests" / "fixtures"
@@ -4571,7 +4350,7 @@ class TestConfigSecrets(unittest.TestCase):
                 "postgresql://postgres:secret@db.abc.supabase.co:5432/postgres"
             )
 
-    def test_load_streamlit_secrets_normalizes_existing_env(self) -> None:
+    def test_load_local_secrets_normalizes_existing_env(self) -> None:
         import config_secrets
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -4585,7 +4364,7 @@ class TestConfigSecrets(unittest.TestCase):
                 {"SUPABASE_URL": ' "https://stale.supabase.co" '},
                 clear=False,
             ):
-                loaded = config_secrets.load_streamlit_secrets_into_environ(
+                loaded = config_secrets.load_local_secrets_into_environ(
                     secrets_path=secrets_path
                 )
                 self.assertTrue(loaded)
@@ -4732,3 +4511,11 @@ class PropertyNotificationsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAuthenticateHeadlessStub(unittest.TestCase):
+
+    def test_get_logged_in_user_none_without_request_client(self):
+        from authenticate import get_logged_in_user
+
+        self.assertIsNone(get_logged_in_user())
