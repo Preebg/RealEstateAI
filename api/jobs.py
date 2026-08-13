@@ -13,6 +13,7 @@ from services.deferred_analysis import (
     TASK_LABELS,
     build_deferred_task_queue,
     execute_deferred_task,
+    finance_context_from_property,
     finance_task_signature,
 )
 
@@ -86,8 +87,21 @@ def _run_deferred_queue(job_id: str) -> None:
                 return
             task = job.deferred_tasks[0]
             property_info = job.property_data
-            finance_context = job.finance_context
+            finance_context = job.finance_context or finance_context_from_property(
+                property_info
+            )
+            if finance_context and job.finance_context is None:
+                job.finance_context = finance_context
             address = job.address
+
+            # Quantum needs finance inputs. If still missing, run other work first;
+            # if only quantum remains, park until /api/finance/recalc arrives.
+            if task == "quantum" and finance_context is None:
+                rest = list(job.deferred_tasks[1:])
+                if rest:
+                    job.deferred_tasks = rest + ["quantum"]
+                    continue
+                return
 
         try:
             follow_ups = execute_deferred_task(
@@ -117,6 +131,8 @@ def _run_deferred_queue(job_id: str) -> None:
             if error:
                 job.error = f"{TASK_LABELS.get(task, task)}: {error}"
             else:
+                if job.error and task == "quantum":
+                    job.error = None
                 job.completed_tasks.append(task)
                 if task == "quantum" and finance_context:
                     job.quantum_finance_sig = finance_task_signature(
@@ -142,12 +158,22 @@ def seed_job_from_analysis(
     guest_mode: bool = False,
 ) -> None:
     queue = build_deferred_task_queue(property_data, guest_mode=guest_mode)
+    finance_ctx = finance_context_from_property(property_data)
     with _lock:
         job.property_data = property_data
         job.from_kb = from_kb
+        job.finance_context = finance_ctx
         job.deferred_tasks = queue
         job.deferred_tasks_total = len(queue)
         job.status = "running" if queue else "done"
+        job.error = None
+        # Remember the KB cash-flow signature so assumption changes can refresh QAOA.
+        if finance_ctx and property_data.get("quantum_risk"):
+            job.quantum_finance_sig = finance_task_signature(
+                monthly_net_cash_flow=finance_ctx["monthly_net_cash_flow"],
+                forecast_rate=finance_ctx["forecast_rate"],
+                location_score=finance_ctx["location_score"],
+            )
     if queue:
         schedule_deferred_work(job.job_id)
 
@@ -159,12 +185,13 @@ def update_finance_context(
     forecast_rate: float,
     location_score: float,
 ) -> bool:
-    """Update finance context and re-queue quantum if inputs changed. Returns True if requeued."""
+    """Update finance context and re-queue quantum if needed. Returns True if requeued."""
     signature = finance_task_signature(
         monthly_net_cash_flow=monthly_net_cash_flow,
         forecast_rate=forecast_rate,
         location_score=location_score,
     )
+    should_schedule = False
     requeued = False
     with _lock:
         job = _jobs.get(job_id)
@@ -176,9 +203,15 @@ def update_finance_context(
             "location_score": location_score,
         }
         prior = job.quantum_finance_sig
-        if prior is not None and prior != signature:
-            job.property_data.pop("quantum_risk", None)
-            job.property_data.pop("quantum_risk_score", None)
+        missing_quantum = not job.property_data.get("quantum_risk")
+        inputs_changed = prior is not None and prior != signature
+        quantum_pending = "quantum" in job.deferred_tasks
+
+        if missing_quantum or inputs_changed:
+            if inputs_changed:
+                job.property_data.pop("quantum_risk", None)
+                job.property_data.pop("quantum_risk_score", None)
+                job.quantum_finance_sig = None
             queue = list(job.deferred_tasks)
             if "quantum" not in queue:
                 insert_at = 0
@@ -186,11 +219,19 @@ def update_finance_context(
                     insert_at = queue.index("comps") + 1
                 queue.insert(insert_at, "quantum")
                 job.deferred_tasks = queue
-                job.deferred_tasks_total = max(job.deferred_tasks_total, len(queue))
-                job.status = "running"
-                job.quantum_finance_sig = None
+                job.deferred_tasks_total = max(
+                    job.deferred_tasks_total, len(job.completed_tasks) + len(queue)
+                )
                 requeued = True
-    if requeued:
+            job.status = "running"
+            if job.error and "finance_context" in (job.error or ""):
+                job.error = None
+            should_schedule = True
+        elif quantum_pending:
+            # Worker may have parked waiting for finance inputs.
+            job.status = "running"
+            should_schedule = True
+    if should_schedule:
         schedule_deferred_work(job_id)
     return requeued
 

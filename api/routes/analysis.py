@@ -43,14 +43,16 @@ def _authorize_job(job_id: str, user_id: str | None) -> Any:
     return job
 
 
-def _run_start(job_id: str, address: str, guest_mode: bool) -> None:
+def _run_start(job_id: str, address: str, guest_mode: bool, user_id: str | None) -> None:
     from api.jobs import get_job as _get
 
     job = _get(job_id)
     if job is None:
         return
     try:
-        result = start_property_analysis(address, guest_mode=guest_mode)
+        result = start_property_analysis(
+            address, guest_mode=guest_mode, user_id=user_id
+        )
         seed_job_from_analysis(
             job,
             property_data=result["property_data"],
@@ -72,13 +74,14 @@ def start_analysis(
     if not address:
         raise HTTPException(status_code=400, detail="Address is required")
 
+    user_id = user["id"] if user else None
     job = create_job(
         address=address,
-        user_id=user["id"] if user else None,
+        user_id=user_id,
         guest_mode=body.guest_mode,
     )
     job.status = "running"
-    _start_executor.submit(_run_start, job.job_id, address, body.guest_mode)
+    _start_executor.submit(_run_start, job.job_id, address, body.guest_mode, user_id)
 
     return AnalysisStartResponse(
         job_id=job.job_id,

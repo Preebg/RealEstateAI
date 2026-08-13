@@ -97,10 +97,8 @@ def restore_individual_search_address_input() -> None:
     st.session_state["address_input"] = [active]
 
 
-def _resolve_finance_context(property_info: dict[str, Any]) -> dict[str, Any] | None:
-    ctx = get_deferred_finance_context()
-    if ctx:
-        return ctx
+def finance_context_from_property(property_info: dict[str, Any]) -> dict[str, Any] | None:
+    """Build quantum finance inputs from stored KB / analysis fields (no Streamlit)."""
     forecast_rate = safe_float(property_info.get("forecast_rate"))
     location_score = safe_float(property_info.get("location_score"))
     monthly_net_cash_flow = safe_float(property_info.get("monthly_net_cash_flow"))
@@ -113,6 +111,13 @@ def _resolve_finance_context(property_info: dict[str, Any]) -> dict[str, Any] | 
     return None
 
 
+def _resolve_finance_context(property_info: dict[str, Any]) -> dict[str, Any] | None:
+    ctx = get_deferred_finance_context()
+    if ctx:
+        return ctx
+    return finance_context_from_property(property_info)
+
+
 def build_deferred_task_queue(
     property_data: dict[str, Any],
     *,
@@ -123,7 +128,18 @@ def build_deferred_task_queue(
     if not guest_mode and not property_has_existing_comps(property_data):
         tasks.append("comps")
     if not property_data.get("quantum_risk"):
-        tasks.append("quantum")
+        # KB rows store only quantum_risk_score. Hydrate a display stub so the UI
+        # is responsive; finance recalc can re-queue a full QAOA refresh later.
+        score = safe_float(property_data.get("quantum_risk_score"))
+        if score > 0:
+            property_data["quantum_risk"] = {
+                "overall_success_pct": score,
+                "cashflow_success_pct": score,
+                "appreciation_success_pct": score,
+                "combined_wealth_success_pct": score,
+            }
+        else:
+            tasks.append("quantum")
     if not property_data.get("_forecast_display_cache"):
         tasks.append("forecast_chart")
     return tasks
@@ -257,13 +273,14 @@ def execute_deferred_task(
     if task == "comps":
         return _run_comps_task(address, property_info)
     if task == "quantum":
-        if finance_context is None:
+        ctx = finance_context or finance_context_from_property(property_info)
+        if ctx is None:
             raise ValueError("finance_context is required for quantum task")
         _run_quantum_task(
             property_info,
-            monthly_net_cash_flow=finance_context["monthly_net_cash_flow"],
-            forecast_rate=finance_context["forecast_rate"],
-            location_score=finance_context["location_score"],
+            monthly_net_cash_flow=ctx["monthly_net_cash_flow"],
+            forecast_rate=ctx["forecast_rate"],
+            location_score=ctx["location_score"],
         )
         return []
     if task == "forecast_chart":

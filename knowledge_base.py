@@ -424,19 +424,36 @@ def lookup_property(address: str, user_id: str | None = None) -> dict[str, Any] 
     if not address or not address.strip():
         return None
 
+    cleaned = address.strip()
+
     if in_streamlit_app():
         from share_access import fetch_guest_property, is_guest_viewer
 
         if is_guest_viewer():
-            hit = fetch_guest_property(address=address)
+            hit = fetch_guest_property(address=cleaned)
             if hit:
                 record = _normalize_record_numerics(hit)
                 record["from_kb"] = True
                 return record
             return None
 
+    # Fast path: single-row fetch by exact stored address (avoids full catalog load).
+    detail = _fetch_property_detail(address=cleaned)
+    if detail:
+        record = _normalize_record_numerics(detail)
+        record["from_kb"] = True
+        uid = _resolve_user_id(user_id)
+        if uid and record.get("id"):
+            overrides = _fetch_user_overrides_map(uid)
+            record = _merge_with_user_override(
+                record, overrides.get(str(record["id"]))
+            )
+            record["from_kb"] = True
+        return record
+
+    # Fallback: normalized-key match against the active catalog index.
     data = get_kb_raw_data(user_id)
-    hit = data.get(normalize_address_key(address))
+    hit = data.get(normalize_address_key(cleaned))
     if not hit:
         return None
 

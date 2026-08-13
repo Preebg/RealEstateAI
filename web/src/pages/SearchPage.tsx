@@ -77,13 +77,22 @@ export function SearchPage() {
       tax_rate: num(property.tax_rate, 1.2),
       monthly_insurance: num(property.insurance, 150),
       monthly_hoa: num(property.hoa, 0),
-      maint_percent: num(property.maint_percent ?? property.original_ai_maint, 1),
+      maint_percent: num(
+        property.maint_percent ?? property.original_ai_maint,
+        1,
+      ),
       monthly_rent: num(
         property.rent ?? property.estimated_rent ?? property.original_ai_rent,
         0,
       ),
-      vacancy_reserve_pct: num(property.vacancy_rate, 5),
-      management_fee_pct: num(property.management_fee, 8),
+      vacancy_reserve_pct: num(
+        property.vacancy_rate ?? property.ai_vacancy_rate,
+        5,
+      ),
+      management_fee_pct: num(
+        property.management_fee ?? property.ai_management_fee,
+        8,
+      ),
     })
   }, [property, assumptions])
 
@@ -385,7 +394,9 @@ export function SearchPage() {
                   'Quantum alignment',
                   property.quantum_risk
                     ? `${num((property.quantum_risk as { overall_success_pct?: number }).overall_success_pct).toFixed(1)}%`
-                    : 'Pending…',
+                    : property.quantum_risk_score != null
+                      ? `${num(property.quantum_risk_score).toFixed(1)}%`
+                      : 'Pending…',
                 ],
                 ['Strategy', String(property.strategy || '—')],
               ].map(([label, value]) => (
