@@ -18,11 +18,8 @@ import {
   normalizeTaxRatePercent,
   type FinanceMetrics,
 } from '../lib/finance'
-import {
-  fetchPropertyDetail,
-  createPropertyShare,
-  firstCatalogUuid,
-} from '../lib/portfolio'
+import { fetchPropertyDetail, createPropertyShare, firstCatalogUuid } from '../lib/portfolio'
+import { buildPropertyPdfBlob, pdfDownloadFilename } from '../lib/propertyPdf'
 
 type Assumptions = {
   down_payment_pct: number
@@ -45,15 +42,6 @@ function num(v: unknown, fallback = 0) {
 
 function money(n: number) {
   return `$${Math.round(n).toLocaleString()}`
-}
-
-function pdfDownloadFilename(address: string): string {
-  const cleaned = address
-    .replace(/[<>:"/\\|?*\u0000-\u001f]+/g, '')
-    .replace(/\s+/g, ' ')
-    .replace(/^[.\s]+|[.\s]+$/g, '')
-  const slug = (cleaned || 'property').slice(0, 80)
-  return `CapEigen - ${slug}.pdf`
 }
 
 function moneyExact(n: number) {
@@ -91,12 +79,6 @@ function assumptionsFromProperty(property: Record<string, unknown>): Assumptions
   }
 }
 
-function jsonSafe<T>(value: T): T {
-  return JSON.parse(
-    JSON.stringify(value, (_key, v) => (typeof v === 'bigint' ? Number(v) : v)),
-  ) as T
-}
-
 function quantumPayload(value: unknown): Record<string, number> | undefined {
   if (!value || typeof value !== 'object') return undefined
   const q = value as Record<string, unknown>
@@ -108,13 +90,6 @@ function quantumPayload(value: unknown): Record<string, number> | undefined {
   ] as const
   if (!keys.every((k) => typeof q[k] === 'number')) return undefined
   return q as Record<string, number>
-}
-
-function forecastPayload(value: unknown): Record<string, unknown> | undefined {
-  if (!value || typeof value !== 'object') return undefined
-  const f = value as Record<string, unknown>
-  if (!Array.isArray(f.value_schedule_p50)) return undefined
-  return f
 }
 
 function cashFlowRows(assumptions: Assumptions, finance: FinanceMetrics) {
@@ -299,38 +274,36 @@ export function SearchPage() {
     setPdfBusy(true)
     setError(null)
     try {
-      const blob = await apiFetch<Blob>('/api/pdf', {
-        method: 'POST',
-        body: JSON.stringify({
-          address: String(property.address || query),
-          property_info: jsonSafe({
-            ...property,
-            summary:
-              typeof property.summary === 'string' && property.summary
-                ? property.summary
-                : 'No summary available.',
-          }),
-          metrics: {
-            'Risk-Adjusted Cap Rate': `${finance.cap_rate.toFixed(2)}%`,
-            'Cash on Cash Return': `${finance.cash_on_cash.toFixed(2)}%`,
-            'Monthly Net Cash Flow': moneyExact(finance.monthly_net_cash_flow),
-            'Total Cash Required': moneyExact(finance.total_investment),
-          },
-          table_data: {
-            Description: rows.map(([label]) => label),
-            Amount: rows.map(([, amount]) => amount),
-          },
-          params: {
-            'Offer Amount': money(price),
-            'Down Payment': `${assumptions.down_payment_pct}%`,
-            'Interest Rate': `${assumptions.interest_rate}%`,
-            'Loan Term': `${assumptions.loan_term} Years`,
-            'Monthly Rent': moneyExact(assumptions.monthly_rent),
-          },
-          location_score: num(property.location_score, 5),
-          quantum_risk: quantumPayload(property.quantum_risk),
-          forecast_display: forecastPayload(property._forecast_display_cache),
-        }),
+      const forecastCache = property._forecast_display_cache as
+        | { yearly_values?: number[]; value_schedule_p50?: number[] }
+        | undefined
+      const blob = buildPropertyPdfBlob({
+        address: String(property.address || query),
+        summary: typeof property.summary === 'string' ? property.summary : undefined,
+        locationScore: num(property.location_score, 5),
+        strategy: property.strategy != null ? String(property.strategy) : undefined,
+        price,
+        assumptions,
+        finance,
+        breakdown: rows.map(([label, amount, emphasize], i) => ({
+          label,
+          amount,
+          emphasize,
+          value: [
+            assumptions.monthly_rent,
+            -finance.monthly_mortgage,
+            -finance.monthly_taxes,
+            -finance.monthly_insurance,
+            -finance.monthly_hoa,
+            -finance.calculated_monthly_maint,
+            -finance.actual_vacancy_reserve,
+            -finance.actual_management_fee,
+            -finance.total_monthly_expenses,
+            finance.monthly_net_cash_flow,
+          ][i] ?? 0,
+        })),
+        quantum: quantumPayload(property.quantum_risk),
+        forecastValues: forecastCache?.yearly_values || forecastCache?.value_schedule_p50,
       })
       if (!(blob instanceof Blob) || blob.size < 8) {
         throw new Error('PDF download returned an empty file.')
