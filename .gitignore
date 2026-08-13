@@ -1,6 +1,8 @@
 .env
 .env.*
 !.env.example
+.venv/
+venv/
 .cursor/
 .agents/
 scripts/
@@ -26,7 +28,9 @@ docs/DATA_PIPELINE.md
 ARCHITECTURE.md
 README.md
 data/
+# Local Postgres volume (schema lives in docker/postgres/)
 db/
+docker/postgres/data/
 web/node_modules/
 web/dist/
 web/.env

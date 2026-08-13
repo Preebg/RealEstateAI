@@ -1,4 +1,4 @@
-"""JWT auth and Supabase client helpers for the FastAPI layer."""
+"""JWT auth and Supabase / local PostgREST client helpers for the FastAPI layer."""
 
 from __future__ import annotations
 
@@ -9,7 +9,12 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from supabase import Client, create_client
 
-from config_secrets import normalize_secret_value, normalize_supabase_url
+from authenticate import (
+    get_auth_base_url,
+    get_data_base_url,
+    using_local_database,
+)
+from config_secrets import normalize_secret_value
 
 _bearer = HTTPBearer(auto_error=False)
 
@@ -25,7 +30,8 @@ def _require_env(name: str) -> str:
 
 
 def get_supabase_url() -> str:
-    return normalize_supabase_url(_require_env("SUPABASE_URL"))
+    """Data API base URL (local gateway or hosted Supabase)."""
+    return get_data_base_url()
 
 
 def get_anon_key() -> str:
@@ -36,6 +42,11 @@ def get_anon_client() -> Client:
     return create_client(get_supabase_url(), get_anon_key())
 
 
+def get_auth_anon_client() -> Client:
+    """Client for Supabase Auth only (remote project)."""
+    return create_client(get_auth_base_url(), get_anon_key())
+
+
 def get_service_client() -> Client | None:
     key = normalize_secret_value(os.getenv("SUPABASE_SERVICE_ROLE_KEY"))
     if not key:
@@ -44,14 +55,29 @@ def get_service_client() -> Client | None:
 
 
 def client_from_jwt(access_token: str) -> Client:
-    """Build a Supabase client scoped to the caller's access token (RLS)."""
+    """Build a data client scoped to the caller's access token (hosted RLS)."""
     client = create_client(get_supabase_url(), get_anon_key())
     client.auth.set_session(access_token, "")
     return client
 
 
-def _user_from_token(access_token: str) -> dict[str, Any]:
-    client = get_anon_client()
+def data_client_for_request(access_token: str) -> Client:
+    """
+    Data client for an authenticated API request.
+
+    Local DB: service-role (or anon) against PostgREST — FastAPI already validated the JWT.
+    Hosted Supabase: JWT-scoped client so RLS still applies.
+    """
+    if using_local_database():
+        service = get_service_client()
+        if service is not None:
+            return service
+        return get_anon_client()
+    return client_from_jwt(access_token)
+
+
+def user_from_token(access_token: str) -> dict[str, Any]:
+    client = get_auth_anon_client()
     try:
         response = client.auth.get_user(access_token)
     except Exception as exc:
@@ -82,7 +108,7 @@ async def get_current_user(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Authorization Bearer token required",
         )
-    return _user_from_token(credentials.credentials)
+    return user_from_token(credentials.credentials)
 
 
 async def get_optional_user(
@@ -93,7 +119,7 @@ async def get_optional_user(
     if credentials is None or not credentials.credentials:
         return None
     try:
-        return _user_from_token(credentials.credentials)
+        return user_from_token(credentials.credentials)
     except HTTPException:
         return None
 
@@ -108,8 +134,8 @@ async def get_user_client(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Authorization Bearer token required",
         )
-    _user_from_token(credentials.credentials)
-    return client_from_jwt(credentials.credentials)
+    user_from_token(credentials.credentials)
+    return data_client_for_request(credentials.credentials)
 
 
 async def get_admin_user(

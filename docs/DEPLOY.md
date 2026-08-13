@@ -16,8 +16,9 @@ If you see `Unexpected token '<'… is not valid JSON`, the SPA called `/api/*` 
 ## Backend (Docker)
 
 1. Copy `.env.example` → `.env` and fill secrets (`SUPABASE_*`, `GEMINI_API_KEY`, `ADMIN_USER_ID`, `CORS_ORIGINS` including the Netlify origin).
-2. `docker compose up --build` locally, or build/push the `Dockerfile` to any container host (Fly, Cloud Run, Render, etc.).
-3. Confirm `GET /api/health` returns `{"status":"ok",...}`.
+2. For self-hosted data on the harvest machine, set `DATABASE_REST_URL` (host) and bring up `postgres` / `postgrest` / `rest-gateway` — see [LOCAL_POSTGRES.md](LOCAL_POSTGRES.md).
+3. `docker compose up --build` locally, or build/push the `Dockerfile` to any container host (Fly, Cloud Run, Render, etc.).
+4. Confirm `GET /api/health` returns `{"status":"ok",...}` (`data_backend` is `local-postgres` or `supabase`).
 
 ## Cutover notes
 

@@ -19,7 +19,6 @@ from discovery.orchestrator import run_scraper_discovery_async
 from config_secrets import (
     load_local_secrets_into_environ,
     normalize_secret_value,
-    normalize_supabase_url,
     resolve_hostname,
 )
 from finance import analyze_investment
@@ -215,17 +214,21 @@ def _secret_from_env(name: str) -> str | None:
 
 
 def _validate_harvest_network() -> bool:
-    """Confirm Supabase (and scraper hosts) resolve on this machine."""
-    raw_url = _secret_from_env("SUPABASE_URL")
-    if not raw_url:
-        return False
+    """Confirm data API (and scraper hosts) resolve on this machine."""
+    from authenticate import get_data_base_url, using_local_database
 
     try:
-        supabase_url = normalize_supabase_url(raw_url)
-        os.environ["SUPABASE_URL"] = supabase_url
-        resolve_hostname(urlparse(supabase_url).hostname or "", label="SUPABASE_URL")
-    except (OSError, ValueError) as exc:
-        log.error("harvest_dns_failed", error=str(exc), supabase_url=raw_url)
+        data_url = get_data_base_url()
+        host = urlparse(data_url).hostname or ""
+        label = "DATABASE_REST_URL" if using_local_database() else "SUPABASE_URL"
+        if host not in {"localhost", "127.0.0.1", "0.0.0.0", "::1", "rest-gateway"}:
+            resolve_hostname(host, label=label)
+        if using_local_database():
+            os.environ["DATABASE_REST_URL"] = data_url
+        else:
+            os.environ["SUPABASE_URL"] = data_url
+    except (OSError, ValueError, EnvironmentError) as exc:
+        log.error("harvest_dns_failed", error=str(exc))
         print(f"Network configuration error: {exc}")
         return False
 
@@ -249,11 +252,16 @@ def validate_harvest_config() -> str | None:
     """Validate API keys and return admin user_id, or None if configuration is incomplete."""
     _load_local_secrets()
 
+    has_data = bool(
+        _secret_from_env("DATABASE_REST_URL") or _secret_from_env("SUPABASE_URL")
+    )
     missing = [
         name
-        for name in ("GEMINI_API_KEY", "SUPABASE_URL", "SUPABASE_KEY", "ADMIN_USER_ID")
+        for name in ("GEMINI_API_KEY", "SUPABASE_KEY", "ADMIN_USER_ID")
         if not _secret_from_env(name)
     ]
+    if not has_data:
+        missing.append("DATABASE_REST_URL or SUPABASE_URL")
     if missing:
         log.error("harvest_config_missing", missing=missing)
         print(
@@ -279,20 +287,23 @@ def validate_harvest_config() -> str | None:
     if not _validate_harvest_network():
         return None
 
-    from authenticate import get_service_client
+    from authenticate import ensure_catalog_admin_config, get_service_client, using_local_database
 
     if get_service_client() is None:
         log.error("harvest_service_role_missing")
         print(
             "SUPABASE_SERVICE_ROLE_KEY is required for headless harvest.\n"
-            "RLS blocks the anon key when no user session is present.\n"
-            "Supabase Dashboard -> Project Settings -> API -> service_role (secret)\n"
-            "Set SUPABASE_SERVICE_ROLE_KEY in the environment.\n"
-            "Keep SUPABASE_KEY as the anon/public key for the React web app."
+            "On hosted Supabase: Project Settings -> API -> service_role (secret).\n"
+            "On local Postgres/PostgREST: any non-empty key works (e.g. local-service-key).\n"
+            "Keep SUPABASE_KEY as the anon/public key for the React web app / Auth."
         )
         return None
 
-    log.info("harvest_config_ready", admin_user_id=admin_uid[:8] + "...")
+    ensure_catalog_admin_config(admin_uid)
+
+    backend = "local-postgres" if using_local_database() else "supabase"
+    log.info("harvest_config_ready", admin_user_id=admin_uid[:8] + "...", backend=backend)
+    print(f"Harvest data backend: {backend}")
     print(f"Harvest saves will use admin user_id: {admin_uid}")
     return admin_uid
 

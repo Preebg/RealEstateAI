@@ -1,0 +1,8 @@
+# Local Supabase-compatible REST gateway for supabase-py (expects /rest/v1/*).
+:3001 {
+	handle_path /rest/v1/* {
+		reverse_proxy postgrest:3000
+	}
+
+	respond /healthz 200
+}

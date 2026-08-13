@@ -1,4 +1,49 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-capeigen}
+      POSTGRES_USER: ${POSTGRES_USER:-capeigen}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-capeigen}
+    ports:
+      # Host access for pg_dump / GUI tools (not required by api/harvester)
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-capeigen} -d ${POSTGRES_DB:-capeigen}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  postgrest:
+    image: postgrest/postgrest:v12.2.3
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGRST_DB_URI: postgres://capeigen_authenticator:capeigen_authenticator@postgres:5432/${POSTGRES_DB:-capeigen}
+      PGRST_DB_SCHEMAS: public
+      PGRST_DB_ANON_ROLE: capeigen_app
+      PGRST_DB_EXTRA_SEARCH_PATH: public
+      # No JWT secret: trusted docker network; FastAPI validates Supabase Auth JWTs.
+      PGRST_OPENAPI_SERVER_PROXY_URI: http://localhost:3001
+    expose:
+      - "3000"
+
+  rest-gateway:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - postgrest
+    ports:
+      - "${DATABASE_REST_PORT:-3001}:3001"
+    volumes:
+      - ./docker/rest/Caddyfile:/etc/caddy/Caddyfile:ro
+
   api:
     build: .
     ports:
@@ -7,8 +52,16 @@ services:
       - .env
     environment:
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173}
+      # Always use the compose DNS name inside the API container (host .env may say 127.0.0.1).
+      DATABASE_REST_URL: http://rest-gateway:3001
+      SUPABASE_AUTH_URL: ${SUPABASE_AUTH_URL:-${SUPABASE_URL}}
     volumes:
       # Hot-reload domain code during local development
       - ./:/app
+    depends_on:
+      - rest-gateway
     command: >
       uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
+
+volumes:
+  postgres_data:

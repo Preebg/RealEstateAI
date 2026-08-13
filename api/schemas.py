@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 class HealthResponse(BaseModel):
     status: str = "ok"
     service: str = "capeigen-api"
+    data_backend: str = "supabase"
 
 
 class MeResponse(BaseModel):

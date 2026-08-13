@@ -28,7 +28,9 @@ That UUID is your admin identity. Harvested rows are saved with `properties.user
 | **Harvester** (`python harvester.py`) | Local PC or always-on machine | Long API job; not a serverless cron host |
 | **Scheduled harvest every 1.5 hrs** | Same harvest machine via Task Scheduler | Headless CLI |
 
-Data lands in the **same Supabase** project — web, API, and harvester share one database.
+Data lands in **Supabase** by default — web, API, and harvester share one database.
+
+To run **Postgres on the harvest machine** instead (recommended long-term), see [LOCAL_POSTGRES.md](LOCAL_POSTGRES.md). Set `DATABASE_REST_URL=http://127.0.0.1:3001` for the host harvester; Auth stays on Supabase.
 
 ---
 

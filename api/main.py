@@ -9,15 +9,24 @@ from typing import AsyncIterator
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
-from api.deps import client_from_jwt
+from api.deps import data_client_for_request, user_from_token
 from api.routes import analysis, auth_google, compare_pdf, guest, health, properties, validation
-from authenticate import reset_request_supabase_client, set_request_supabase_client
-from config_secrets import load_local_secrets_into_environ
+from authenticate import (
+    ensure_catalog_admin_config,
+    reset_request_supabase_client,
+    reset_request_user,
+    set_request_supabase_client,
+    set_request_user,
+)
+from config_secrets import load_local_secrets_into_environ, normalize_secret_value
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     load_local_secrets_into_environ()
+    admin_id = normalize_secret_value(os.getenv("ADMIN_USER_ID"))
+    if admin_id:
+        ensure_catalog_admin_config(admin_id)
     yield
 
 
@@ -47,18 +56,28 @@ async def bind_supabase_jwt(request: Request, call_next):  # type: ignore[no-unt
     token = None
     if auth.lower().startswith("bearer "):
         token = auth.split(" ", 1)[1].strip()
-    reset_token = None
+    reset_client_token = None
+    reset_user_token = None
     if token:
         try:
-            client = client_from_jwt(token)
-            reset_token = set_request_supabase_client(client)
+            user = user_from_token(token)
+            reset_user_token = set_request_user(
+                {"id": str(user["id"]), "email": str(user.get("email") or "")}
+            )
+            client = data_client_for_request(token)
+            reset_client_token = set_request_supabase_client(client)
         except Exception:
-            reset_token = None
+            if reset_user_token is not None:
+                reset_request_user(reset_user_token)
+                reset_user_token = None
+            reset_client_token = None
     try:
         return await call_next(request)
     finally:
-        if reset_token is not None:
-            reset_request_supabase_client(reset_token)
+        if reset_client_token is not None:
+            reset_request_supabase_client(reset_client_token)
+        if reset_user_token is not None:
+            reset_request_user(reset_user_token)
 
 
 app.include_router(health.router)

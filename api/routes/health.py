@@ -6,13 +6,15 @@ from fastapi import APIRouter
 
 from api.deps import CurrentUser
 from api.schemas import HealthResponse, MeResponse
+from authenticate import using_local_database
 
 router = APIRouter(tags=["health"])
 
 
 @router.get("/api/health", response_model=HealthResponse)
 def health() -> HealthResponse:
-    return HealthResponse()
+    backend = "local-postgres" if using_local_database() else "supabase"
+    return HealthResponse(data_backend=backend)
 
 
 @router.get("/api/me", response_model=MeResponse)
