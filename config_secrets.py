@@ -70,38 +70,76 @@ def _parse_secrets_toml(path: Path) -> dict[str, Any]:
         return tomllib.load(secrets_file)
 
 
+def _parse_dotenv(path: Path) -> dict[str, str]:
+    """Parse a simple KEY=VALUE .env file (no export/, no multiline)."""
+    out: dict[str, str] = {}
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        if not key:
+            continue
+        normalized = normalize_secret_value(value)
+        if normalized is not None:
+            out[key] = normalized
+    return out
+
+
+def _merge_into_environ(
+    values: dict[str, Any],
+    *,
+    overwrite_blank_env: bool,
+) -> None:
+    import os
+
+    for key, value in values.items():
+        normalized = normalize_secret_value(value)
+        if not normalized:
+            continue
+        existing = os.getenv(key)
+        if existing is not None and str(existing).strip():
+            # Normalize already-present values (e.g. quoted Docker env_file entries).
+            cleaned = normalize_secret_value(existing)
+            if cleaned:
+                os.environ[key] = cleaned
+        elif overwrite_blank_env or existing is None:
+            os.environ[key] = normalized
+
+
 def load_local_secrets_into_environ(
     *,
     secrets_path: Path | None = None,
     overwrite_blank_env: bool = True,
 ) -> bool:
     """
-    Optionally load a local TOML secrets file into ``os.environ``.
+    Load local secrets into ``os.environ``.
 
-    Primary configuration is ``.env`` / process environment. When ``secrets_path``
-    is provided (tests) or a ``secrets.toml`` exists next to this module, values
-    fill blank env keys only.
+    Order:
+    1. Root ``.env`` (primary for CapEigen API / Docker / CLI)
+    2. Optional ``secrets.toml`` next to this module, or ``secrets_path`` (tests)
 
-    Returns True when a secrets file was found and parsed.
+    Existing non-blank env vars are kept (but quote-normalized).
+    Returns True when at least one file was loaded.
     """
-    import os
+    root = Path(__file__).resolve().parent
+    loaded = False
 
-    path = secrets_path or Path(__file__).resolve().parent / "secrets.toml"
-    if not path.exists():
-        return False
+    dotenv_path = root / ".env"
+    if dotenv_path.exists():
+        try:
+            _merge_into_environ(_parse_dotenv(dotenv_path), overwrite_blank_env=overwrite_blank_env)
+            loaded = True
+        except Exception:
+            pass
 
-    try:
-        secrets = _parse_secrets_toml(path)
-    except Exception:
-        return False
+    path = secrets_path or (root / "secrets.toml")
+    if path.exists():
+        try:
+            _merge_into_environ(_parse_secrets_toml(path), overwrite_blank_env=overwrite_blank_env)
+            loaded = True
+        except Exception:
+            pass
 
-    for key, value in secrets.items():
-        normalized = normalize_secret_value(value)
-        if not normalized:
-            continue
-        existing = os.getenv(key)
-        if existing is not None and str(existing).strip():
-            os.environ[key] = normalize_secret_value(existing) or str(existing).strip()
-        elif overwrite_blank_env or existing is None:
-            os.environ[key] = normalized
-    return True
+    return loaded

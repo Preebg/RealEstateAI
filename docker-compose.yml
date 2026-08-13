@@ -55,6 +55,8 @@ services:
       # Default: local PostgREST. Set DATABASE_REST_URL_DOCKER= (empty) to use hosted Supabase data.
       DATABASE_REST_URL: "${DATABASE_REST_URL_DOCKER:-http://rest-gateway:3001}"
       SUPABASE_AUTH_URL: "${SUPABASE_AUTH_URL:-${SUPABASE_URL}}"
+      GOOGLE_WEB_CLIENT_ID: ${GOOGLE_WEB_CLIENT_ID:-}
+      GOOGLE_WEB_CLIENT_SECRET: ${GOOGLE_WEB_CLIENT_SECRET:-}
     volumes:
       # Hot-reload domain code during local development
       - ./:/app

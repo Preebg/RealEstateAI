@@ -23,18 +23,20 @@ class GoogleExchangeResponse(BaseModel):
 
 
 def _google_web_credentials() -> tuple[str, str]:
-    client_id = (
-        os.getenv("GOOGLE_WEB_CLIENT_ID")
-        or os.getenv("VITE_GOOGLE_CLIENT_ID")
-        or ""
-    ).strip()
-    client_secret = (os.getenv("GOOGLE_WEB_CLIENT_SECRET") or "").strip()
+    from config_secrets import load_local_secrets_into_environ, normalize_secret_value
+
+    load_local_secrets_into_environ()
+    client_id = normalize_secret_value(
+        os.getenv("GOOGLE_WEB_CLIENT_ID") or os.getenv("VITE_GOOGLE_CLIENT_ID")
+    )
+    client_secret = normalize_secret_value(os.getenv("GOOGLE_WEB_CLIENT_SECRET"))
     if not client_id or not client_secret:
         raise HTTPException(
             status_code=503,
             detail=(
                 "Google OAuth is not configured on the API. Set GOOGLE_WEB_CLIENT_ID "
-                "and GOOGLE_WEB_CLIENT_SECRET."
+                "and GOOGLE_WEB_CLIENT_SECRET in the API host environment (Netlify "
+                "function env, Docker .env, or shell), then restart/redeploy."
             ),
         )
     return client_id, client_secret
