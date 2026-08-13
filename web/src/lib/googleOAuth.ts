@@ -33,7 +33,9 @@ export async function startGoogleOAuthRedirect(): Promise<void> {
     throw new Error('Set VITE_GOOGLE_CLIENT_ID to your Google Web client ID.')
   }
 
-  const { nonce } = await generateGoogleNonce()
+  // Supabase hashes the raw nonce (SHA-256 hex) and compares to the ID token claim.
+  // Send the hash to Google so the claim matches; keep the raw value for signInWithIdToken.
+  const { nonce, hashedNonce } = await generateGoogleNonce()
   const state = crypto.randomUUID()
   const verifier = generateCodeVerifier()
   const challenge = await generateCodeChallenge(verifier)
@@ -48,7 +50,7 @@ export async function startGoogleOAuthRedirect(): Promise<void> {
     response_type: 'code',
     scope: 'openid email profile',
     state,
-    nonce,
+    nonce: hashedNonce,
     code_challenge: challenge,
     code_challenge_method: 'S256',
     prompt: 'select_account',
