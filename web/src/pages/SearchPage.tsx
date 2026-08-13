@@ -13,13 +13,12 @@ import {
 import { apiFetch, type AnalysisJob, type FinanceResult } from '../lib/api'
 import {
   analyzeInvestment,
-  flattenFinanceNumbers,
   normalizeMonthlyInsurance,
   normalizePercentRate,
   normalizeTaxRatePercent,
   type FinanceMetrics,
 } from '../lib/finance'
-import { fetchPropertyDetail } from '../lib/portfolio'
+import { fetchPropertyDetail, createPropertyShare } from '../lib/portfolio'
 
 type Assumptions = {
   down_payment_pct: number
@@ -79,6 +78,32 @@ function assumptionsFromProperty(property: Record<string, unknown>): Assumptions
   }
 }
 
+function jsonSafe<T>(value: T): T {
+  return JSON.parse(
+    JSON.stringify(value, (_key, v) => (typeof v === 'bigint' ? Number(v) : v)),
+  ) as T
+}
+
+function quantumPayload(value: unknown): Record<string, number> | undefined {
+  if (!value || typeof value !== 'object') return undefined
+  const q = value as Record<string, unknown>
+  const keys = [
+    'cashflow_success_pct',
+    'appreciation_success_pct',
+    'combined_wealth_success_pct',
+    'overall_success_pct',
+  ] as const
+  if (!keys.every((k) => typeof q[k] === 'number')) return undefined
+  return q as Record<string, number>
+}
+
+function forecastPayload(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== 'object') return undefined
+  const f = value as Record<string, unknown>
+  if (!Array.isArray(f.value_schedule_p50)) return undefined
+  return f
+}
+
 function cashFlowRows(assumptions: Assumptions, finance: FinanceMetrics) {
   return [
     ['Gross monthly rent', moneyExact(assumptions.monthly_rent), false],
@@ -105,6 +130,9 @@ export function SearchPage() {
   const [error, setError] = useState<string | null>(null)
   const [assumptions, setAssumptions] = useState<Assumptions | null>(null)
   const [shareUrl, setShareUrl] = useState<string | null>(null)
+  const [shareCopied, setShareCopied] = useState(false)
+  const [shareBusy, setShareBusy] = useState(false)
+  const [pdfBusy, setPdfBusy] = useState(false)
   const autoStartedKey = useRef<string | null>(null)
 
   const jobQuery = useQuery({
@@ -234,44 +262,86 @@ export function SearchPage() {
   async function downloadPdf() {
     if (!property || !finance || !assumptions) return
     const rows = cashFlowRows(assumptions, finance)
-    const blob = await apiFetch<Blob>('/api/pdf', {
-      method: 'POST',
-      body: JSON.stringify({
-        address: property.address || query,
-        property_info: property,
-        metrics: flattenFinanceNumbers(finance as unknown as Record<string, unknown>),
-        table_data: {
-          Description: rows.map(([label]) => label),
-          Amount: rows.map(([, amount]) => amount),
-        },
-        params: assumptions,
-        location_score: num(property.location_score, 5),
-        quantum_risk: property.quantum_risk,
-        forecast_display: property._forecast_display_cache,
-      }),
-    })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = 'capeigen-analysis.pdf'
-    a.click()
-    URL.revokeObjectURL(url)
+    const price = num(property.price ?? property.predicted_value)
+    setPdfBusy(true)
+    setError(null)
+    try {
+      const blob = await apiFetch<Blob>('/api/pdf', {
+        method: 'POST',
+        body: JSON.stringify({
+          address: String(property.address || query),
+          property_info: jsonSafe({
+            ...property,
+            summary:
+              typeof property.summary === 'string' && property.summary
+                ? property.summary
+                : 'No summary available.',
+          }),
+          metrics: {
+            'Risk-Adjusted Cap Rate': `${finance.cap_rate.toFixed(2)}%`,
+            'Cash on Cash Return': `${finance.cash_on_cash.toFixed(2)}%`,
+            'Monthly Net Cash Flow': moneyExact(finance.monthly_net_cash_flow),
+            'Total Cash Required': moneyExact(finance.total_investment),
+          },
+          table_data: {
+            Description: rows.map(([label]) => label),
+            Amount: rows.map(([, amount]) => amount),
+          },
+          params: {
+            'Offer Amount': money(price),
+            'Down Payment': `${assumptions.down_payment_pct}%`,
+            'Interest Rate': `${assumptions.interest_rate}%`,
+            'Loan Term': `${assumptions.loan_term} Years`,
+            'Monthly Rent': moneyExact(assumptions.monthly_rent),
+          },
+          location_score: num(property.location_score, 5),
+          quantum_risk: quantumPayload(property.quantum_risk),
+          forecast_display: forecastPayload(property._forecast_display_cache),
+        }),
+      })
+      if (!(blob instanceof Blob) || blob.size < 8) {
+        throw new Error('PDF download returned an empty file.')
+      }
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = 'capeigen-analysis.pdf'
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      URL.revokeObjectURL(url)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'PDF download failed')
+    } finally {
+      setPdfBusy(false)
+    }
   }
 
   async function createShare() {
-    const propertyId = String(property?.id || property?.property_id || '')
+    const propertyId = String(property?.id || property?.property_id || paramId || '')
     if (!propertyId) {
       setError('Save the property before creating a share link.')
       return
     }
-    const res = await apiFetch<{ share_url: string }>('/api/shares', {
-      method: 'POST',
-      body: JSON.stringify({
-        property_id: propertyId,
-        base_url: window.location.origin,
-      }),
-    })
-    setShareUrl(res.share_url)
+    setError(null)
+    setShareCopied(false)
+    setShareBusy(true)
+    setShareUrl(null)
+    try {
+      const res = await createPropertyShare({ propertyId })
+      setShareUrl(res.share_url)
+      try {
+        await navigator.clipboard.writeText(res.share_url)
+        setShareCopied(true)
+      } catch {
+        setShareCopied(false)
+      }
+    } catch (err) {
+      setShareUrl(null)
+      setError(err instanceof Error ? err.message : 'Failed to create share link')
+    } finally {
+      setShareBusy(false)
+    }
   }
 
   async function bookmark() {
@@ -428,24 +498,38 @@ export function SearchPage() {
               <div className="flex flex-wrap gap-2">
                 <button
                   type="button"
-                  onClick={downloadPdf}
-                  className="rounded-lg border border-border px-3 py-1.5 text-sm hover:bg-surface"
+                  disabled={pdfBusy || !finance}
+                  onClick={() => void downloadPdf()}
+                  className="rounded-lg border border-border px-3 py-1.5 text-sm hover:bg-surface disabled:opacity-60"
                 >
-                  Download PDF
+                  {pdfBusy ? 'Preparing PDF…' : 'Download PDF'}
                 </button>
                 <button
                   type="button"
-                  onClick={createShare}
-                  className="rounded-lg border border-border px-3 py-1.5 text-sm hover:bg-surface"
+                  disabled={shareBusy}
+                  onClick={() => void createShare()}
+                  className="rounded-lg border border-border px-3 py-1.5 text-sm hover:bg-surface disabled:opacity-60"
                 >
-                  Share link
+                  {shareBusy ? 'Creating link…' : 'Share link'}
                 </button>
               </div>
             </div>
-            {shareUrl && (
-              <p className="break-all text-sm text-primary">
-                Share: <a href={shareUrl}>{shareUrl}</a>
-              </p>
+            {(shareBusy || shareUrl) && (
+              <div className="rounded-xl border border-primary/20 bg-primary/5 p-3 text-sm">
+                {shareUrl && shareUrl.startsWith('http') ? (
+                  <>
+                    <p className="font-medium text-text">Share link ready</p>
+                    <a className="mt-1 block break-all text-primary underline" href={shareUrl}>
+                      {shareUrl}
+                    </a>
+                    {shareCopied && (
+                      <p className="mt-1 text-muted">Copied to clipboard</p>
+                    )}
+                  </>
+                ) : (
+                  <p className="text-muted">Creating share link…</p>
+                )}
+              </div>
             )}
 
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">

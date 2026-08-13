@@ -3175,6 +3175,19 @@ class TestPdfGenerator(unittest.TestCase):
         self.assertTrue(pdf_bytes.startswith(b"%PDF"))
         self.assertGreater(len(pdf_bytes), 5000)
 
+    def test_generate_property_pdf_accepts_row_list_table_data(self):
+        from pdf_generator import generate_property_pdf
+
+        pdf_bytes = generate_property_pdf(
+            "123 Main St",
+            {"summary": "List table data."},
+            {"Cap Rate": "7.0%"},
+            [["Gross Monthly Rent", "$1,600.00"], ["Cash Flow Monthly", "$200.00"]],
+            {"Loan Term": "30 Years"},
+            location_score=7.5,
+        )
+        self.assertTrue(pdf_bytes.startswith(b"%PDF"))
+
 
 class TestShareAccess(unittest.TestCase):
     def test_save_share_comps_snapshot_includes_rent_comps(self):

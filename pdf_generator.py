@@ -211,6 +211,41 @@ def _rent_comps_pdf_rows(rent_comps_analysis: dict[str, Any]) -> list[dict[str, 
     return rows
 
 
+def _as_breakdown_table(table_data: Any) -> dict[str, list[Any]]:
+    """Normalize cash-flow rows to {Description, Amount} lists."""
+    if isinstance(table_data, dict):
+        descriptions = list(
+            table_data.get("Description") or table_data.get("description") or []
+        )
+        amounts = list(table_data.get("Amount") or table_data.get("amount") or [])
+        if len(amounts) < len(descriptions):
+            amounts.extend([""] * (len(descriptions) - len(amounts)))
+        return {"Description": descriptions, "Amount": amounts}
+    if isinstance(table_data, list):
+        descriptions: list[Any] = []
+        amounts: list[Any] = []
+        for row in table_data:
+            if isinstance(row, (list, tuple)) and len(row) >= 2:
+                descriptions.append(row[0])
+                amounts.append(row[1])
+        return {"Description": descriptions, "Amount": amounts}
+    return {"Description": [], "Amount": []}
+
+
+def _quantum_chart_ready(quantum_risk: Any) -> dict[str, Any] | None:
+    if not isinstance(quantum_risk, dict):
+        return None
+    required = (
+        "cashflow_success_pct",
+        "appreciation_success_pct",
+        "combined_wealth_success_pct",
+        "overall_success_pct",
+    )
+    if not all(isinstance(quantum_risk.get(key), (int, float)) for key in required):
+        return None
+    return quantum_risk
+
+
 def generate_property_pdf(
     address,
     property_info,
@@ -224,6 +259,14 @@ def generate_property_pdf(
     pdf = FPDF()
     pdf.add_page()
     pdf.set_auto_page_break(auto=True, margin=15)
+    table_data = _as_breakdown_table(table_data)
+    quantum_risk = _quantum_chart_ready(quantum_risk)
+    if not isinstance(params, dict):
+        params = {}
+    if not isinstance(metrics, dict):
+        metrics = {}
+    if not isinstance(property_info, dict):
+        property_info = {}
 
     pdf.set_font("Times", "B", 16)
     pdf.cell(0, 10, _pdf_text(f"{APP_NAME} — Property Analysis Report"), ln=True, align="C")
@@ -234,7 +277,7 @@ def generate_property_pdf(
     _write_section_header(pdf, "Investment Parameters")
     pdf.set_font("Times", "", 10)
     param_lines = [f"{label}: {value}" for label, value in params.items()]
-    pdf.multi_cell(0, 5, _pdf_text("  |  ".join(param_lines)))
+    pdf.multi_cell(0, 5, _pdf_text("  |  ".join(param_lines) or "Default underwriting assumptions."))
     pdf.ln(4)
 
     _write_section_header(pdf, "Property Summary")

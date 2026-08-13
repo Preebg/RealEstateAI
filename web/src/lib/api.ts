@@ -26,7 +26,12 @@ async function readJsonOrThrow(res: Response): Promise<unknown> {
   if (ct.includes('application/pdf')) {
     return res.blob()
   }
-  const text = await res.text()
+  const buffer = await res.arrayBuffer()
+  const bytes = new Uint8Array(buffer)
+  if (bytes[0] === 0x25 && bytes[1] === 0x50 && bytes[2] === 0x44 && bytes[3] === 0x46) {
+    return new Blob([buffer], { type: 'application/pdf' })
+  }
+  const text = new TextDecoder().decode(buffer)
   const trimmed = text.trimStart()
   if (
     !ct.includes('application/json') &&

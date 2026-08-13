@@ -157,6 +157,56 @@ export function propertySearchPath(item: { address?: string; id?: string }): str
   return qs ? `/search?${qs}` : '/search'
 }
 
+function randomShareToken(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(32))
+  let binary = ''
+  for (let i = 0; i < bytes.length; i += 1) {
+    binary += String.fromCharCode(bytes[i]!)
+  }
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '')
+}
+
+/** Create a guest share row in Supabase (no FastAPI round-trip). */
+export async function createPropertyShare(opts: {
+  propertyId: string
+  expiresDays?: number
+}): Promise<{ share_token: string; share_url: string }> {
+  const {
+    data: { session },
+  } = await supabase.auth.getSession()
+  if (!session?.user?.id) {
+    throw new Error('Sign in to create a share link.')
+  }
+
+  const propertyId = opts.propertyId.trim()
+  if (!propertyId) {
+    throw new Error('This property needs a catalog id before it can be shared.')
+  }
+
+  const token = randomShareToken()
+  const expiresDays = opts.expiresDays ?? 30
+  const expiresAt =
+    expiresDays > 0
+      ? new Date(Date.now() + expiresDays * 24 * 60 * 60 * 1000).toISOString()
+      : null
+
+  const { error } = await supabase.from('property_shares').insert({
+    share_token: token,
+    property_id: propertyId,
+    created_by: session.user.id,
+    include_assumptions: true,
+    expires_at: expiresAt,
+  })
+  if (error) {
+    throw new Error(error.message || 'Failed to create share link')
+  }
+
+  return {
+    share_token: token,
+    share_url: `${window.location.origin}/share/${token}`,
+  }
+}
+
 /**
  * Load one catalog property for Individual Search (no FastAPI required).
  */

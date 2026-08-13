@@ -121,7 +121,8 @@ class PdfRequest(BaseModel):
     address: str
     property_info: dict[str, Any]
     metrics: dict[str, Any]
-    table_data: list[list[Any]] = Field(default_factory=list)
+    # pdf_generator expects {Description: [...], Amount: [...]}; lists of [label, amount] also accepted.
+    table_data: dict[str, Any] | list[Any] = Field(default_factory=dict)
     params: dict[str, Any] = Field(default_factory=dict)
     location_score: float = 5.0
     quantum_risk: dict[str, Any] | None = None
