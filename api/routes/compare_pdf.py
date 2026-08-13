@@ -10,7 +10,7 @@ from fastapi.responses import Response
 from api.deps import CurrentUser
 from api.schemas import CompareRequest, CompareResponse, PdfRequest
 from knowledge_base import lookup_property
-from pdf_generator import generate_property_pdf
+from pdf_generator import generate_property_pdf, pdf_content_disposition
 from comparison_metrics import build_property_comparison_metrics
 
 router = APIRouter(tags=["exports"])
@@ -32,11 +32,11 @@ def generate_pdf(body: PdfRequest, _user: CurrentUser) -> Response:
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"PDF generation failed: {exc}") from exc
 
-    filename = f"capeigen_{(body.address or 'property').replace(' ', '_')[:40]}.pdf"
+    filename_header = pdf_content_disposition(body.address)
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={"Content-Disposition": filename_header},
     )
 
 

@@ -95,12 +95,14 @@ def _run_deferred_queue(job_id: str) -> None:
             address = job.address
 
             # Quantum needs finance inputs. If still missing, run other work first;
-            # if only quantum remains, park until /api/finance/recalc arrives.
+            # if only quantum remains, drop it rather than leaving status=running.
             if task == "quantum" and finance_context is None:
                 rest = list(job.deferred_tasks[1:])
                 if rest:
                     job.deferred_tasks = rest + ["quantum"]
                     continue
+                job.deferred_tasks = []
+                job.status = "done"
                 return
 
         try:

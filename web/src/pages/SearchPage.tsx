@@ -18,7 +18,11 @@ import {
   normalizeTaxRatePercent,
   type FinanceMetrics,
 } from '../lib/finance'
-import { fetchPropertyDetail, createPropertyShare } from '../lib/portfolio'
+import {
+  fetchPropertyDetail,
+  createPropertyShare,
+  firstCatalogUuid,
+} from '../lib/portfolio'
 
 type Assumptions = {
   down_payment_pct: number
@@ -41,6 +45,15 @@ function num(v: unknown, fallback = 0) {
 
 function money(n: number) {
   return `$${Math.round(n).toLocaleString()}`
+}
+
+function pdfDownloadFilename(address: string): string {
+  const cleaned = address
+    .replace(/[<>:"/\\|?*\u0000-\u001f]+/g, '')
+    .replace(/\s+/g, ' ')
+    .replace(/^[.\s]+|[.\s]+$/g, '')
+  const slug = (cleaned || 'property').slice(0, 80)
+  return `CapEigen - ${slug}.pdf`
 }
 
 function moneyExact(n: number) {
@@ -133,6 +146,7 @@ export function SearchPage() {
   const [shareCopied, setShareCopied] = useState(false)
   const [shareBusy, setShareBusy] = useState(false)
   const [pdfBusy, setPdfBusy] = useState(false)
+  const [assumptionsDirty, setAssumptionsDirty] = useState(false)
   const autoStartedKey = useRef<string | null>(null)
 
   const jobQuery = useQuery({
@@ -153,9 +167,27 @@ export function SearchPage() {
 
   const jobProperty = jobQuery.data?.property_data
   const kbProperty = kbQuery.data
-  const property =
-    jobProperty ??
-    (kbProperty && addressesMatch(kbProperty.address, query) ? kbProperty : null)
+  const kbMatch =
+    kbProperty &&
+    (addressesMatch(kbProperty.address, query) ||
+      (Boolean(paramId) && addressesMatch(query, paramAddress)))
+      ? kbProperty
+      : null
+  const property = useMemo(() => {
+    const base = jobProperty ?? kbMatch ?? null
+    if (!base) return null
+    const catalogId = firstCatalogUuid(
+      base.id,
+      base.property_id,
+      kbMatch?.id,
+      kbMatch?.property_id,
+      paramId,
+    )
+    if (catalogId && String(base.id || '') !== catalogId) {
+      return { ...base, id: catalogId, property_id: catalogId }
+    }
+    return base
+  }, [jobProperty, kbMatch, paramId])
 
   const finance = useMemo(() => {
     if (!property || !assumptions) return null
@@ -179,7 +211,7 @@ export function SearchPage() {
   }, [property, assumptions])
 
   useEffect(() => {
-    if (!property || !assumptions || !jobId || !finance) return
+    if (!assumptionsDirty || !property || !assumptions || !jobId || !finance) return
     let cancelled = false
     ;(async () => {
       try {
@@ -202,7 +234,7 @@ export function SearchPage() {
     return () => {
       cancelled = true
     }
-  }, [property, assumptions, jobId, finance])
+  }, [assumptionsDirty, property, assumptions, jobId, finance])
 
   async function searchAddresses(q: string) {
     setQuery(q)
@@ -226,6 +258,7 @@ export function SearchPage() {
     setBusy(true)
     setError(null)
     setShareUrl(null)
+    setAssumptionsDirty(false)
     const sameListing = addressesMatch(property?.address, target)
     if (!sameListing) setAssumptions(null)
     try {
@@ -305,7 +338,7 @@ export function SearchPage() {
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = url
-      a.download = 'capeigen-analysis.pdf'
+      a.download = pdfDownloadFilename(String(property.address || query))
       document.body.appendChild(a)
       a.click()
       a.remove()
@@ -318,9 +351,15 @@ export function SearchPage() {
   }
 
   async function createShare() {
-    const propertyId = String(property?.id || property?.property_id || paramId || '')
+    const propertyId = firstCatalogUuid(
+      property?.id,
+      property?.property_id,
+      kbMatch?.id,
+      kbMatch?.property_id,
+      paramId,
+    )
     if (!propertyId) {
-      setError('Save the property before creating a share link.')
+      setError('Save the property to your account before creating a share link.')
       return
     }
     setError(null)
@@ -366,7 +405,9 @@ export function SearchPage() {
   const deferred = jobQuery.data?.deferred_tasks ?? []
   const total = jobQuery.data?.deferred_tasks_total || 0
   const done = Math.max(total - deferred.length, 0)
-  const fromKb = Boolean(jobQuery.data?.from_kb || (property && !jobProperty && kbProperty))
+  const fromKb = Boolean(jobQuery.data?.from_kb || (property && !jobProperty && kbMatch))
+  const stillComputing =
+    jobQuery.data?.status === 'running' && (deferred.length > 0 || !property)
 
   return (
     <div className="grid gap-6 lg:grid-cols-[300px_1fr]">
@@ -399,9 +440,10 @@ export function SearchPage() {
                   max={max}
                   step={step}
                   value={assumptions[key]}
-                  onChange={(e) =>
+                  onChange={(e) => {
+                    setAssumptionsDirty(true)
                     setAssumptions({ ...assumptions, [key]: Number(e.target.value) })
-                  }
+                  }}
                   className="mt-1 w-full accent-primary"
                 />
               </label>
@@ -492,7 +534,7 @@ export function SearchPage() {
                 </h2>
                 <p className="text-sm text-muted">
                   {fromKb ? 'Loaded from knowledge base' : 'AI research'}
-                  {jobQuery.data?.status === 'running' ? ' · still computing…' : ''}
+                  {stillComputing ? ' · still computing…' : ''}
                 </p>
               </div>
               <div className="flex flex-wrap gap-2">
@@ -516,7 +558,7 @@ export function SearchPage() {
             </div>
             {(shareBusy || shareUrl) && (
               <div className="rounded-xl border border-primary/20 bg-primary/5 p-3 text-sm">
-                {shareUrl && shareUrl.startsWith('http') ? (
+                {shareUrl ? (
                   <>
                     <p className="font-medium text-text">Share link ready</p>
                     <a className="mt-1 block break-all text-primary underline" href={shareUrl}>

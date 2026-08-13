@@ -157,6 +157,23 @@ export function propertySearchPath(item: { address?: string; id?: string }): str
   return qs ? `/search?${qs}` : '/search'
 }
 
+const CATALOG_UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+export function isCatalogUuid(value: unknown): value is string {
+  return typeof value === 'string' && CATALOG_UUID_RE.test(value.trim())
+}
+
+export function firstCatalogUuid(...values: unknown[]): string {
+  for (const value of values) {
+    if (isCatalogUuid(value)) return value.trim()
+    if (value != null && typeof value !== 'string' && isCatalogUuid(String(value))) {
+      return String(value).trim()
+    }
+  }
+  return ''
+}
+
 function randomShareToken(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(32))
   let binary = ''
@@ -178,7 +195,7 @@ export async function createPropertyShare(opts: {
     throw new Error('Sign in to create a share link.')
   }
 
-  const propertyId = opts.propertyId.trim()
+  const propertyId = firstCatalogUuid(opts.propertyId)
   if (!propertyId) {
     throw new Error('This property needs a catalog id before it can be shared.')
   }
@@ -198,12 +215,71 @@ export async function createPropertyShare(opts: {
     expires_at: expiresAt,
   })
   if (error) {
-    throw new Error(error.message || 'Failed to create share link')
+    const msg = error.message || 'Failed to create share link'
+    if (/foreign key|property_id/i.test(msg)) {
+      throw new Error(
+        'This listing is not in the catalog yet. Save it to your account, then try sharing again.',
+      )
+    }
+    throw new Error(msg)
   }
 
   return {
     share_token: token,
     share_url: `${window.location.origin}/share/${token}`,
+  }
+}
+
+type GuestSharePayload = {
+  valid?: boolean
+  property?: Record<string, unknown> | null
+  address?: string
+  property_id?: string
+}
+
+/** Load a guest share via Supabase RPC (no FastAPI required). */
+export async function fetchGuestShare(token: string): Promise<{
+  valid: boolean
+  address?: string
+  property: Record<string, unknown> | null
+}> {
+  const trimmed = token.trim()
+  if (!trimmed) return { valid: false, property: null }
+
+  const { data, error } = await supabase.rpc('get_guest_property', {
+    p_share_token: trimmed,
+  })
+  if (error) {
+    throw new Error(error.message || 'Failed to load shared property')
+  }
+
+  if (typeof data === 'string') {
+    try {
+      return parseGuestSharePayload(JSON.parse(data) as GuestSharePayload)
+    } catch {
+      return { valid: false, property: null }
+    }
+  }
+  return parseGuestSharePayload((data || {}) as GuestSharePayload)
+}
+
+function parseGuestSharePayload(payload: GuestSharePayload): {
+  valid: boolean
+  address?: string
+  property: Record<string, unknown> | null
+} {
+  if (payload.valid !== true) {
+    return { valid: false, property: null }
+  }
+
+  const prop =
+    payload.property && typeof payload.property === 'object' && !Array.isArray(payload.property)
+      ? payload.property
+      : null
+  return {
+    valid: true,
+    address: prop?.address != null ? String(prop.address) : undefined,
+    property: prop,
   }
 }
 

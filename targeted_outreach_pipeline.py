@@ -55,7 +55,7 @@ from engine import (
 )
 from finance import analyze_investment, calculate_10yr_appreciation
 from knowledge_base import get_ai_baseline_maint, get_ai_baseline_rent
-from pdf_generator import generate_property_pdf
+from pdf_generator import generate_property_pdf, pdf_download_filename
 from share_access import create_headless_property_share_url
 
 GMAIL_SCOPES = ("https://www.googleapis.com/auth/gmail.compose",)
@@ -882,7 +882,7 @@ def process_property(
     result["body_preview"] = body[:200] + ("..." if len(body) > 200 else "")
 
     pdf_bytes = build_property_pdf_bytes(row)
-    pdf_name = f"Analysis_{re.sub(r'[^A-Za-z0-9]+', '_', address)[:60]}.pdf"
+    pdf_name = pdf_download_filename(address)
     result["pdf_bytes"] = len(pdf_bytes)
 
     if dry_run or agents_only:

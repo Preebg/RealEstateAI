@@ -2752,6 +2752,55 @@ class TestDeferredAnalysis(unittest.TestCase):
         self.assertNotIn("comps", queue)
         self.assertIn("quantum", queue)
 
+
+class TestStartPropertyAnalysis(unittest.TestCase):
+    def test_kb_hit_skips_final_analysis(self):
+        from services.property_analysis_flow import start_property_analysis
+
+        cached = {
+            "id": "11111111-1111-1111-1111-111111111111",
+            "address": "1 Main St, Rochester, NY",
+            "price": 200000,
+            "quantum_risk_score": 72.0,
+            "comps_analysis": {"comparable_properties": [{"sale_price": 1}]},
+            "_forecast_display_cache": {"yearly_values": [1]},
+        }
+        with (
+            patch(
+                "services.property_analysis_flow.lookup_property",
+                return_value=cached,
+            ),
+            patch("services.property_analysis_flow.get_final_analysis") as final_fn,
+        ):
+            result = start_property_analysis("1 Main St, Rochester, NY")
+
+        final_fn.assert_not_called()
+        self.assertTrue(result["from_kb"])
+        self.assertEqual(result["deferred_tasks"], [])
+        self.assertEqual(result["property_data"]["id"], cached["id"])
+        self.assertIn("quantum_risk", result["property_data"])
+
+    def test_miss_runs_research_path(self):
+        from services.property_analysis_flow import start_property_analysis
+
+        researched = {"address": "9 Oak St", "price": 150000}
+        with (
+            patch("services.property_analysis_flow.lookup_property", return_value=None),
+            patch(
+                "services.property_analysis_flow.get_initial_analysis",
+                return_value=(researched, False, None),
+            ),
+            patch(
+                "services.property_analysis_flow.get_final_analysis",
+                return_value=dict(researched),
+            ) as final_fn,
+        ):
+            result = start_property_analysis("9 Oak St")
+
+        final_fn.assert_called_once()
+        self.assertFalse(result["from_kb"])
+        self.assertEqual(result["property_data"]["address"], "9 Oak St")
+
 class TestPersistCompsToCanonical(unittest.TestCase):
     def test_persist_skips_without_comps(self):
         from knowledge_base import persist_comps_to_canonical
@@ -3174,6 +3223,16 @@ class TestPdfGenerator(unittest.TestCase):
         )
         self.assertTrue(pdf_bytes.startswith(b"%PDF"))
         self.assertGreater(len(pdf_bytes), 5000)
+        self.assertIn(b"CapEigen", pdf_bytes)
+
+    def test_pdf_download_filename_includes_brand_and_address(self):
+        from pdf_generator import pdf_content_disposition, pdf_download_filename
+
+        name = pdf_download_filename("123 Main St, Austin, TX")
+        self.assertEqual(name, "CapEigen - 123 Main St, Austin, TX.pdf")
+        header = pdf_content_disposition("123 Main St, Austin, TX")
+        self.assertIn("CapEigen", header)
+        self.assertIn("123%20Main%20St", header)
 
     def test_generate_property_pdf_accepts_row_list_table_data(self):
         from pdf_generator import generate_property_pdf

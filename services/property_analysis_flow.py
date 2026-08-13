@@ -31,11 +31,20 @@ def start_property_analysis(
 
     cached = lookup_property(cleaned, user_id=user_id)
     if cached:
-        initial_data = cached
-        from_kb = True
-        research_results = None
-    else:
-        initial_data, from_kb, research_results = get_initial_analysis(cleaned)
+        # Catalog rows are already underwritten. Skip get_final_analysis (geocode +
+        # Gemini cash-flow recheck) so Individual Search does not sit on "still
+        # computing" after the listing is already on screen.
+        property_data = dict(cached)
+        property_data["from_kb"] = True
+        property_data["address"] = cleaned
+        queue = build_deferred_task_queue(property_data, guest_mode=guest_mode)
+        return {
+            "property_data": property_data,
+            "deferred_tasks": queue,
+            "from_kb": True,
+        }
+
+    initial_data, from_kb, research_results = get_initial_analysis(cleaned)
 
     if not from_kb and safe_float(initial_data.get("price")) == 0:
         raise AnalysisError(
