@@ -53,8 +53,20 @@ def portfolio(user: CurrentUser) -> dict[str, Any]:
                 "baths": prop.get("baths"),
                 "sqft": prop.get("sqft"),
                 "location_score": prop.get("location_score"),
-                "rent": prop.get("rent") or prop.get("estimated_rent"),
-                "strategy": prop.get("strategy"),
+                "rent": (
+                    prop.get("rent")
+                    or prop.get("original_ai_rent")
+                    or prop.get("estimated_rent")
+                ),
+                "year_built": prop.get("year_built"),
+                "monthly_cash_flow": prop.get("monthly_net_cash_flow"),
+                "market_city": prop.get("market_city"),
+                "state_code": prop.get("state_code"),
+                "forecast_rate": prop.get("forecast_rate"),
+                "quantum_success": prop.get("quantum_risk_score"),
+                "strategy": prop.get("strategy")
+                or prop.get("strategy_tag")
+                or prop.get("property_label"),
                 "id": prop.get("id") or prop.get("property_id"),
             }
         )
