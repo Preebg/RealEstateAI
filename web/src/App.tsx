@@ -3,6 +3,7 @@ import { useEffect } from 'react'
 import { useAuthStore } from './lib/authStore'
 import { AppLayout } from './components/AppLayout'
 import { LoginPage } from './pages/LoginPage'
+import { GoogleCallbackPage } from './pages/GoogleCallbackPage'
 import { HomePage } from './pages/HomePage'
 import { SearchPage } from './pages/SearchPage'
 import { ComparePage } from './pages/ComparePage'
@@ -33,6 +34,7 @@ export default function App() {
   return (
     <Routes>
       <Route path="/login" element={<LoginPage />} />
+      <Route path="/auth/google/callback" element={<GoogleCallbackPage />} />
       <Route path="/legal/:doc" element={<LegalPage />} />
       <Route path="/share/:token" element={<GuestSharePage />} />
       <Route element={<RequireAuth />}>

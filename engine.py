@@ -63,14 +63,15 @@ DISCOVERY_MODEL_CHAIN: tuple[str, ...] = (
 _MODEL_API_SLUGS: dict[str, str] = {
     "gemma-4-21b-it": "gemma-4-26b-a4b-it",
     "gemma-4-a4b-26b": "gemma-4-26b-a4b-it",
+    "gemini-3.1-flash-lite-preview": "gemini-3.1-flash-lite",
 }
 # Backward-compatible alias for tests and harvester UI.
 DISCOVERY_FALLBACK_MODEL = DISCOVERY_FALLBACK_MODELS[-1]
 RESEARCH_MODEL = "gemma-4-31b-it"
-SYNTHESIS_MODEL = "gemini-3.1-flash-lite-preview"
+SYNTHESIS_MODEL = "gemini-3.5-flash-lite"
 SYNTHESIS_FALLBACK_MODELS: tuple[str, ...] = (
-    "gemini-3.5-flash",
-    "gemma-4-26b-a4b-it",
+    "gemini-3.7-flash",
+    "gemini-3.6-flash",
 )
 SYNTHESIS_MODEL_CHAIN: tuple[str, ...] = (
     SYNTHESIS_MODEL,
@@ -86,26 +87,27 @@ MAPS_GROUNDED_DISCOVERY_MODELS: tuple[str, ...] = (
 )
 PROPERTY_VALUE_MODEL = "gemma-4-26b-a4b-it"
 PROPERTY_VALUE_TRIGGERED_MODEL = "gemma-4-31b-it"
-COORDINATE_CATCH_MODEL = SYNTHESIS_MODEL
+# Dedicated coordinate agent (Maps + Search). Not used for synthesis/discovery.
+COORDINATE_MODEL = "gemini-3.1-flash-lite"
+COORDINATE_CATCH_MODEL = COORDINATE_MODEL
 ACCURACY_WORKFLOW_MODEL_CHAIN: tuple[str, ...] = (
     *DISCOVERY_MODEL_CHAIN,
     RESEARCH_MODEL,
     PROPERTY_VALUE_MODEL,
     PROPERTY_VALUE_TRIGGERED_MODEL,
+    COORDINATE_MODEL,
     *SYNTHESIS_MODEL_CHAIN,
 )
 
-# Geospatial agent chain — same Gemini tiers as discovery (Maps grounding).
-GEOCODING_MODEL_CHAIN: tuple[str, ...] = (
-    "gemini-2.5-flash",
-    "gemini-2.5-flash-lite",
-)
-GEOCODING_FALLBACK_MODEL = GEOCODING_MODEL_CHAIN[-1]
+# Precise lat/lon + env risk — sole model for property coordinate enrichment.
+GEOCODING_MODEL_CHAIN: tuple[str, ...] = (COORDINATE_MODEL,)
+GEOCODING_FALLBACK_MODEL = COORDINATE_MODEL
 # Per-model generate_content RPM caps (shared harvester + outreach + UI).
 DEFAULT_MODEL_RPM = 13
 MODEL_RPM_LIMITS: dict[str, int] = {
     "gemini-2.5-flash": 5,
     "gemini-2.5-flash-lite": 10,
+    "gemini-3.1-flash-lite": 10,
     "gemma-4-26b-a4b-it": 13,
     "gemma-4-31b-it": 13,
 }
@@ -1852,7 +1854,7 @@ def geospatial_from_cached_coords(research: dict[str, Any]) -> dict[str, Any] | 
     """
     Build a geospatial payload when discovery/research already resolved coordinates.
 
-    Avoids redundant gemini-2.5-flash geocode calls (major RPD drain during harvest).
+    Avoids redundant coordinate-agent calls when discovery/research already resolved lat/lon.
     """
     lat = research.get("latitude")
     lon = research.get("longitude")
@@ -1881,10 +1883,9 @@ def run_geospatial_enrichment(
     rate_limiter: SyncModelRateLimiter | None = None,
 ) -> dict[str, Any]:
     """
-    Agentic geocode pipeline:
+    Agentic geocode pipeline (COORDINATE_MODEL / gemini-3.1-flash-lite only):
     1) Search-grounded scout (higher RPD budget)
     2) Maps-grounded coordinate + environmental risk (lower RPD budget)
-    Model order: gemini-2.5-flash -> gemini-2.5-flash-lite
     """
     active_budget = budget or GroundingRpdBudget()
     hint_lat, hint_lon = _geocode_hint_lat_lng(address, market_city=market_city)
@@ -4307,7 +4308,7 @@ def synthesize_harvest_property(
 ) -> dict[str, Any]:
     """
     Stage 4 (Synthesis): Investment summary from research + property value data.
-    Model chain: gemini-3.1-flash-lite-preview -> gemini-3.5-flash -> gemma-4-26b-a4b-it.
+    Model chain: gemini-3.5-flash-lite -> gemini-3.7-flash -> gemini-3.6-flash.
     """
     raw, _active_model = _generate_synthesis_with_model_chain(
         research,

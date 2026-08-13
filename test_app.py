@@ -600,6 +600,7 @@ class TestGeospatialEnrichment(unittest.TestCase):
     def test_geocoding_and_synthesis_model_chains(self):
         from engine import (
             COORDINATE_CATCH_MODEL,
+            COORDINATE_MODEL,
             GEOCODING_MODEL_CHAIN,
             PROPERTY_VALUE_MODEL,
             PROPERTY_VALUE_TRIGGERED_MODEL,
@@ -609,18 +610,19 @@ class TestGeospatialEnrichment(unittest.TestCase):
 
         self.assertEqual(
             GEOCODING_MODEL_CHAIN,
-            ("gemini-2.5-flash", "gemini-2.5-flash-lite"),
+            ("gemini-3.1-flash-lite",),
         )
-        self.assertEqual(SYNTHESIS_MODEL, "gemini-3.1-flash-lite-preview")
-        self.assertEqual(COORDINATE_CATCH_MODEL, SYNTHESIS_MODEL)
+        self.assertEqual(SYNTHESIS_MODEL, "gemini-3.5-flash-lite")
+        self.assertEqual(COORDINATE_CATCH_MODEL, "gemini-3.1-flash-lite")
+        self.assertEqual(COORDINATE_CATCH_MODEL, COORDINATE_MODEL)
         self.assertEqual(PROPERTY_VALUE_MODEL, "gemma-4-26b-a4b-it")
         self.assertEqual(PROPERTY_VALUE_TRIGGERED_MODEL, "gemma-4-31b-it")
         self.assertEqual(
             SYNTHESIS_MODEL_CHAIN,
             (
-                "gemini-3.1-flash-lite-preview",
-                "gemini-3.5-flash",
-                "gemma-4-26b-a4b-it",
+                "gemini-3.5-flash-lite",
+                "gemini-3.7-flash",
+                "gemini-3.6-flash",
             ),
         )
 

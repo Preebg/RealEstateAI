@@ -1,14 +1,10 @@
-import { useEffect, useRef, useState } from 'react'
+import { useState } from 'react'
 import type { FormEvent } from 'react'
 import { Link, Navigate, useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { useAuthStore } from '../lib/authStore'
-import {
-  generateGoogleNonce,
-  getGoogleClientId,
-  loadGoogleIdentityScript,
-  type GoogleCredentialResponse,
-} from '../lib/googleGis'
+import { getGoogleClientId } from '../lib/googleGis'
+import { startGoogleOAuthRedirect } from '../lib/googleOAuth'
 
 export function LoginPage() {
   const { session, loading } = useAuthStore()
@@ -21,76 +17,7 @@ export function LoginPage() {
   const [info, setInfo] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [accepted, setAccepted] = useState(false)
-  const googleBtnRef = useRef<HTMLDivElement>(null)
-  const googleNonceRef = useRef<string | null>(null)
   const googleConfigured = Boolean(getGoogleClientId())
-
-  useEffect(() => {
-    let cancelled = false
-    const clientId = getGoogleClientId()
-    if (!clientId || session) return
-
-    async function mountGoogleButton() {
-      try {
-        await loadGoogleIdentityScript()
-        if (cancelled || !googleBtnRef.current || !window.google?.accounts?.id) return
-
-        const { nonce, hashedNonce } = await generateGoogleNonce()
-        googleNonceRef.current = nonce
-
-        const finishWithCredential = async (response: GoogleCredentialResponse) => {
-          setError(null)
-          setInfo(null)
-          setBusy(true)
-          try {
-            const { error: err } = await supabase.auth.signInWithIdToken({
-              provider: 'google',
-              token: response.credential,
-              nonce: googleNonceRef.current ?? undefined,
-            })
-            if (err) throw err
-            navigate('/')
-          } catch (err) {
-            setError(err instanceof Error ? err.message : 'Google sign-in failed')
-          } finally {
-            setBusy(false)
-          }
-        }
-
-        window.google.accounts.id.initialize({
-          client_id: clientId!,
-          callback: (response) => {
-            void finishWithCredential(response)
-          },
-          nonce: hashedNonce,
-          context: 'signin',
-          ux_mode: 'popup',
-          use_fedcm_for_prompt: true,
-        })
-
-        const width = Math.max(280, Math.floor(googleBtnRef.current.getBoundingClientRect().width))
-        googleBtnRef.current.replaceChildren()
-        window.google.accounts.id.renderButton(googleBtnRef.current, {
-          type: 'standard',
-          theme: 'outline',
-          size: 'large',
-          text: 'continue_with',
-          shape: 'rectangular',
-          width,
-          logo_alignment: 'left',
-        })
-      } catch (err) {
-        if (!cancelled) {
-          setError(err instanceof Error ? err.message : 'Could not load Google sign-in')
-        }
-      }
-    }
-
-    void mountGoogleButton()
-    return () => {
-      cancelled = true
-    }
-  }, [navigate, session])
 
   if (!loading && session) return <Navigate to="/" replace />
 
@@ -122,8 +49,6 @@ export function LoginPage() {
         return
       }
 
-      // No session (e.g. Confirm Email still on in Auth settings): sign in immediately
-      // once the account exists — DB auto-confirms so password login can succeed.
       const { error: signInErr } = await supabase.auth.signInWithPassword({ email, password })
       if (signInErr) {
         setMode('signin')
@@ -136,6 +61,18 @@ export function LoginPage() {
       setError(err instanceof Error ? err.message : 'Authentication failed')
     } finally {
       setBusy(false)
+    }
+  }
+
+  async function googleSignIn() {
+    setError(null)
+    setInfo(null)
+    setBusy(true)
+    try {
+      await startGoogleOAuthRedirect()
+    } catch (err) {
+      setBusy(false)
+      setError(err instanceof Error ? err.message : 'Google sign-in failed')
     }
   }
 
@@ -249,10 +186,14 @@ export function LoginPage() {
         </div>
 
         {googleConfigured ? (
-          <div
-            ref={googleBtnRef}
-            className={`flex min-h-10 w-full justify-center overflow-hidden ${busy ? 'pointer-events-none opacity-60' : ''}`}
-          />
+          <button
+            type="button"
+            onClick={() => void googleSignIn()}
+            disabled={busy}
+            className="w-full rounded-lg border border-border bg-white py-2.5 text-sm font-medium hover:bg-surface disabled:opacity-60"
+          >
+            Continue with Google
+          </button>
         ) : (
           <p className="text-center text-sm text-muted">
             Google sign-in needs <code className="text-xs">VITE_GOOGLE_CLIENT_ID</code> in env.

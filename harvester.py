@@ -71,6 +71,7 @@ class _SynthesisJob:
     address: str
     market_city: str
     research: dict[str, Any]
+    geospatial: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -390,6 +391,39 @@ async def _run_property_value_stage(
     return enriched
 
 
+async def _geocode_listing_parallel(
+    address: str,
+    market_city: str,
+    *,
+    rate_limiter: engine.ModelRateLimiter,
+    session: engine.GenaiSession,
+    geospatial_budget: engine.GroundingRpdBudget | None = None,
+) -> dict[str, Any]:
+    """Dedicated coordinate agent — runs alongside research / property value."""
+    print(f"  [geocode] START {address} — {engine.COORDINATE_MODEL} (parallel)")
+    geospatial = await engine.run_geospatial_enrichment_async(
+        address,
+        market_city=market_city,
+        model=engine.COORDINATE_MODEL,
+        budget=geospatial_budget,
+        rate_limiter=rate_limiter,
+        session=session,
+    )
+    if engine._has_precise_coordinates(
+        geospatial.get("latitude"),
+        geospatial.get("longitude"),
+    ):
+        print(
+            f"  [geocode] DONE {address} — "
+            f"{geospatial['latitude']:.5f}, {geospatial['longitude']:.5f} "
+            f"({geospatial.get('geocode_confidence', 'low')}; "
+            f"{geospatial.get('geocode_source', 'unknown')})"
+        )
+    else:
+        print(f"  [geocode] SKIP {address} — coordinates unresolved")
+    return geospatial
+
+
 async def _research_listing(
     listing: dict[str, Any],
     admin_user_id: str,
@@ -398,6 +432,8 @@ async def _research_listing(
     model_state: _HarvesterModelState,
     rate_limiter: engine.ModelRateLimiter,
     session: engine.GenaiSession,
+    *,
+    geospatial_budget: engine.GroundingRpdBudget | None = None,
 ) -> _SynthesisJob | None:
     """Stage 2 for one listing; returns a synthesis job or None when skipped."""
     address, market_city = _validate_listing(listing)
@@ -416,14 +452,58 @@ async def _research_listing(
 
     log.info("listing_research_start", address=address, market_city=market_city)
     print(f"  [research] START {address} ({market_city})")
-    research = await _research_listing_with_fallback(
-        address,
-        listing,
-        market_city,
-        model_state,
-        rate_limiter,
-        session,
+
+    research_task = asyncio.create_task(
+        _research_listing_with_fallback(
+            address,
+            listing,
+            market_city,
+            model_state,
+            rate_limiter,
+            session,
+        ),
+        name=f"research:{address}",
     )
+    geocode_task = asyncio.create_task(
+        _geocode_listing_parallel(
+            address,
+            market_city,
+            rate_limiter=rate_limiter,
+            session=session,
+            geospatial_budget=geospatial_budget,
+        ),
+        name=f"geocode:{address}",
+    )
+    research_outcome, geocode_outcome = await asyncio.gather(
+        research_task,
+        geocode_task,
+        return_exceptions=True,
+    )
+
+    if isinstance(research_outcome, BaseException):
+        if isinstance(research_outcome, KeyboardInterrupt):
+            raise research_outcome
+        if isinstance(geocode_outcome, BaseException) and not isinstance(
+            geocode_outcome, KeyboardInterrupt
+        ):
+            report_error(
+                log,
+                "listing_geocode_failed",
+                geocode_outcome,
+                address=address,
+            )
+        raise research_outcome
+
+    research = research_outcome
+    if isinstance(geocode_outcome, BaseException):
+        if isinstance(geocode_outcome, KeyboardInterrupt):
+            raise geocode_outcome
+        report_error(log, "listing_geocode_failed", geocode_outcome, address=address)
+        print(f"  [geocode] FAILED {address} — {geocode_outcome}")
+        geospatial = engine.geospatial_from_cached_coords(research) or {}
+    else:
+        geospatial = geocode_outcome
+
     async with report_lock:
         report["researched"] += 1
         if isinstance(research.get("comps_analysis"), dict) and research["comps_analysis"].get(
@@ -444,6 +524,7 @@ async def _research_listing(
         address=address,
         market_city=market_city,
         research=research,
+        geospatial=geospatial,
     )
 
 
@@ -488,21 +569,31 @@ async def _synthesize_listing(
     market_city = job.market_city
     print(f"  [synthesis] START {address} ({market_city})")
 
-    geospatial = engine.geospatial_from_cached_coords(job.research)
-    if geospatial is not None:
-        print(
-            f"  [geocode] SKIP {address} — reusing discovery/research coordinates "
-            f"({geospatial['latitude']:.5f}, {geospatial['longitude']:.5f})"
-        )
-    else:
-        print(f"  [geocode] START {address} — Maps + Search grounding agents")
-        geospatial = await engine.run_geospatial_enrichment_async(
-            address,
-            market_city=market_city,
-            budget=geospatial_budget,
-            rate_limiter=rate_limiter,
-            session=session,
-        )
+    geospatial = dict(job.geospatial or {})
+    if not engine._has_precise_coordinates(
+        geospatial.get("latitude"),
+        geospatial.get("longitude"),
+    ):
+        cached = engine.geospatial_from_cached_coords(job.research)
+        if cached is not None:
+            geospatial = cached
+            print(
+                f"  [geocode] REUSE {address} — research/discovery coordinates "
+                f"({geospatial['latitude']:.5f}, {geospatial['longitude']:.5f})"
+            )
+        else:
+            print(
+                f"  [geocode] RETRY {address} — {engine.COORDINATE_MODEL} "
+                "(parallel agent missed coords)"
+            )
+            geospatial = await engine.run_geospatial_enrichment_async(
+                address,
+                market_city=market_city,
+                model=engine.COORDINATE_MODEL,
+                budget=geospatial_budget,
+                rate_limiter=rate_limiter,
+                session=session,
+            )
     enriched_research = dict(job.research)
     if geospatial.get("environmental_risk"):
         enriched_research["environmental_risk"] = geospatial["environmental_risk"]
@@ -512,17 +603,13 @@ async def _synthesize_listing(
     ):
         enriched_research["latitude"] = geospatial["latitude"]
         enriched_research["longitude"] = geospatial["longitude"]
-    if engine._has_precise_coordinates(
-        geospatial.get("latitude"),
-        geospatial.get("longitude"),
-    ):
         print(
-            f"  [geocode] DONE {address} — "
+            f"  [synthesis] coords {address} — "
             f"{geospatial['latitude']:.5f}, {geospatial['longitude']:.5f} "
-            f"({geospatial.get('geocode_confidence', 'low')})"
+            f"({geospatial.get('geocode_source', 'unknown')})"
         )
     else:
-        print(f"  [geocode] SKIP {address} — coordinates unresolved")
+        print(f"  [synthesis] coords {address} — unresolved")
 
     final_data = await _synthesize_harvest_property_with_fallback(
         address,
@@ -657,6 +744,7 @@ async def _research_and_schedule_synthesis(
                 model_state,
                 rate_limiter,
                 session,
+                geospatial_budget=geospatial_budget,
             )
         except Exception as exc:
             if isinstance(exc, KeyboardInterrupt):

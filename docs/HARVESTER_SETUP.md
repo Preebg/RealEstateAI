@@ -147,12 +147,14 @@ For every 90 minutes, use a loop script or systemd timer with `OnUnitActiveSec=9
 | Stage | Model | Calls per run | Concurrency |
 |-------|--------|----------------|-------------|
 | Discovery | gemini-2.5-flash → flash-lite → gemma-4-26b-a4b-it (default); optional Redfin/Realtor/Zillow scraper | 1 (Flash) or per-market (Gemma); scraper often 403 | Sequential |
-| Research | gemma-4-31b-it → gemma-4-21b-it (API: 26b-a4b) | up to ~25 | **Parallel** (≤10 calls/min) |
-| Synthesis | gemini-3.1-flash-lite-preview | up to ~25 | **Parallel** (≤10 calls/min) |
+| Research | gemma-4-31b-it | up to ~25 | **Parallel** (≤10 calls/min) |
+| Geocode | gemini-3.1-flash-lite (Maps + Search) | up to ~25 | **Parallel with research** |
+| Synthesis | gemini-3.5-flash-lite → 3.7-flash → 3.6-flash | up to ~25 | **Parallel** (≤10 calls/min) |
 
 Discovery **overlaps** with research: each verified address is sent to the research agent
 as soon as it is found (via `on_listing_found`), so slow Gemma per-market discovery does not
-block the pipeline. Research → synthesis stays pipelined per property.
+block the pipeline. Geocode (`gemini-3.1-flash-lite`) runs **in parallel** with research /
+property-value for each listing; synthesis starts once both finish and filters pass.
 A per-model sliding-window rate limiter (10 requests per 60 seconds) stays under the ~15 RPM cap.
 
 Every **1.5 hours** ≈ **16 runs/day** → plan Gemini/Supabase limits accordingly.
