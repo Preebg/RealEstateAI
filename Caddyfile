@@ -1,0 +1,18 @@
+# CapEigen reverse proxy — run from the repo root on the host machine:
+#   caddy run --config Caddyfile
+#
+# Cloudflare Tunnel should point: capeigen.preebg.dev → http://localhost:80
+# Build the SPA first:  cd web && npm ci && npm run build
+
+:80 {
+	handle /api/* {
+		reverse_proxy 127.0.0.1:8000
+	}
+
+	handle {
+		root * ./web/dist
+		encode gzip
+		try_files {path} /index.html
+		file_server
+	}
+}

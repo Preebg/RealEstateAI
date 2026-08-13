@@ -3,7 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { MapContainer, TileLayer, Marker, Popup } from 'react-leaflet'
 import L from 'leaflet'
 import { Link } from 'react-router-dom'
-import { apiFetch, type PortfolioItem } from '../lib/api'
+import { fetchPortfolio } from '../lib/portfolio'
 import markerIcon2x from 'leaflet/dist/images/marker-icon-2x.png'
 import markerIcon from 'leaflet/dist/images/marker-icon.png'
 import markerShadow from 'leaflet/dist/images/marker-shadow.png'
@@ -25,7 +25,7 @@ function money(n?: number) {
 export function HomePage() {
   const { data, isLoading, error } = useQuery({
     queryKey: ['portfolio'],
-    queryFn: () => apiFetch<{ properties: PortfolioItem[]; count: number }>('/api/portfolio'),
+    queryFn: fetchPortfolio,
   })
 
   const pinned =

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { apiFetch } from '../lib/api'
+import { fetchPortfolio } from '../lib/portfolio'
 
 type SavedProp = { address?: string; id?: string; property_id?: string }
 
@@ -21,9 +22,7 @@ export function ComparePage() {
   const portfolio = useQuery({
     queryKey: ['portfolio-compare'],
     queryFn: () =>
-      apiFetch<{ properties: SavedProp[] }>('/api/portfolio').then((r) =>
-        r.properties.map((p) => ({ address: p.address })),
-      ),
+      fetchPortfolio().then((r) => r.properties.map((p) => ({ address: p.address }))),
   })
 
   const options = [

@@ -8,6 +8,42 @@ async function authHeader(): Promise<HeadersInit> {
   return token ? { Authorization: `Bearer ${token}` } : {}
 }
 
+function apiMisconfiguredMessage(): string {
+  if (import.meta.env.PROD && !API_BASE) {
+    return (
+      'API is not configured. Set VITE_API_URL in Netlify to your FastAPI base URL ' +
+      '(e.g. https://your-api.example.com), then redeploy the site.'
+    )
+  }
+  return (
+    'API returned HTML instead of JSON. Is the FastAPI server running, and is ' +
+    'VITE_API_URL pointing at it? Locally leave VITE_API_URL empty and use the Vite /api proxy.'
+  )
+}
+
+async function readJsonOrThrow(res: Response): Promise<unknown> {
+  const ct = res.headers.get('content-type') || ''
+  if (ct.includes('application/pdf')) {
+    return res.blob()
+  }
+  const text = await res.text()
+  const trimmed = text.trimStart()
+  if (
+    !ct.includes('application/json') &&
+    (trimmed.startsWith('<!DOCTYPE') ||
+      trimmed.startsWith('<!doctype') ||
+      trimmed.startsWith('<html'))
+  ) {
+    throw new Error(apiMisconfiguredMessage())
+  }
+  if (!text) return undefined
+  try {
+    return JSON.parse(text) as unknown
+  } catch {
+    throw new Error(apiMisconfiguredMessage())
+  }
+}
+
 export async function apiFetch<T>(
   path: string,
   init: RequestInit = {},
@@ -19,23 +55,20 @@ export async function apiFetch<T>(
   const auth = await authHeader()
   Object.entries(auth).forEach(([k, v]) => headers.set(k, v))
 
-  const res = await fetch(`${API_BASE}${path}`, { ...init, headers })
+  const url = `${API_BASE}${path}`
+  const res = await fetch(url, { ...init, headers })
   if (!res.ok) {
-    let detail = res.statusText
+    let detail: unknown = res.statusText
     try {
-      const err = await res.json()
-      detail = err.detail || JSON.stringify(err)
-    } catch {
-      /* ignore */
+      const err = (await readJsonOrThrow(res)) as { detail?: unknown }
+      detail = err?.detail ?? err
+    } catch (e) {
+      if (e instanceof Error && e.message.includes('API')) throw e
     }
     throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail))
   }
   if (res.status === 204) return undefined as T
-  const ct = res.headers.get('content-type') || ''
-  if (ct.includes('application/pdf')) {
-    return (await res.blob()) as T
-  }
-  return res.json() as Promise<T>
+  return (await readJsonOrThrow(res)) as T
 }
 
 export type AnalysisJob = {
