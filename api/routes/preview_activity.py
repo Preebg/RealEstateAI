@@ -45,7 +45,7 @@ def ingest_preview_event(
 @router.get("/api/preview/activity", response_model=PreviewEventListResponse)
 def preview_activity(
     _admin: AdminUser,
-    username: str | None = Query(default="salifT"),
+    username: str | None = Query(default=None),
     limit: int = Query(default=200, ge=1, le=500),
 ) -> PreviewEventListResponse:
     events = list_preview_events(username=username, limit=limit)

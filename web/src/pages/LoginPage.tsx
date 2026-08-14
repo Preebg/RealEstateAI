@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import type { FormEvent } from 'react'
-import { Link, Navigate, useNavigate, useSearchParams } from 'react-router-dom'
+import { Link, Navigate, useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { useAuthStore } from '../lib/authStore'
 import { signInWithPreviewUsername } from '../lib/demoLogin'
@@ -10,7 +10,6 @@ import { startGoogleOAuthRedirect } from '../lib/googleOAuth'
 export function LoginPage() {
   const { session, loading } = useAuthStore()
   const navigate = useNavigate()
-  const [params] = useSearchParams()
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')
@@ -19,10 +18,8 @@ export function LoginPage() {
   const [info, setInfo] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [accepted, setAccepted] = useState(false)
-  const [previewUsername, setPreviewUsername] = useState(
-    params.get('u')?.trim() || 'salifT',
-  )
-  const [showPreview, setShowPreview] = useState(Boolean(params.get('u')))
+  const [previewUsername, setPreviewUsername] = useState('')
+  const [showPreview, setShowPreview] = useState(false)
   const googleConfigured = Boolean(getGoogleClientId())
 
   if (!loading && session) return <Navigate to="/" replace />
@@ -116,18 +113,17 @@ export function LoginPage() {
             className="absolute right-0 mt-2 w-80 rounded-2xl border border-primary/30 bg-white p-5 shadow-lg"
           >
             <h2 className="text-sm font-semibold text-primary">Preview access</h2>
-            <p className="mt-2 mb-3 text-sm text-muted">
-              Username <span className="font-medium text-text">salifT</span>. No password.
-            </p>
+            <p className="mt-2 mb-3 text-sm text-muted">Enter your username. No password.</p>
             <label className="mb-3 block text-sm">
               Username
               <input
                 type="text"
-                autoComplete="username"
+                autoComplete="off"
+                autoCorrect="off"
+                autoCapitalize="off"
                 spellCheck={false}
                 value={previewUsername}
                 onChange={(e) => setPreviewUsername(e.target.value)}
-                placeholder="salifT"
                 className="mt-1 w-full rounded-lg border border-border px-3 py-2 outline-none focus:border-primary"
               />
             </label>

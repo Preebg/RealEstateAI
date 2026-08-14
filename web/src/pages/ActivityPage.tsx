@@ -49,7 +49,7 @@ export function ActivityPage() {
     setError(null)
     try {
       const res = await apiFetch<{ events: PreviewEvent[]; count: number }>(
-        '/api/preview/activity?username=salifT&limit=200',
+        '/api/preview/activity?limit=200',
       )
       setEvents(res.events || [])
     } catch (err) {
@@ -68,9 +68,9 @@ export function ActivityPage() {
     <div className="space-y-6">
       <header className="flex flex-wrap items-end justify-between gap-3">
         <div>
-          <h1 className="font-display text-3xl font-semibold">salifT activity</h1>
+          <h1 className="font-display text-3xl font-semibold">Preview activity</h1>
           <p className="mt-1 text-muted">
-            Pages, searches, compares, PDFs, and slider changes from the preview login.
+            Pages, searches, compares, PDFs, and slider changes from preview logins.
           </p>
         </div>
         <button
@@ -91,6 +91,7 @@ export function ActivityPage() {
             <thead className="bg-surface text-muted">
               <tr>
                 <th className="px-3 py-2 font-medium">When</th>
+                <th className="px-3 py-2 font-medium">User</th>
                 <th className="px-3 py-2 font-medium">Action</th>
                 <th className="px-3 py-2 font-medium">Detail</th>
               </tr>
@@ -101,6 +102,7 @@ export function ActivityPage() {
                   <td className="whitespace-nowrap px-3 py-2 text-muted">
                     {formatWhen(event.created_at)}
                   </td>
+                  <td className="px-3 py-2 font-medium">{event.username || '—'}</td>
                   <td className="px-3 py-2 font-medium">
                     {LABELS[event.event_type || ''] || event.event_type}
                   </td>
@@ -109,8 +111,8 @@ export function ActivityPage() {
               ))}
               {events.length === 0 && (
                 <tr>
-                  <td colSpan={3} className="px-3 py-6 text-center text-muted">
-                    No activity yet. After salifT logs in, actions appear here.
+                  <td colSpan={4} className="px-3 py-6 text-center text-muted">
+                    No activity yet. After a preview user logs in, actions appear here.
                   </td>
                 </tr>
               )}
