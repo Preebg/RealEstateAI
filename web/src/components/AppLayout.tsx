@@ -1,7 +1,9 @@
 import { NavLink, Outlet, useNavigate } from 'react-router-dom'
-import { Map, Search, GitCompare, FlaskConical, LogOut, Menu, X } from 'lucide-react'
-import { useState } from 'react'
+import { Map, Search, GitCompare, FlaskConical, LogOut, Menu, X, Activity } from 'lucide-react'
+import { useEffect, useState } from 'react'
 import { useAuthStore } from '../lib/authStore'
+import { apiFetch } from '../lib/api'
+import { trackPreviewEvent } from '../lib/previewActivity'
 import { clsx } from 'clsx'
 
 const nav = [
@@ -15,6 +17,13 @@ export function AppLayout() {
   const { user, signOut } = useAuthStore()
   const navigate = useNavigate()
   const [open, setOpen] = useState(false)
+  const [isAdmin, setIsAdmin] = useState(false)
+
+  useEffect(() => {
+    void apiFetch<{ is_admin?: boolean }>('/api/me')
+      .then((me) => setIsAdmin(Boolean(me.is_admin)))
+      .catch(() => setIsAdmin(false))
+  }, [user?.id])
 
   return (
     <div className="min-h-screen lg:grid lg:grid-cols-[260px_1fr]">
@@ -49,13 +58,35 @@ export function AppLayout() {
                 {label}
               </NavLink>
             ))}
+            {isAdmin && (
+              <NavLink
+                to="/activity"
+                onClick={() => setOpen(false)}
+                className={({ isActive }) =>
+                  clsx(
+                    'flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition',
+                    isActive
+                      ? 'bg-primary/10 text-primary'
+                      : 'text-text/80 hover:bg-surface',
+                  )
+                }
+              >
+                <Activity size={18} />
+                salifT activity
+              </NavLink>
+            )}
           </nav>
           <div className="mt-6 border-t border-border pt-4">
-            <p className="truncate text-xs text-muted">{user?.email}</p>
+            <p className="truncate text-xs text-muted">
+              {(typeof user?.app_metadata?.username === 'string' && user.app_metadata.username) ||
+                (typeof user?.user_metadata?.username === 'string' && user.user_metadata.username) ||
+                user?.email}
+            </p>
             <button
               type="button"
               className="mt-3 flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-text/80 hover:bg-surface"
               onClick={async () => {
+                trackPreviewEvent('sign_out', { path: '/login', label: 'Signed out' })
                 await signOut()
                 navigate('/login')
               }}

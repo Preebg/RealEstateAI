@@ -78,6 +78,31 @@ def using_local_database() -> bool:
     return bool(_get_optional_secret("DATABASE_REST_URL"))
 
 
+def _drop_local_postgrest_bearer(client: Client) -> Client:
+    """
+    Local PostgREST has no JWT secret. supabase-py always sets Authorization,
+    which makes PostgREST return PGRST300. FastAPI already validated the user JWT.
+    """
+    if not using_local_database():
+        return client
+    postgrest = getattr(client, "postgrest", None)
+    if postgrest is None:
+        return client
+    for headers in (
+        getattr(postgrest, "headers", None),
+        getattr(getattr(postgrest, "session", None), "headers", None),
+    ):
+        if headers is None:
+            continue
+        headers.pop("Authorization", None)
+        headers.pop("authorization", None)
+    return client
+
+
+def _data_client(url: str, key: str) -> Client:
+    return _drop_local_postgrest_bearer(create_client(url, key))
+
+
 def get_auth_base_url() -> str:
     """Supabase Auth project URL (remote). Falls back to SUPABASE_URL."""
     return _get_optional_secret("SUPABASE_AUTH_URL") or _get_secret("SUPABASE_URL")
@@ -97,7 +122,7 @@ def get_supabase() -> Client:
     """Return an anon-key data client."""
     url = get_data_base_url()
     key = _get_secret("SUPABASE_KEY")
-    return create_client(url, key)
+    return _data_client(url, key)
 
 
 def get_auth_client() -> Client:
@@ -117,7 +142,7 @@ def get_service_client() -> Client | None:
     key = _get_optional_secret("SUPABASE_SERVICE_ROLE_KEY")
     if not key:
         return None
-    return create_client(get_data_base_url(), key)
+    return _data_client(get_data_base_url(), key)
 
 
 def get_authenticated_client() -> Client | None:

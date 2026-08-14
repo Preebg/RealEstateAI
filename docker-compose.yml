@@ -51,7 +51,7 @@ services:
     env_file:
       - .env
     environment:
-      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173,https://capeigen.preebg.dev}
       # Default: local PostgREST. Set DATABASE_REST_URL_DOCKER= (empty) to use hosted Supabase data.
       DATABASE_REST_URL: "${DATABASE_REST_URL_DOCKER:-http://rest-gateway:3001}"
       SUPABASE_AUTH_URL: "${SUPABASE_AUTH_URL:-${SUPABASE_URL}}"

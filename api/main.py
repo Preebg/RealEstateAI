@@ -10,7 +10,17 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from api.deps import data_client_for_request, user_from_token
-from api.routes import analysis, auth_google, compare_pdf, guest, health, properties, validation
+from api.routes import (
+    analysis,
+    auth_demo,
+    auth_google,
+    compare_pdf,
+    guest,
+    health,
+    preview_activity,
+    properties,
+    validation,
+)
 from authenticate import (
     ensure_catalog_admin_config,
     reset_request_supabase_client,
@@ -36,7 +46,7 @@ _cors_origins = [
     origin.strip()
     for origin in os.getenv(
         "CORS_ORIGINS",
-        "http://localhost:5173,http://127.0.0.1:5173,http://localhost:8888",
+        "http://localhost:5173,http://127.0.0.1:5173,http://localhost:8888,https://capeigen.preebg.dev",
     ).split(",")
     if origin.strip()
 ]
@@ -44,6 +54,7 @@ _cors_origins = [
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
+    allow_origin_regex=r"https://([a-z0-9-]+\.)?netlify\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -81,7 +92,9 @@ async def bind_supabase_jwt(request: Request, call_next):  # type: ignore[no-unt
 
 
 app.include_router(health.router)
+app.include_router(auth_demo.router)
 app.include_router(auth_google.router)
+app.include_router(preview_activity.router)
 app.include_router(properties.router)
 app.include_router(analysis.router)
 app.include_router(guest.router)

@@ -16,6 +16,31 @@ class HealthResponse(BaseModel):
 class MeResponse(BaseModel):
     id: str
     email: str | None = None
+    username: str | None = None
+    is_admin: bool = False
+    is_preview: bool = False
+
+
+class PreviewEventCreateRequest(BaseModel):
+    event_type: str = Field(min_length=2, max_length=40)
+    path: str | None = Field(default=None, max_length=300)
+    label: str | None = Field(default=None, max_length=400)
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class PreviewEventListResponse(BaseModel):
+    events: list[dict[str, Any]]
+    count: int
+
+
+class PreviewLoginRequest(BaseModel):
+    username: str = Field(min_length=2, max_length=32)
+
+
+class PreviewLoginResponse(BaseModel):
+    access_token: str
+    refresh_token: str
+    username: str
 
 
 class AddressSearchResponse(BaseModel):

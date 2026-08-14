@@ -68,20 +68,20 @@ def _run_start(job_id: str, address: str, guest_mode: bool, user_id: str | None)
 @router.post("/api/analysis/start", response_model=AnalysisStartResponse)
 def start_analysis(
     body: AnalysisStartRequest,
-    user: OptionalUser,
+    user: CurrentUser,
 ) -> AnalysisStartResponse:
     address = body.address.strip()
     if not address:
         raise HTTPException(status_code=400, detail="Address is required")
 
-    user_id = user["id"] if user else None
+    user_id = user["id"]
     job = create_job(
         address=address,
         user_id=user_id,
-        guest_mode=body.guest_mode,
+        guest_mode=False,
     )
     job.status = "running"
-    _start_executor.submit(_run_start, job.job_id, address, body.guest_mode, user_id)
+    _start_executor.submit(_run_start, job.job_id, address, False, user_id)
 
     return AnalysisStartResponse(
         job_id=job.job_id,

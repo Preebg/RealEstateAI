@@ -13,6 +13,7 @@ from authenticate import (
     get_auth_base_url,
     get_data_base_url,
     using_local_database,
+    _drop_local_postgrest_bearer,
 )
 from config_secrets import normalize_secret_value
 
@@ -39,7 +40,7 @@ def get_anon_key() -> str:
 
 
 def get_anon_client() -> Client:
-    return create_client(get_supabase_url(), get_anon_key())
+    return _drop_local_postgrest_bearer(create_client(get_supabase_url(), get_anon_key()))
 
 
 def get_auth_anon_client() -> Client:
@@ -51,14 +52,24 @@ def get_service_client() -> Client | None:
     key = normalize_secret_value(os.getenv("SUPABASE_SERVICE_ROLE_KEY"))
     if not key:
         return None
-    return create_client(get_supabase_url(), key)
+    return _drop_local_postgrest_bearer(create_client(get_supabase_url(), key))
+
+
+def get_auth_service_client() -> Client | None:
+    """Service-role client pointed at Supabase Auth (never the local PostgREST gateway)."""
+    key = normalize_secret_value(os.getenv("SUPABASE_AUTH_SERVICE_ROLE_KEY")) or normalize_secret_value(
+        os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+    )
+    if not key or not key.startswith("eyJ"):
+        return None
+    return create_client(get_auth_base_url(), key)
 
 
 def client_from_jwt(access_token: str) -> Client:
     """Build a data client scoped to the caller's access token (hosted RLS)."""
     client = create_client(get_supabase_url(), get_anon_key())
     client.auth.set_session(access_token, "")
-    return client
+    return _drop_local_postgrest_bearer(client)
 
 
 def data_client_for_request(access_token: str) -> Client:
@@ -95,6 +106,7 @@ def user_from_token(access_token: str) -> dict[str, Any]:
         "id": str(user.id),
         "email": getattr(user, "email", None),
         "user_metadata": getattr(user, "user_metadata", None) or {},
+        "app_metadata": getattr(user, "app_metadata", None) or {},
     }
 
 

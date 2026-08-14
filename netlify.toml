@@ -17,6 +17,13 @@
   status = 200
   force = true
 
+# Preview username login (allowlisted demo accounts).
+[[redirects]]
+  from = "/api/auth/demo"
+  to = "/.netlify/functions/demo-login"
+  status = 200
+  force = true
+
 [[redirects]]
   from = "/*"
   to = "/index.html"

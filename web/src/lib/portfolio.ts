@@ -235,6 +235,7 @@ type GuestSharePayload = {
   property?: Record<string, unknown> | null
   address?: string
   property_id?: string
+  include_assumptions?: boolean
 }
 
 /** Load a guest share via Supabase RPC (no FastAPI required). */
@@ -242,9 +243,10 @@ export async function fetchGuestShare(token: string): Promise<{
   valid: boolean
   address?: string
   property: Record<string, unknown> | null
+  include_assumptions: boolean
 }> {
   const trimmed = token.trim()
-  if (!trimmed) return { valid: false, property: null }
+  if (!trimmed) return { valid: false, property: null, include_assumptions: false }
 
   const { data, error } = await supabase.rpc('get_guest_property', {
     p_share_token: trimmed,
@@ -257,7 +259,7 @@ export async function fetchGuestShare(token: string): Promise<{
     try {
       return parseGuestSharePayload(JSON.parse(data) as GuestSharePayload)
     } catch {
-      return { valid: false, property: null }
+      return { valid: false, property: null, include_assumptions: false }
     }
   }
   return parseGuestSharePayload((data || {}) as GuestSharePayload)
@@ -267,9 +269,10 @@ function parseGuestSharePayload(payload: GuestSharePayload): {
   valid: boolean
   address?: string
   property: Record<string, unknown> | null
+  include_assumptions: boolean
 } {
   if (payload.valid !== true) {
-    return { valid: false, property: null }
+    return { valid: false, property: null, include_assumptions: false }
   }
 
   const prop =
@@ -278,8 +281,14 @@ function parseGuestSharePayload(payload: GuestSharePayload): {
       : null
   return {
     valid: true,
-    address: prop?.address != null ? String(prop.address) : undefined,
+    address:
+      prop?.address != null
+        ? String(prop.address)
+        : payload.address != null
+          ? String(payload.address)
+          : undefined,
     property: prop,
+    include_assumptions: payload.include_assumptions !== false,
   }
 }
 

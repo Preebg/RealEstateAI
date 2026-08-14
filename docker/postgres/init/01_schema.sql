@@ -240,6 +240,22 @@ INSERT INTO public.app_runtime_config (key, value)
 VALUES ('catalog_admin_user_id', '')
 ON CONFLICT (key) DO NOTHING;
 
+CREATE TABLE IF NOT EXISTS public.preview_events (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id uuid NOT NULL,
+  username text NOT NULL,
+  event_type text NOT NULL,
+  path text,
+  label text,
+  payload jsonb NOT NULL DEFAULT '{}'::jsonb,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS preview_events_created_at_idx
+  ON public.preview_events (created_at DESC);
+CREATE INDEX IF NOT EXISTS preview_events_username_idx
+  ON public.preview_events (username, created_at DESC);
+
 CREATE INDEX IF NOT EXISTS idx_properties_timestamp_active
   ON public.properties ("timestamp" DESC);
 CREATE INDEX IF NOT EXISTS idx_properties_outreach_queue

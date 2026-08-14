@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { apiFetch } from '../lib/api'
 import { fetchPortfolio } from '../lib/portfolio'
+import { trackPreviewEvent } from '../lib/previewActivity'
 
 type SavedProp = { address?: string; id?: string; property_id?: string }
 
@@ -55,6 +56,11 @@ export function ComparePage() {
         body: JSON.stringify({ addresses: selected }),
       })
       setMetrics(res.metrics)
+      trackPreviewEvent('compare', {
+        path: '/compare',
+        label: selected.join(', '),
+        payload: { addresses: selected },
+      })
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Compare failed')
     } finally {

@@ -1,7 +1,8 @@
-import { Navigate, Outlet, Route, Routes } from 'react-router-dom'
+import { Navigate, Outlet, Route, Routes, useLocation, useSearchParams } from 'react-router-dom'
 import { useEffect } from 'react'
 import { useAuthStore } from './lib/authStore'
 import { AppLayout } from './components/AppLayout'
+import { PreviewActivityTracker } from './components/PreviewActivityTracker'
 import { LoginPage } from './pages/LoginPage'
 import { GoogleCallbackPage } from './pages/GoogleCallbackPage'
 import { HomePage } from './pages/HomePage'
@@ -10,6 +11,7 @@ import { ComparePage } from './pages/ComparePage'
 import { ValidationPage } from './pages/ValidationPage'
 import { LegalPage } from './pages/LegalPage'
 import { GuestSharePage } from './pages/GuestSharePage'
+import { ActivityPage } from './pages/ActivityPage'
 
 function RequireAuth() {
   const { session, loading } = useAuthStore()
@@ -24,6 +26,17 @@ function RequireAuth() {
   return <Outlet />
 }
 
+/** Legacy outreach URLs used `?share=token`; send those guests to the share page. */
+function ShareQueryRedirect() {
+  const [params] = useSearchParams()
+  const location = useLocation()
+  const token = params.get('share')?.trim()
+  if (token && !location.pathname.startsWith('/share/')) {
+    return <Navigate to={`/share/${encodeURIComponent(token)}`} replace />
+  }
+  return null
+}
+
 export default function App() {
   const init = useAuthStore((s) => s.init)
 
@@ -32,20 +45,25 @@ export default function App() {
   }, [init])
 
   return (
-    <Routes>
-      <Route path="/login" element={<LoginPage />} />
-      <Route path="/auth/google/callback" element={<GoogleCallbackPage />} />
-      <Route path="/legal/:doc" element={<LegalPage />} />
-      <Route path="/share/:token" element={<GuestSharePage />} />
-      <Route element={<RequireAuth />}>
-        <Route element={<AppLayout />}>
-          <Route index element={<HomePage />} />
-          <Route path="search" element={<SearchPage />} />
-          <Route path="compare" element={<ComparePage />} />
-          <Route path="validation" element={<ValidationPage />} />
+    <>
+      <ShareQueryRedirect />
+      <PreviewActivityTracker />
+      <Routes>
+        <Route path="/login" element={<LoginPage />} />
+        <Route path="/auth/google/callback" element={<GoogleCallbackPage />} />
+        <Route path="/legal/:doc" element={<LegalPage />} />
+        <Route path="/share/:token" element={<GuestSharePage />} />
+        <Route element={<RequireAuth />}>
+          <Route element={<AppLayout />}>
+            <Route index element={<HomePage />} />
+            <Route path="search" element={<SearchPage />} />
+            <Route path="compare" element={<ComparePage />} />
+            <Route path="validation" element={<ValidationPage />} />
+            <Route path="activity" element={<ActivityPage />} />
+          </Route>
         </Route>
-      </Route>
-      <Route path="*" element={<Navigate to="/" replace />} />
-    </Routes>
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
+    </>
   )
 }
