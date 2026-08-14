@@ -4474,6 +4474,27 @@ class TestConfigSecrets(unittest.TestCase):
         resolve_hostname("example.supabase.co", label="SUPABASE_URL")
         self.assertEqual(mock_getaddrinfo.call_args_list[0].args[2], socket.AF_INET)
 
+    def test_harvester_load_local_secrets_always_loads_dotenv(self) -> None:
+        from harvester import _load_local_secrets
+
+        with patch("harvester.load_local_secrets_into_environ") as mock_load:
+            mock_load.return_value = True
+            _load_local_secrets()
+            mock_load.assert_called_once()
+
+    def test_probe_local_rest_gateway_raises_when_unreachable(self) -> None:
+        import urllib.error
+
+        from harvester import _probe_local_rest_gateway
+
+        with patch(
+            "urllib.request.urlopen",
+            side_effect=urllib.error.URLError("refused"),
+        ):
+            with self.assertRaises(OSError) as ctx:
+                _probe_local_rest_gateway("http://127.0.0.1:3001")
+            self.assertIn("not reachable", str(ctx.exception))
+
 
 class PropertyNotificationsTests(unittest.TestCase):
     def test_qualifies_for_deal_alert_requires_positive_cashflow(self) -> None:

@@ -30,7 +30,7 @@ That UUID is your admin identity. Harvested rows are saved with `properties.user
 
 Data lands in **Supabase** by default — web, API, and harvester share one database.
 
-To run **Postgres on the harvest machine** instead (recommended long-term), see [LOCAL_POSTGRES.md](LOCAL_POSTGRES.md). Set `DATABASE_REST_URL=http://127.0.0.1:3001` for the host harvester; Auth stays on Supabase.
+To run **Postgres on the harvest machine** instead (recommended long-term), see [LOCAL_POSTGRES.md](LOCAL_POSTGRES.md). Set `DATABASE_REST_URL=http://127.0.0.1:3001` in `.env` for the host harvester; Auth stays on Supabase. Scheduled runs must use `scripts/run_harvester.ps1` so Docker and the REST gateway are up first.
 
 ---
 
@@ -58,10 +58,11 @@ Set environment variables (or root `.env`):
 | Key | Required for harvester |
 |-----|-------------------------|
 | `GEMINI_API_KEY` | Yes |
-| `SUPABASE_URL` | Yes |
+| `SUPABASE_URL` | Yes (Auth) |
 | `SUPABASE_KEY` | Yes (anon/publishable) |
 | `SUPABASE_SERVICE_ROLE_KEY` | **Yes for Task Scheduler / CLI** |
 | `ADMIN_USER_ID` | Yes (your Auth User UID) |
+| `DATABASE_REST_URL` | Yes on the harvest machine (`http://127.0.0.1:3001`) |
 
 `APP_URL` / OAuth redirect settings belong to the React web app, not the harvester.
 
@@ -91,11 +92,21 @@ Headless harvest uses the **service role** key without a Google JWT. Never commi
 
 ## Automate every 1.5 hours (Windows Task Scheduler)
 
-1. Create a task that runs every 90 minutes.
-2. Action: start program `C:\RealEstateAI\venv\Scripts\python.exe`
-3. Arguments: `harvester.py`
-4. Start in: `C:\RealEstateAI`
-5. Ensure the task user has the same environment variables (or load them in a wrapper `.ps1`).
+Use `scripts/run_harvester.ps1` (not `python.exe` directly). The wrapper loads `.env`, starts Docker Postgres/PostgREST when `DATABASE_REST_URL` is local, and waits for the gateway before launching Python.
+
+1. Create a task that runs every 90 minutes (optionally delay 1–2 minutes after logon so Docker Desktop can start).
+2. Program: `powershell.exe`
+3. Arguments: `-NoProfile -ExecutionPolicy Bypass -File C:\Projects\RealEstateAI\scripts\run_harvester.ps1`
+4. Start in: `C:\Projects\RealEstateAI`
+5. Run whether the user is logged on or not, as the same Windows user that can run Docker Desktop.
+
+Secrets come from the project `.env` (Task Scheduler does not inherit your interactive shell). For local Postgres:
+
+```text
+DATABASE_REST_URL=http://127.0.0.1:3001
+```
+
+Logs append to `harvester_scheduled.log` in the project root.
 
 ---
 
@@ -103,6 +114,9 @@ Headless harvest uses the **service role** key without a Google JWT. Never commi
 
 | Symptom | Fix |
 |---------|-----|
-| `SUPABASE_SERVICE_ROLE_KEY is required` | Set service role key in the harvest machine environment |
-| `ADMIN_USER_ID is not set` | Set a valid Auth User UUID in the environment |
-| DNS / network errors | Confirm `SUPABASE_URL` resolves on the harvest host |
+| `.streamlit\secrets.toml not found` | Outdated wrapper. Pull latest `scripts/run_harvester.ps1` (secrets are in `.env`) |
+| `SUPABASE_SERVICE_ROLE_KEY is required` | Set service role key in `.env` (any non-empty value works for local PostgREST) |
+| `ADMIN_USER_ID is not set` | Set a valid Auth User UUID in `.env` |
+| REST gateway not reachable / Docker errors | Start Docker Desktop; `docker compose up -d postgres postgrest rest-gateway` |
+| Harvest writes to hosted Supabase instead of local Postgres | Set `DATABASE_REST_URL=http://127.0.0.1:3001` in `.env` |
+| DNS / network errors | Confirm `SUPABASE_URL` resolves on the harvest host (Auth still uses hosted Supabase) |

@@ -198,18 +198,34 @@ def headless_cash_flow(property_data: dict[str, Any]) -> float:
 
 
 def _load_local_secrets() -> None:
-    """Optionally load root ``secrets.toml`` into os.environ (tests / optional local file)."""
+    """Load root ``.env`` (and optional ``secrets.toml``) into os.environ."""
     secrets_path = Path(__file__).resolve().parent / "secrets.toml"
-    if not secrets_path.exists():
-        return
-
     if not load_local_secrets_into_environ(secrets_path=secrets_path):
-        log.error("secrets_toml_parse_failed", path=str(secrets_path))
-        print(f"Warning: could not parse {secrets_path}")
+        if secrets_path.exists():
+            log.error("secrets_toml_parse_failed", path=str(secrets_path))
+            print(f"Warning: could not parse {secrets_path}")
 
 
 def _secret_from_env(name: str) -> str | None:
     return normalize_secret_value(os.getenv(name))
+
+
+def _probe_local_rest_gateway(data_url: str) -> None:
+    """Raise OSError when the local PostgREST gateway is not reachable."""
+    import urllib.error
+    import urllib.request
+
+    health = data_url.rstrip("/") + "/healthz"
+    try:
+        with urllib.request.urlopen(health, timeout=5) as response:
+            status = int(getattr(response, "status", 200) or 200)
+            if status >= 400:
+                raise OSError(f"REST gateway health check failed: HTTP {status}")
+    except urllib.error.URLError as exc:
+        raise OSError(
+            f"Local Postgres REST gateway is not reachable at {health} ({exc}). "
+            "Start it with: docker compose up -d postgres postgrest rest-gateway"
+        ) from exc
 
 
 def _validate_harvest_network() -> bool:
@@ -224,6 +240,7 @@ def _validate_harvest_network() -> bool:
             resolve_hostname(host, label=label)
         if using_local_database():
             os.environ["DATABASE_REST_URL"] = data_url
+            _probe_local_rest_gateway(data_url)
         else:
             os.environ["SUPABASE_URL"] = data_url
     except (OSError, ValueError, EnvironmentError) as exc:

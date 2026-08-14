@@ -47,6 +47,8 @@ python harvester.py
 
 You should see `Harvest data backend: local-postgres`.
 
+Scheduled Task Scheduler runs must use `scripts\run_harvester.ps1`. That wrapper loads `.env`, starts Docker Desktop if needed, brings up `postgres` / `postgrest` / `rest-gateway`, and waits for `http://127.0.0.1:3001/healthz` before launching Python. Direct `python harvester.py` from Task Scheduler will fail when Docker is down or `.env` is not in the process environment.
+
 ## Optional: copy rows from Supabase
 
 From a machine with `pg_dump` / `psql` (or use Supabase SQL editor export):
