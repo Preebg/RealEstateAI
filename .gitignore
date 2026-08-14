@@ -9,6 +9,7 @@ scripts/*
 !scripts/run_harvester.cmd
 !scripts/run_harvester.ps1
 !scripts/setup_task.ps1
+!scripts/migrate_supabase_to_local.py
 supabase/
 # Turnkey email digest (deferred — requires domain + Resend)
 turnkey.py
