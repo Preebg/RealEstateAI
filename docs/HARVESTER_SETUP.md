@@ -30,7 +30,7 @@ That UUID is your admin identity. Harvested rows are saved with `properties.user
 
 Data lands in **Supabase** by default — web, API, and harvester share one database.
 
-To run **Postgres on the harvest machine** instead (recommended long-term), see [LOCAL_POSTGRES.md](LOCAL_POSTGRES.md). Set `DATABASE_REST_URL=http://127.0.0.1:3001` in `.env` for the host harvester; Auth stays on Supabase. Scheduled runs must use `scripts/run_harvester.ps1` so Docker and the REST gateway are up first.
+To run **Postgres on the harvest machine** instead (recommended long-term), see [LOCAL_POSTGRES.md](LOCAL_POSTGRES.md). Set `DATABASE_REST_URL=http://127.0.0.1:3001` in `.env` for the host harvester; Auth stays on Supabase. Scheduled runs must use `scripts\run_harvester.cmd` (no arguments) so Docker and the REST gateway are up first.
 
 ---
 
@@ -92,13 +92,13 @@ Headless harvest uses the **service role** key without a Google JWT. Never commi
 
 ## Automate every 1.5 hours (Windows Task Scheduler)
 
-Use `scripts/run_harvester.ps1` (not `python.exe` directly). The wrapper loads `.env`, starts Docker Postgres/PostgREST when `DATABASE_REST_URL` is local, and waits for the gateway before launching Python.
+Use `scripts\run_harvester.cmd` with **no arguments**. Task Scheduler is unreliable when the action is a `.ps1` (execution policy / missing `-File`). The `.cmd` cds to the repo root, loads `.env`, starts Docker Postgres/PostgREST when the REST URL is local, then launches Python.
 
 1. Create a task that runs every 90 minutes (optionally delay 1–2 minutes after logon so Docker Desktop can start).
-2. Program: `powershell.exe`
-3. Arguments: `-NoProfile -ExecutionPolicy Bypass -File C:\Projects\RealEstateAI\scripts\run_harvester.ps1`
-4. Start in: `C:\Projects\RealEstateAI`
-5. Run whether the user is logged on or not, as the same Windows user that can run Docker Desktop.
+2. Program: `C:\Projects\RealEstateAI\scripts\run_harvester.cmd`
+3. Arguments: *(leave empty)*
+4. Start in: `C:\Projects\RealEstateAI` (optional; the `.cmd` cds itself)
+5. Run as the same Windows user that can start Docker Desktop. Do **not** use `SYSTEM` — Docker Desktop is not available there.
 
 Secrets come from the project `.env` (Task Scheduler does not inherit your interactive shell). For local Postgres:
 
@@ -108,13 +108,20 @@ DATABASE_REST_URL=http://127.0.0.1:3001
 
 Logs append to `harvester_scheduled.log` in the project root.
 
+To re-register the task from an elevated prompt:
+
+```powershell
+.\scripts\setup_task.ps1
+```
+
 ---
 
 ## Troubleshooting
 
 | Symptom | Fix |
 |---------|-----|
-| `.streamlit\secrets.toml not found` | Outdated wrapper. Pull latest `scripts/run_harvester.ps1` (secrets are in `.env`) |
+| `.streamlit\secrets.toml not found` | Outdated wrapper. Use `scripts\run_harvester.cmd` (secrets are in `.env`) |
+| Task does nothing / last run 0x1 | Program must be `run_harvester.cmd` with empty arguments — not the `.ps1` |
 | `SUPABASE_SERVICE_ROLE_KEY is required` | Set service role key in `.env` (any non-empty value works for local PostgREST) |
 | `ADMIN_USER_ID is not set` | Set a valid Auth User UUID in `.env` |
 | REST gateway not reachable / Docker errors | Start Docker Desktop; `docker compose up -d postgres postgrest rest-gateway` |

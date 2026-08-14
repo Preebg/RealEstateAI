@@ -5,7 +5,10 @@
 venv/
 .cursor/
 .agents/
-scripts/
+scripts/*
+!scripts/run_harvester.cmd
+!scripts/run_harvester.ps1
+!scripts/setup_task.ps1
 supabase/
 # Turnkey email digest (deferred — requires domain + Resend)
 turnkey.py
