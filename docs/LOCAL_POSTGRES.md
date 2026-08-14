@@ -47,7 +47,7 @@ python harvester.py
 
 You should see `Harvest data backend: local-postgres`.
 
-Scheduled Task Scheduler runs must use `scripts\run_harvester.cmd` with **no arguments**. That wrapper loads `.env`, starts Docker Desktop if needed, brings up `postgres` / `postgrest` / `rest-gateway`, and waits for `http://127.0.0.1:3001/healthz` before launching Python. Pointing the task at the `.ps1` with empty arguments (or at `python.exe`) will fail.
+Scheduled Task Scheduler runs must use `scripts\run_harvester.cmd` with **no arguments**, as **SYSTEM**. That wrapper starts Docker Desktop Service (LocalSystem) and `docker desktop start`, brings up `postgres` / `postgrest` / `rest-gateway`, and waits for `http://127.0.0.1:3001/healthz` before launching Python. In the object-name box type `SYSTEM` (Check Names → `NT AUTHORITY\SYSTEM`).
 
 ## Optional: copy rows from Supabase
 

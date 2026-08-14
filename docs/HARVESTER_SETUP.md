@@ -92,27 +92,30 @@ Headless harvest uses the **service role** key without a Google JWT. Never commi
 
 ## Automate every 1.5 hours (Windows Task Scheduler)
 
-Use `scripts\run_harvester.cmd` with **no arguments**. Task Scheduler is unreliable when the action is a `.ps1` (execution policy / missing `-File`). The `.cmd` cds to the repo root, loads `.env`, starts Docker Postgres/PostgREST when the REST URL is local, then launches Python.
+Use `scripts\run_harvester.cmd` with **no arguments**, running as **SYSTEM**. Do not pick a personal Windows login and do not use the `.ps1` as the program.
 
-1. Create a task that runs every 90 minutes (optionally delay 1–2 minutes after logon so Docker Desktop can start).
-2. Program: `C:\Projects\RealEstateAI\scripts\run_harvester.cmd`
-3. Arguments: *(leave empty)*
-4. Start in: `C:\Projects\RealEstateAI` (optional; the `.cmd` cds itself)
-5. Run as the same Windows user that can start Docker Desktop. Do **not** use `SYSTEM` — Docker Desktop is not available there.
+The wrapper starts **Docker Desktop Service** (`com.docker.service`, already LocalSystem) and `docker desktop start`, then waits for `http://127.0.0.1:3001/healthz` before launching Python. It never opens the Docker Desktop GUI.
 
-Secrets come from the project `.env` (Task Scheduler does not inherit your interactive shell). For local Postgres:
+1. Create a task that runs every 90 minutes.
+2. **General** → **Change User or Group** → object name: `SYSTEM` → **Check Names** (it becomes `NT AUTHORITY\SYSTEM`) → OK. No password.
+3. Check **Run with highest privileges**.
+4. Program: `C:\Projects\RealEstateAI\scripts\run_harvester.cmd`
+5. Arguments: *(leave empty)*
+6. Start in: `C:\Projects\RealEstateAI` (optional; the `.cmd` cds itself)
+
+Or from an **elevated** PowerShell:
+
+```powershell
+.\scripts\setup_task.ps1
+```
+
+Secrets come from the project `.env`. For local Postgres:
 
 ```text
 DATABASE_REST_URL=http://127.0.0.1:3001
 ```
 
 Logs append to `harvester_scheduled.log` in the project root.
-
-To re-register the task from an elevated prompt:
-
-```powershell
-.\scripts\setup_task.ps1
-```
 
 ---
 
@@ -121,7 +124,8 @@ To re-register the task from an elevated prompt:
 | Symptom | Fix |
 |---------|-----|
 | `.streamlit\secrets.toml not found` | Outdated wrapper. Use `scripts\run_harvester.cmd` (secrets are in `.env`) |
-| Task does nothing / last run 0x1 | Program must be `run_harvester.cmd` with empty arguments — not the `.ps1` |
+| Task does nothing / last run 0x1 | Program must be `run_harvester.cmd` with empty arguments, user `SYSTEM` |
+| Object name box rejects a name | Type `SYSTEM` and Check Names — not "Docker Desktop User" |
 | `SUPABASE_SERVICE_ROLE_KEY is required` | Set service role key in `.env` (any non-empty value works for local PostgREST) |
 | `ADMIN_USER_ID is not set` | Set a valid Auth User UUID in `.env` |
 | REST gateway not reachable / Docker errors | Start Docker Desktop; `docker compose up -d postgres postgrest rest-gateway` |
