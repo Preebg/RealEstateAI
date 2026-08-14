@@ -23,16 +23,16 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from supabase import Client, create_client
+from supabase import Client, create_client  # noqa: E402
 
-from authenticate import (
+from authenticate import (  # noqa: E402
     _drop_local_postgrest_bearer,
     get_auth_base_url,
     get_data_base_url,
     using_local_database,
 )
-from config_secrets import load_local_secrets_into_environ, normalize_secret_value
-from services.supabase_local_migration import (
+from config_secrets import load_local_secrets_into_environ, normalize_secret_value  # noqa: E402
+from services.supabase_local_migration import (  # noqa: E402
     CONFLICT_KEYS,
     DEFAULT_UPSERT_BATCH,
     MIGRATE_TABLES,
