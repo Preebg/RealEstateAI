@@ -1,5 +1,5 @@
 import { NavLink, Outlet, useNavigate } from 'react-router-dom'
-import { Map, Search, GitCompare, FlaskConical, LogOut, Menu, X, Activity } from 'lucide-react'
+import { Map, Search, GitCompare, FlaskConical, LogOut, Menu, X } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { useAuthStore } from '../lib/authStore'
 import { apiFetch } from '../lib/api'
@@ -58,23 +58,6 @@ export function AppLayout() {
                 {label}
               </NavLink>
             ))}
-            {isAdmin && (
-              <NavLink
-                to="/activity"
-                onClick={() => setOpen(false)}
-                className={({ isActive }) =>
-                  clsx(
-                    'flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition',
-                    isActive
-                      ? 'bg-primary/10 text-primary'
-                      : 'text-text/80 hover:bg-surface',
-                  )
-                }
-              >
-                <Activity size={18} />
-                salifT activity
-              </NavLink>
-            )}
           </nav>
           <div className="mt-6 border-t border-border pt-4">
             <p className="truncate text-xs text-muted">
@@ -99,16 +82,40 @@ export function AppLayout() {
       </aside>
 
       <div className="min-w-0">
-        <header className="sticky top-0 z-20 flex items-center gap-3 border-b border-border bg-bg/90 px-4 py-3 backdrop-blur lg:hidden">
-          <button
-            type="button"
-            className="rounded-lg border border-border p-2"
-            onClick={() => setOpen((v) => !v)}
-            aria-label="Toggle menu"
-          >
-            {open ? <X size={18} /> : <Menu size={18} />}
-          </button>
-          <span className="font-display text-lg font-semibold text-primary">CapEigen</span>
+        <header
+          className={clsx(
+            'sticky top-0 z-20 flex items-center justify-between border-b border-border bg-bg/90 px-4 py-3 backdrop-blur',
+            !isAdmin && 'lg:hidden',
+          )}
+        >
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              className="rounded-lg border border-border p-2 lg:hidden"
+              onClick={() => setOpen((v) => !v)}
+              aria-label="Toggle menu"
+            >
+              {open ? <X size={18} /> : <Menu size={18} />}
+            </button>
+            <span className="font-display text-lg font-semibold text-primary lg:hidden">
+              CapEigen
+            </span>
+          </div>
+          {isAdmin && (
+            <NavLink
+              to="/activity"
+              className={({ isActive }) =>
+                clsx(
+                  'rounded-lg border px-3 py-1.5 text-sm font-medium',
+                  isActive
+                    ? 'border-primary bg-primary/10 text-primary'
+                    : 'border-border bg-white/80 text-text hover:bg-surface',
+                )
+              }
+            >
+              Preview
+            </NavLink>
+          )}
         </header>
         <main className="px-4 py-6 sm:px-8">
           <Outlet />

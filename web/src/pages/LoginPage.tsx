@@ -22,6 +22,7 @@ export function LoginPage() {
   const [previewUsername, setPreviewUsername] = useState(
     params.get('u')?.trim() || 'salifT',
   )
+  const [showPreview, setShowPreview] = useState(Boolean(params.get('u')))
   const googleConfigured = Boolean(getGoogleClientId())
 
   if (!loading && session) return <Navigate to="/" replace />
@@ -97,53 +98,60 @@ export function LoginPage() {
   }
 
   return (
-    <div className="mx-auto flex min-h-screen max-w-md flex-col justify-center px-4 py-12">
+    <div className="relative min-h-screen">
+      <div className="absolute right-4 top-4 z-10">
+        <button
+          type="button"
+          onClick={() => {
+            setShowPreview((open) => !open)
+            setError(null)
+          }}
+          className="rounded-lg border border-border bg-white/90 px-3 py-1.5 text-sm font-medium text-text shadow-sm hover:bg-surface"
+        >
+          Preview
+        </button>
+        {showPreview && (
+          <form
+            onSubmit={(e) => void previewSignIn(e)}
+            className="absolute right-0 mt-2 w-80 rounded-2xl border border-primary/30 bg-white p-5 shadow-lg"
+          >
+            <h2 className="text-sm font-semibold text-primary">Preview access</h2>
+            <p className="mt-2 mb-3 text-sm text-muted">
+              Username <span className="font-medium text-text">salifT</span>. No password.
+            </p>
+            <label className="mb-3 block text-sm">
+              Username
+              <input
+                type="text"
+                autoComplete="username"
+                spellCheck={false}
+                value={previewUsername}
+                onChange={(e) => setPreviewUsername(e.target.value)}
+                placeholder="salifT"
+                className="mt-1 w-full rounded-lg border border-border px-3 py-2 outline-none focus:border-primary"
+              />
+            </label>
+            <button
+              type="submit"
+              disabled={busy || previewUsername.trim().length < 2}
+              className="w-full rounded-lg bg-primary py-2.5 text-sm font-semibold text-white hover:bg-primary-hover disabled:opacity-60"
+            >
+              {busy ? 'Please wait…' : 'Continue with username'}
+            </button>
+            {error && <p className="mt-3 text-sm text-red-600">{error}</p>}
+          </form>
+        )}
+      </div>
+
+      <div className="mx-auto flex min-h-screen max-w-md flex-col justify-center px-4 py-12">
       <div className="mb-10 text-center">
         <h1 className="font-display text-4xl font-semibold text-primary">CapEigen</h1>
         <p className="mt-2 text-muted">AI rental underwriting with QAOA portfolio alignment.</p>
-        <p className="mt-3 text-sm text-primary">
-          Invited as salifT? Skip email and Google. Use Preview access below — no password.
-        </p>
       </div>
 
       <form
-        onSubmit={(e) => void previewSignIn(e)}
-        className="rounded-2xl border border-primary/30 bg-white/90 p-6 shadow-sm"
-      >
-        <h2 className="text-sm font-semibold text-primary">Preview access for salifT</h2>
-        <ol className="mt-3 mb-4 list-decimal space-y-1 pl-5 text-sm text-muted">
-          <li>Open this login page (no Google or email account needed).</li>
-          <li>
-            Confirm the username is <span className="font-medium text-text">salifT</span>.
-          </li>
-          <li>Click Continue with username.</li>
-        </ol>
-        <p className="mb-4 text-sm text-muted">There is no password.</p>
-        <label className="mb-4 block text-sm">
-          Username
-          <input
-            type="text"
-            autoComplete="username"
-            spellCheck={false}
-            value={previewUsername}
-            onChange={(e) => setPreviewUsername(e.target.value)}
-            placeholder="salifT"
-            className="mt-1 w-full rounded-lg border border-border px-3 py-2 outline-none focus:border-primary"
-          />
-        </label>
-        <button
-          type="submit"
-          disabled={busy || previewUsername.trim().length < 2}
-          className="w-full rounded-lg bg-primary py-2.5 text-sm font-semibold text-white hover:bg-primary-hover disabled:opacity-60"
-        >
-          {busy ? 'Please wait…' : 'Continue with username'}
-        </button>
-        {error && <p className="mt-3 text-sm text-red-600">{error}</p>}
-      </form>
-
-      <form
         onSubmit={onSubmit}
-        className="mt-6 rounded-2xl border border-border bg-white/90 p-6 shadow-sm"
+        className="rounded-2xl border border-border bg-white/90 p-6 shadow-sm"
       >
         <div className="mb-4 flex gap-2 rounded-lg bg-surface p-1">
           {(['signin', 'signup'] as const).map((m) => (
@@ -258,6 +266,7 @@ export function LoginPage() {
           </p>
         )}
       </form>
+      </div>
     </div>
   )
 }
