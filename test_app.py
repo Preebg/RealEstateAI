@@ -2389,6 +2389,60 @@ class TestHeadlessDbClient(unittest.TestCase):
                 create.assert_not_called()
 
 
+class TestSupabaseLocalMigration(unittest.TestCase):
+    def test_plan_parent_keeps_local_harvest_and_copies_hosted(self):
+        from services.supabase_local_migration import plan_parent_copy
+
+        local = [
+            {"id": "local-1", "address": "1 New St, Rochester, NY"},
+        ]
+        source = [
+            {"id": "hosted-1", "address": "10 Park Ave, Rochester, NY"},
+            {"id": "local-1", "address": "1 New St, Rochester, NY"},
+            {"id": "hosted-2", "address": "1 New St, Rochester, NY"},
+        ]
+        plan = plan_parent_copy(
+            table="properties",
+            source_rows=source,
+            local_rows=local,
+        )
+        self.assertEqual([row["id"] for row in plan.rows], ["hosted-1"])
+        self.assertEqual(plan.skipped_existing, 1)
+        self.assertEqual(plan.skipped_address, 1)
+
+    def test_plan_child_skips_orphans(self):
+        from services.supabase_local_migration import plan_child_copy
+
+        source = [
+            {"id": "c1", "property_id": "keep"},
+            {"id": "c2", "property_id": "missing"},
+        ]
+        plan = plan_child_copy(
+            table="property_comparables",
+            source_rows=source,
+            local_rows=[],
+            allowed_property_ids={"keep"},
+            conflict_key="id",
+        )
+        self.assertEqual([row["id"] for row in plan.rows], ["c1"])
+        self.assertEqual(plan.skipped_missing_parent, 1)
+
+    def test_hosted_service_role_ignores_local_dummy_key(self):
+        from services.supabase_local_migration import hosted_service_role_key
+
+        values = {
+            "SUPABASE_SERVICE_ROLE_KEY": "local-service-key",
+            "SUPABASE_AUTH_SERVICE_ROLE_KEY": "eyJhbGciOiJ.test",
+        }
+        self.assertEqual(
+            hosted_service_role_key(values.get),
+            "eyJhbGciOiJ.test",
+        )
+        self.assertIsNone(
+            hosted_service_role_key({"SUPABASE_SERVICE_ROLE_KEY": "dummy"}.get)
+        )
+
+
 class TestPropertyAge(unittest.TestCase):
     def test_parse_year_built_ignores_small_values(self):
         from engine import parse_year_built

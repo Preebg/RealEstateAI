@@ -49,13 +49,25 @@ You should see `Harvest data backend: local-postgres`.
 
 Scheduled Task Scheduler runs must use `scripts\run_harvester.cmd` with **no arguments**, as **SYSTEM**. That wrapper starts Docker Desktop Service (LocalSystem) and `docker desktop start`, brings up `postgres` / `postgrest` / `rest-gateway`, and waits for `http://127.0.0.1:3001/healthz` before launching Python. In the object-name box type `SYSTEM` (Check Names → `NT AUTHORITY\SYSTEM`).
 
-## Optional: copy rows from Supabase
+## Copy hosted Supabase catalog into local Postgres
 
-From a machine with `pg_dump` / `psql` (or use Supabase SQL editor export):
+Run this **on the harvest machine** (Docker Postgres must be up). It copies `properties`, comps, shares, overrides, saved listings, and related catalog tables. It does **not** copy `auth.users` (login stays on Supabase) or oauth handoff tokens.
 
-1. Export `properties` (and related tables you need) from the hosted project.
-2. `psql` into `localhost:5432` as `capeigen` / password from `.env`.
-3. Re-run harvest or set `ADMIN_USER_ID` — API startup calls `set_catalog_admin_user_id`.
+Local harvest rows are kept: matching `id` or address is skipped so the two new synthesized listings are not overwritten.
+
+```powershell
+cd C:\Projects\RealEstateAI
+docker compose up -d postgres postgrest rest-gateway
+.\venv\Scripts\Activate.ps1
+# If SUPABASE_SERVICE_ROLE_KEY is a local dummy (not a JWT), set:
+#   SUPABASE_AUTH_SERVICE_ROLE_KEY=<hosted service_role JWT>
+python scripts/migrate_supabase_to_local.py --dry-run
+python scripts/migrate_supabase_to_local.py
+```
+
+Expect ~905 properties and ~3760 comparables from hosted, plus your local harvest rows. Then hard-refresh the website (it reads `/api/portfolio` from this machine).
+
+Guest share SQL functions are applied from `docker/postgres/init/04_guest_share_functions.sql` during the migrate (existing volumes do not re-run init).
 
 Schema lives in `docker/postgres/init/` and runs **only on first volume create**. To reset:
 
