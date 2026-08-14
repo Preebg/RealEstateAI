@@ -16,6 +16,47 @@ from knowledge_base import is_valid_uuid
 router = APIRouter(tags=["guest"])
 
 
+def _share_expired(expires_at: Any) -> bool:
+    if not expires_at:
+        return False
+    text = str(expires_at).strip()
+    if not text:
+        return False
+    try:
+        parsed = datetime.datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+    return parsed < datetime.datetime.now(datetime.timezone.utc)
+
+
+def _share_row_from_table(token: str) -> dict[str, Any] | None:
+    """Direct table lookup for local Postgres (guest RPCs may be absent)."""
+    client = get_anon_client()
+    try:
+        response = (
+            client.table("property_shares")
+            .select("share_token,property_id,include_assumptions,expires_at")
+            .eq("share_token", str(token).strip())
+            .limit(1)
+            .execute()
+        )
+    except APIError:
+        return None
+    rows = response.data or []
+    if not rows:
+        return None
+    row = rows[0]
+    if _share_expired(row.get("expires_at")):
+        return None
+    return {
+        "valid": True,
+        "property_id": row.get("property_id"),
+        "include_assumptions": row.get("include_assumptions"),
+    }
+
+
 def _validate_token(token: str) -> dict[str, Any] | None:
     supabase = get_anon_client()
     try:
@@ -23,13 +64,13 @@ def _validate_token(token: str) -> dict[str, Any] | None:
             "validate_share_token", {"p_token": str(token).strip()}
         ).execute()
     except APIError:
-        return None
-    payload = response.data
+        response = None
+    payload = getattr(response, "data", None) if response is not None else None
     if isinstance(payload, list):
         payload = payload[0] if payload else None
-    if not payload or not payload.get("valid"):
-        return None
-    return payload
+    if payload and payload.get("valid"):
+        return payload
+    return _share_row_from_table(token)
 
 
 @router.get("/api/guest/validate")
@@ -75,15 +116,50 @@ def guest_property(
         params["p_address"] = address
     try:
         response = supabase.rpc("get_guest_property", params).execute()
-    except APIError as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-    payload = response.data
+        payload = response.data
+    except APIError:
+        payload = None
     if isinstance(payload, list):
         payload = payload[0] if payload else None
     if not payload or not payload.get("valid"):
-        raise HTTPException(status_code=404, detail="Property not found for share")
-    prop = payload.get("property")
-    return {"property": prop if isinstance(prop, dict) else None}
+        payload = None
+    prop = payload.get("property") if isinstance(payload, dict) else None
+    if not isinstance(prop, dict):
+        meta = _validate_token(token)
+        pid = str(property_id or (meta or {}).get("property_id") or "").strip()
+        if not pid:
+            raise HTTPException(status_code=404, detail="Property not found for share")
+        try:
+            row = (
+                supabase.table("properties")
+                .select("*")
+                .eq("id", pid)
+                .limit(1)
+                .execute()
+            )
+        except APIError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        rows = row.data or []
+        prop = rows[0] if rows else None
+        if not isinstance(prop, dict):
+            raise HTTPException(status_code=404, detail="Property not found for share")
+        return {
+            "valid": True,
+            "address": prop.get("address"),
+            "property_id": prop.get("id"),
+            "include_assumptions": bool((meta or {}).get("include_assumptions", True)),
+            "property": prop,
+        }
+    return {
+        "valid": True,
+        "address": payload.get("address") if isinstance(payload, dict) else prop.get("address"),
+        "property_id": payload.get("property_id") if isinstance(payload, dict) else prop.get("id"),
+        "include_assumptions": (
+            payload.get("include_assumptions") if isinstance(payload, dict) else True
+        )
+        is not False,
+        "property": prop,
+    }
 
 
 @router.post("/api/shares", response_model=ShareCreateResponse)

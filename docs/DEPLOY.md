@@ -6,12 +6,12 @@
 2. Set environment variables:
    - `VITE_SUPABASE_URL`
    - `VITE_SUPABASE_ANON_KEY`
-   - `VITE_API_URL` = public HTTPS URL of the FastAPI service (optional for Home/Compare portfolio; **required** for Individual Search / analysis / PDF)
+   - `VITE_API_URL` = public HTTPS origin of the harvest machine FastAPI (Cloudflare Tunnel / Caddy), **required** for Home/Compare portfolio, Individual Search, and PDF. Example: `https://capeigen.preebg.dev` when that hostname reverse-proxies `/api/*` to `:8000`.
 3. In Supabase Auth → URL configuration, allow the Netlify site URL as a redirect.
 
-The portfolio map reads Supabase directly from the browser (authenticated). You do **not** need a hosted API for the home page. Analysis and other `/api/*` routes still need FastAPI (local Docker or a host of your choice).
+The portfolio map reads `/api/portfolio` from the harvest machine (local Postgres). Auth stays on Supabase. Analysis and other `/api/*` routes use the same FastAPI origin.
 
-If you see `Unexpected token '<'… is not valid JSON`, the SPA called `/api/*` on Netlify and got `index.html` back — either leave those features for local API, or set `VITE_API_URL` to a deployed FastAPI base URL and redeploy.
+If you see `Unexpected token '<'… is not valid JSON`, the SPA called `/api/*` on Netlify and got `index.html` back — set `VITE_API_URL` to the harvest Caddy/Tunnel origin and redeploy.
 
 ## Backend (Docker)
 

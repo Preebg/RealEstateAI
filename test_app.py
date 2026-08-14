@@ -1895,6 +1895,24 @@ class TestScannedAddressDetection(unittest.TestCase):
         self.assertTrue(hit.get("from_kb"))
         self.assertEqual(hit["price"], 200000)
 
+    def test_lookup_catalog_property_by_id(self):
+        from unittest.mock import patch
+
+        from knowledge_base import lookup_catalog_property
+
+        row = {
+            "id": "7f35bc1e-9de5-484d-8f73-27fd3da733eb",
+            "address": "123 Main St, Rochester, NY 14607",
+            "price": 200000,
+        }
+        with patch("knowledge_base._fetch_property_detail", return_value=row):
+            with patch("knowledge_base._fetch_user_overrides_map", return_value={}):
+                hit = lookup_catalog_property(
+                    property_id="7f35bc1e-9de5-484d-8f73-27fd3da733eb"
+                )
+        self.assertIsNotNone(hit)
+        self.assertEqual(hit["address"], "123 Main St, Rochester, NY 14607")
+
     def test_get_kb_address_options_sorted(self):
         from unittest.mock import patch
 

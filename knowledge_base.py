@@ -423,6 +423,33 @@ def lookup_property(address: str, user_id: str | None = None) -> dict[str, Any] 
     return record
 
 
+def lookup_catalog_property(
+    *,
+    property_id: str | None = None,
+    address: str | None = None,
+    user_id: str | None = None,
+) -> dict[str, Any] | None:
+    """Load one active catalog row by id or address, with the caller's overrides."""
+    pid = str(property_id or "").strip()
+    if pid and is_valid_uuid(pid):
+        detail = _fetch_property_detail(property_id=pid)
+        if detail:
+            record = _normalize_record_numerics(detail)
+            record["from_kb"] = True
+            uid = _resolve_user_id(user_id)
+            if uid and record.get("id"):
+                overrides = _fetch_user_overrides_map(uid)
+                record = _merge_with_user_override(
+                    record, overrides.get(str(record["id"]))
+                )
+                record["from_kb"] = True
+            return record
+    addr = str(address or "").strip()
+    if addr:
+        return lookup_property(addr, user_id=user_id)
+    return None
+
+
 RENT_OUTLIER_DEVIATION_PCT = 50.0
 
 USER_OVERRIDE_COLUMNS = (
@@ -1902,6 +1929,7 @@ __all__ = [
     "invalidate_kb_cache",
     "get_kb_raw_data",
     "lookup_property",
+    "lookup_catalog_property",
     "save_canonical_property",
     "persist_comps_to_canonical",
     "save_user_property_override",

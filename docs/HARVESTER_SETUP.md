@@ -82,7 +82,7 @@ Harvest saves will use admin user_id: <your-uuid>
 
 Then stage logs and `Saved — Quantum: ...` lines.
 
-Check Supabase **Table Editor** → `properties` → filter `user_id` = your `ADMIN_USER_ID`.
+Check local Postgres (`psql` / TablePlus on `localhost:5432`) — not hosted Supabase — when `DATABASE_REST_URL` is set. After the website is pointed at `/api/portfolio`, harvested rows appear on Home.
 
 ### 5. RLS (Row Level Security)
 

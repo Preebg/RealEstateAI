@@ -1,39 +1,7 @@
+import { apiFetch, type PortfolioItem } from './api'
 import { supabase } from './supabase'
-import type { PortfolioItem } from './api'
 
-/** Matches knowledge_base.ACTIVE_PROPERTY_ARCHIVE_DAYS */
-const ARCHIVE_DAYS = 30
-const PAGE_SIZE = 500
 const DEFAULT_DOWN_PAYMENT_PCT = 25
-
-const LIST_SELECT = [
-  'id',
-  'address',
-  'price',
-  'predicted_value',
-  'latitude',
-  'longitude',
-  'square_footage',
-  'location_score',
-  'rent',
-  'original_ai_rent',
-  'year_built',
-  'monthly_net_cash_flow',
-  'market_city',
-  'state_code',
-  'forecast_rate',
-  'quantum_risk_score',
-  'strategy_tag',
-  'property_label',
-  'property_category',
-  'timestamp',
-].join(',')
-
-function activeCutoffIso(): string {
-  const cutoff = new Date()
-  cutoff.setUTCDate(cutoff.getUTCDate() - ARCHIVE_DAYS)
-  return cutoff.toISOString()
-}
 
 function asNumber(value: unknown): number | undefined {
   if (value == null || value === '') return undefined
@@ -89,8 +57,10 @@ function rowToItem(row: Record<string, unknown>): PortfolioItem {
   const price = resolvePrice(row)
   const rent = resolveRent(row)
   const yearBuilt = asNumber(row.year_built)
-  const monthlyCashFlow = asNumber(row.monthly_net_cash_flow)
+  const monthlyCashFlow =
+    asNumber(row.monthly_cash_flow) ?? asNumber(row.monthly_net_cash_flow)
   const forecastRate = asNumber(row.forecast_rate)
+  const added = row.added_at ?? row.timestamp
 
   return {
     id: row.id != null ? String(row.id) : undefined,
@@ -99,7 +69,7 @@ function rowToItem(row: Record<string, unknown>): PortfolioItem {
     predicted_value: asNumber(row.predicted_value),
     latitude: asNumber(row.latitude),
     longitude: asNumber(row.longitude),
-    sqft: asNumber(row.square_footage),
+    sqft: asNumber(row.sqft) ?? asNumber(row.square_footage),
     location_score: asNumber(row.location_score),
     rent,
     year_built: yearBuilt,
@@ -109,12 +79,14 @@ function rowToItem(row: Record<string, unknown>): PortfolioItem {
     one_year_roi: computeOneYearRoi(price, monthlyCashFlow, forecastRate),
     market_city: row.market_city != null ? String(row.market_city) : undefined,
     state_code: row.state_code != null ? String(row.state_code) : undefined,
-    quantum_success: asNumber(row.quantum_risk_score),
+    quantum_success:
+      asNumber(row.quantum_success) ?? asNumber(row.quantum_risk_score),
     strategy:
+      (row.strategy as string | undefined) ||
       (row.strategy_tag as string | undefined) ||
       (row.property_label as string | undefined) ||
       (row.property_category as string | undefined),
-    added_at: row.timestamp != null ? String(row.timestamp) : undefined,
+    added_at: added != null ? String(added) : undefined,
   }
 }
 
@@ -174,16 +146,7 @@ export function firstCatalogUuid(...values: unknown[]): string {
   return ''
 }
 
-function randomShareToken(): string {
-  const bytes = crypto.getRandomValues(new Uint8Array(32))
-  let binary = ''
-  for (let i = 0; i < bytes.length; i += 1) {
-    binary += String.fromCharCode(bytes[i]!)
-  }
-  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '')
-}
-
-/** Create a guest share row in Supabase (no FastAPI round-trip). */
+/** Create a guest share row via FastAPI (local Postgres or hosted). */
 export async function createPropertyShare(opts: {
   propertyId: string
   expiresDays?: number
@@ -200,33 +163,24 @@ export async function createPropertyShare(opts: {
     throw new Error('This property needs a catalog id before it can be shared.')
   }
 
-  const token = randomShareToken()
-  const expiresDays = opts.expiresDays ?? 30
-  const expiresAt =
-    expiresDays > 0
-      ? new Date(Date.now() + expiresDays * 24 * 60 * 60 * 1000).toISOString()
-      : null
-
-  const { error } = await supabase.from('property_shares').insert({
-    share_token: token,
-    property_id: propertyId,
-    created_by: session.user.id,
-    include_assumptions: true,
-    expires_at: expiresAt,
-  })
-  if (error) {
-    const msg = error.message || 'Failed to create share link'
+  try {
+    return await apiFetch<{ share_token: string; share_url: string }>('/api/shares', {
+      method: 'POST',
+      body: JSON.stringify({
+        property_id: propertyId,
+        include_assumptions: true,
+        expires_days: opts.expiresDays ?? 30,
+        base_url: window.location.origin,
+      }),
+    })
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Failed to create share link'
     if (/foreign key|property_id/i.test(msg)) {
       throw new Error(
         'This listing is not in the catalog yet. Save it to your account, then try sharing again.',
       )
     }
-    throw new Error(msg)
-  }
-
-  return {
-    share_token: token,
-    share_url: `${window.location.origin}/share/${token}`,
+    throw err instanceof Error ? err : new Error(msg)
   }
 }
 
@@ -238,7 +192,7 @@ type GuestSharePayload = {
   include_assumptions?: boolean
 }
 
-/** Load a guest share via Supabase RPC (no FastAPI required). */
+/** Load a guest share via FastAPI (harvest-machine Postgres). */
 export async function fetchGuestShare(token: string): Promise<{
   valid: boolean
   address?: string
@@ -248,13 +202,22 @@ export async function fetchGuestShare(token: string): Promise<{
   const trimmed = token.trim()
   if (!trimmed) return { valid: false, property: null, include_assumptions: false }
 
+  try {
+    const data = await apiFetch<GuestSharePayload>(
+      `/api/guest/property?token=${encodeURIComponent(trimmed)}`,
+    )
+    const parsed = parseGuestSharePayload(data || {})
+    if (parsed.valid) return parsed
+  } catch {
+    // Fall back to hosted Supabase RPCs for older share links.
+  }
+
   const { data, error } = await supabase.rpc('get_guest_property', {
     p_share_token: trimmed,
   })
   if (error) {
     throw new Error(error.message || 'Failed to load shared property')
   }
-
   if (typeof data === 'string') {
     try {
       return parseGuestSharePayload(JSON.parse(data) as GuestSharePayload)
@@ -293,7 +256,7 @@ function parseGuestSharePayload(payload: GuestSharePayload): {
 }
 
 /**
- * Load one catalog property for Individual Search (no FastAPI required).
+ * Load one catalog property for Individual Search from the harvest API.
  */
 export async function fetchPropertyDetail(opts: {
   id?: string | null
@@ -310,36 +273,34 @@ export async function fetchPropertyDetail(opts: {
   const address = opts.address?.trim()
   if (!id && !address) return null
 
-  const cutoff = activeCutoffIso()
-  let query = supabase.from('properties').select('*').gte('timestamp', cutoff).limit(1)
-  if (id) {
-    query = query.eq('id', id)
-  } else if (address) {
-    query = query.eq('address', address)
-  }
+  const params = new URLSearchParams()
+  if (id) params.set('id', id)
+  if (address) params.set('address', address)
 
-  const { data, error } = await query
-  if (error) {
-    throw new Error(error.message || 'Failed to load property from Supabase')
-  }
-  const row = (data as unknown as Array<Record<string, unknown>> | null)?.[0]
-  if (!row) return null
-
-  const rent = resolveRent(row)
-  return {
-    ...row,
-    from_kb: true,
-    property_id: row.id,
-    rent: rent ?? row.rent,
-    sqft: row.square_footage ?? row.sqft,
-    strategy:
-      row.strategy_tag || row.property_label || row.property_category || row.strategy,
+  try {
+    const row = await apiFetch<Record<string, unknown>>(
+      `/api/properties/detail?${params.toString()}`,
+    )
+    if (!row) return null
+    const rent = resolveRent(row)
+    return {
+      ...row,
+      from_kb: true,
+      property_id: row.id,
+      rent: rent ?? row.rent,
+      sqft: row.square_footage ?? row.sqft,
+      strategy:
+        row.strategy_tag || row.property_label || row.property_category || row.strategy,
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : ''
+    if (/not found/i.test(msg)) return null
+    throw err
   }
 }
 
 /**
- * Load the portfolio map from Supabase (no FastAPI required).
- * Works on Netlify when only the SPA + Supabase are configured.
+ * Load the portfolio map from FastAPI (harvest-machine Postgres).
  */
 export async function fetchPortfolio(): Promise<{
   properties: PortfolioItem[]
@@ -352,31 +313,12 @@ export async function fetchPortfolio(): Promise<{
     throw new Error('Sign in to load the portfolio.')
   }
 
-  const cutoff = activeCutoffIso()
-  const properties: PortfolioItem[] = []
-  let offset = 0
-
-  for (;;) {
-    const { data, error } = await supabase
-      .from('properties')
-      .select(LIST_SELECT)
-      .gte('timestamp', cutoff)
-      .order('timestamp', { ascending: false })
-      .range(offset, offset + PAGE_SIZE - 1)
-
-    if (error) {
-      throw new Error(error.message || 'Failed to load portfolio from Supabase')
-    }
-
-    const batch = (data as unknown as Array<Record<string, unknown>> | null) ?? []
-    for (const row of batch) {
-      properties.push(rowToItem(row))
-    }
-    if (batch.length < PAGE_SIZE) break
-    offset += PAGE_SIZE
-  }
-
-  return { properties, count: properties.length }
+  const data = await apiFetch<{
+    properties?: Array<Record<string, unknown>>
+    count?: number
+  }>('/api/portfolio')
+  const properties = (data.properties ?? []).map(rowToItem)
+  return { properties, count: data.count ?? properties.length }
 }
 
 export type RangeBounds = { min: number; max: number }
