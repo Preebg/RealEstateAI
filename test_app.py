@@ -39,6 +39,7 @@ from engine import (  # noqa: E402
     RESEARCH_MODEL,
     discover_hot_market_listings,
     DEFAULT_MODEL_RPM,
+    INTERACTIVE_RESERVED_RPM,
     SharedModelRateLimiter,
     is_daily_quota_exhausted,
     should_fallback_to_next_model,
@@ -556,17 +557,44 @@ class TestModelRpmLimits(unittest.TestCase):
 
     def test_flash_rpm_window_blocks_immediate_extra_call(self) -> None:
         for _ in range(5):
-            self.assertIsNone(self._limiter.try_acquire("gemini-2.5-flash"))
-        wait_sec = self._limiter.try_acquire("gemini-2.5-flash")
+            self.assertIsNone(
+                self._limiter.try_acquire("gemini-2.5-flash", priority="interactive")
+            )
+        wait_sec = self._limiter.try_acquire(
+            "gemini-2.5-flash", priority="interactive"
+        )
         self.assertIsNotNone(wait_sec)
         self.assertGreater(wait_sec or 0.0, 0.0)
 
     def test_shared_rpm_across_pipelines(self) -> None:
         other = SharedModelRateLimiter(self._state_path, window_sec=60.0)
-        for _ in range(13):
-            self._limiter.try_acquire("gemma-4-31b-it")
+        background_cap = max(1, DEFAULT_MODEL_RPM - INTERACTIVE_RESERVED_RPM)
+        for _ in range(background_cap):
+            self.assertIsNone(self._limiter.try_acquire("gemma-4-31b-it"))
         wait_sec = other.try_acquire("gemma-4-31b-it")
         self.assertIsNotNone(wait_sec)
+
+    def test_background_reserves_slots_for_interactive(self) -> None:
+        background_cap = max(1, DEFAULT_MODEL_RPM - INTERACTIVE_RESERVED_RPM)
+        for _ in range(background_cap):
+            self.assertIsNone(self._limiter.try_acquire("gemma-4-31b-it"))
+        self.assertIsNotNone(self._limiter.try_acquire("gemma-4-31b-it"))
+        self.assertIsNone(
+            self._limiter.try_acquire("gemma-4-31b-it", priority="interactive")
+        )
+
+    def test_interactive_demand_blocks_background(self) -> None:
+        self._limiter.begin_interactive_demand("9 Oak St, Rochester, NY")
+        wait_sec = self._limiter.try_acquire("gemma-4-31b-it")
+        self.assertIsNotNone(wait_sec)
+        self.assertIsNone(
+            self._limiter.try_acquire("gemma-4-31b-it", priority="interactive")
+        )
+        self.assertTrue(
+            self._limiter.is_interactive_priority_address("9 Oak St, Rochester, NY")
+        )
+        self._limiter.end_interactive_demand()
+        self.assertIsNone(self._limiter.try_acquire("gemma-4-31b-it"))
 
     def test_generate_with_retry_uses_shared_rpm(self) -> None:
         from engine import generate_with_retry
@@ -577,8 +605,12 @@ class TestModelRpmLimits(unittest.TestCase):
                     type("Resp", (), {"text": "ok"})()
                 )
                 for _ in range(5):
-                    generate_with_retry("gemini-2.5-flash", "prompt")
-                wait_sec = self._limiter.try_acquire("gemini-2.5-flash")
+                    generate_with_retry(
+                        "gemini-2.5-flash", "prompt", priority="interactive"
+                    )
+                wait_sec = self._limiter.try_acquire(
+                    "gemini-2.5-flash", priority="interactive"
+                )
         self.assertIsNotNone(wait_sec)
 
 
@@ -2926,6 +2958,7 @@ class TestStartPropertyAnalysis(unittest.TestCase):
         from services.property_analysis_flow import start_property_analysis
 
         researched = {"address": "9 Oak St", "price": 150000}
+        saved = type("Save", (), {"data": [{"id": "22222222-2222-2222-2222-222222222222"}]})()
         with (
             patch("services.property_analysis_flow.lookup_property", return_value=None),
             patch(
@@ -2936,12 +2969,20 @@ class TestStartPropertyAnalysis(unittest.TestCase):
                 "services.property_analysis_flow.get_final_analysis",
                 return_value=dict(researched),
             ) as final_fn,
+            patch(
+                "services.property_analysis_flow.save_harvest_property",
+                return_value=saved,
+            ) as save_fn,
         ):
             result = start_property_analysis("9 Oak St")
 
         final_fn.assert_called_once()
+        save_fn.assert_called_once()
         self.assertFalse(result["from_kb"])
         self.assertEqual(result["property_data"]["address"], "9 Oak St")
+        self.assertEqual(
+            result["property_data"]["id"], "22222222-2222-2222-2222-222222222222"
+        )
 
 class TestPersistCompsToCanonical(unittest.TestCase):
     def test_persist_skips_without_comps(self):

@@ -1,6 +1,6 @@
 import type { User } from '@supabase/supabase-js'
 
-/** Only this account may see Model Validation and preview activity. */
+/** Only this account may see Model Validation and the demo-account dashboard. */
 export const ADMIN_EMAIL = 'preebg09@gmail.com'
 
 export function isAdminEmail(email: string | null | undefined): boolean {

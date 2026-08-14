@@ -21,6 +21,38 @@ exports.handler = async function handler(event) {
   }
 
   const username = typeof body.username === 'string' ? body.username.trim() : ''
+  const api = String(process.env.API_URL || process.env.VITE_API_URL || '')
+    .trim()
+    .replace(/\/$/, '')
+
+  // Prefer FastAPI so dashboard-managed usernames apply without a Netlify env change.
+  if (api && username) {
+    try {
+      const res = await fetch(`${api}/api/auth/demo`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username }),
+      })
+      const payload = await res.text()
+      if (res.ok || res.status === 429) {
+        return {
+          statusCode: res.status,
+          headers: {
+            'Content-Type': 'application/json',
+            ...corsHeaders(),
+          },
+          body: payload,
+        }
+      }
+      if (!(res.ok || res.status === 429 || res.status === 403)) {
+        // 5xx / unexpected: fall through to the local env allowlist.
+      }
+      // 403: unknown to FastAPI — still allow a Netlify DEMO_USERNAMES fallback.
+    } catch {
+      // FastAPI unreachable: fall through.
+    }
+  }
+
   const display = resolveUsername(username)
   if (!display) {
     return json(403, { detail: 'Unknown preview username.' })
@@ -39,9 +71,6 @@ exports.handler = async function handler(event) {
     }
   }
 
-  const api = String(process.env.API_URL || process.env.VITE_API_URL || '')
-    .trim()
-    .replace(/\/$/, '')
   if (!api) {
     return json(503, {
       detail:

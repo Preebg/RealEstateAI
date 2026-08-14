@@ -78,6 +78,18 @@ def job_to_dict(job: AnalysisJob) -> dict[str, Any]:
 
 
 def _run_deferred_queue(job_id: str) -> None:
+    from engine import interactive_model_priority
+
+    address = ""
+    with _lock:
+        job = _jobs.get(job_id)
+        if job is not None:
+            address = job.address
+    with interactive_model_priority(address or None):
+        _run_deferred_queue_inner(job_id)
+
+
+def _run_deferred_queue_inner(job_id: str) -> None:
     while True:
         with _lock:
             job = _jobs.get(job_id)

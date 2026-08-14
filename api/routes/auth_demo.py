@@ -3,46 +3,23 @@
 from __future__ import annotations
 
 import os
-import re
 import time
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 
 from api.deps import get_anon_key, get_auth_anon_client, get_auth_service_client
+from api.preview_usernames import (
+    preview_email_for,
+    resolve_preview_username,
+)
 from api.schemas import PreviewLoginRequest, PreviewLoginResponse
 from app_logging import configure_logging, report_error
-from config_secrets import normalize_secret_value
 
 router = APIRouter(tags=["auth"])
 log = configure_logging("auth_demo")
 
-_USERNAME_RE = re.compile(r"^[A-Za-z0-9_]{2,32}$")
-_DEFAULT_USERNAMES = "salifT"
-PREVIEW_EMAIL_DOMAIN = "demo.capeigen.app"
 _hits: dict[str, list[float]] = {}
-
-
-def preview_username_map() -> dict[str, str]:
-    """Lowercase username -> display form from DEMO_USERNAMES (comma-separated)."""
-    raw = normalize_secret_value(os.getenv("DEMO_USERNAMES")) or _DEFAULT_USERNAMES
-    mapping: dict[str, str] = {}
-    for part in raw.split(","):
-        name = part.strip()
-        if name and _USERNAME_RE.fullmatch(name):
-            mapping[name.lower()] = name
-    return mapping
-
-
-def preview_email_for(username_key: str) -> str:
-    return f"{username_key}@{PREVIEW_EMAIL_DOMAIN}"
-
-
-def resolve_preview_username(username: str) -> str | None:
-    cleaned = (username or "").strip()
-    if not _USERNAME_RE.fullmatch(cleaned):
-        return None
-    return preview_username_map().get(cleaned.lower())
 
 
 def _rate_limit(ip: str) -> None:

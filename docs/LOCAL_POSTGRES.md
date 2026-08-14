@@ -67,9 +67,15 @@ python scripts/migrate_supabase_to_local.py
 
 Expect ~905 properties and ~3760 comparables from hosted, plus your local harvest rows. Then hard-refresh the website (it reads `/api/portfolio` from this machine).
 
-Guest share SQL functions are applied from `docker/postgres/init/04_guest_share_functions.sql` during the migrate (existing volumes do not re-run init).
+Guest share SQL functions are applied from `docker/postgres/init/04_guest_share_functions.sql` during the migrate (existing volumes do not re-run init). Demo-account usernames use `docker/postgres/init/05_preview_usernames.sql` the same way.
 
-Schema lives in `docker/postgres/init/` and runs **only on first volume create**. To reset:
+Schema lives in `docker/postgres/init/` and runs **only on first volume create**. To apply `05_preview_usernames.sql` on an existing volume without a full migrate:
+
+```powershell
+Get-Content -Raw .\docker\postgres\init\05_preview_usernames.sql | docker compose exec -T postgres psql -U capeigen -d capeigen -v ON_ERROR_STOP=1
+```
+
+To reset:
 
 ```powershell
 docker compose down

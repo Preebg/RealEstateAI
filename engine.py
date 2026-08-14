@@ -9,7 +9,8 @@ import random
 import re
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from functools import lru_cache
 from dataclasses import dataclass
 from datetime import date
@@ -41,7 +42,12 @@ from rent_comps_analysis import (
     normalize_rent_comps_payload,
 )
 from data_provenance import attach_data_provenance
-from knowledge_base import backfill_property_rent, get_kb_context, lookup_property
+from knowledge_base import (
+    backfill_property_rent,
+    get_kb_context,
+    lookup_property,
+    normalize_address_key,
+)
 from quantum_portfolio import (
     PortfolioInputs,
     score_portfolio,
@@ -308,6 +314,17 @@ DISCOVERY_RPM_PER_MODEL = DEFAULT_MODEL_RPM
 HARVESTER_RPM_WINDOW_SEC = 60.0
 # Max concurrent Stage 2 research workers in the harvester pipeline.
 MAX_CONCURRENT_RESEARCH_AGENTS = HARVESTER_RPM_CAP
+# Individual Search (interactive) always keeps reserved RPM headroom and can
+# pause background harvest workers while a user-entered address is researching.
+RPM_PRIORITY_INTERACTIVE = "interactive"
+RPM_PRIORITY_BACKGROUND = "background"
+INTERACTIVE_RESERVED_RPM = 2
+INTERACTIVE_DEMAND_TTL_SEC = 120.0
+INTERACTIVE_PRIORITY_ADDRESS_TTL_SEC = 6 * 3600.0
+_RPM_META_KEY = "__meta__"
+_rpm_priority_ctx: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "rpm_priority", default=RPM_PRIORITY_BACKGROUND
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -382,8 +399,28 @@ def _rpm_enforcement_enabled() -> bool:
     return True
 
 
+def _resolve_rpm_priority(priority: str | None) -> str:
+    if priority in (RPM_PRIORITY_INTERACTIVE, RPM_PRIORITY_BACKGROUND):
+        return priority
+    current = _rpm_priority_ctx.get()
+    if current in (RPM_PRIORITY_INTERACTIVE, RPM_PRIORITY_BACKGROUND):
+        return current
+    return RPM_PRIORITY_BACKGROUND
+
+
+def _effective_rpm_limit(rpm: int, priority: str) -> int:
+    if priority == RPM_PRIORITY_INTERACTIVE:
+        return max(1, rpm)
+    return max(1, rpm - INTERACTIVE_RESERVED_RPM)
+
+
 class SharedModelRateLimiter:
-    """Cross-process sliding-window RPM limiter with per-model caps."""
+    """Cross-process sliding-window RPM limiter with per-model caps.
+
+    Individual Search uses ``interactive`` priority: it may consume the full
+    per-model RPM budget, and background (harvester) callers yield while a
+    user-entered address is in flight.
+    """
 
     def __init__(
         self,
@@ -407,55 +444,170 @@ class SharedModelRateLimiter:
                 time.sleep(0.05)
         raise TimeoutError(f"Could not acquire model RPM lock: {self._lock_path}")
 
-    def _read_state(self) -> dict[str, list[float]]:
+    def _read_full_state(self) -> tuple[dict[str, list[float]], dict[str, Any]]:
         if not self._state_path.is_file():
-            return {}
+            return {}, {}
         try:
             payload = json.loads(self._state_path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
-            return {}
+            return {}, {}
         if not isinstance(payload, dict):
-            return {}
-        return {
+            return {}, {}
+        raw_meta = payload.get(_RPM_META_KEY)
+        meta = dict(raw_meta) if isinstance(raw_meta, dict) else {}
+        models = {
             str(key): [float(value) for value in values]
             for key, values in payload.items()
-            if isinstance(values, list)
+            if key != _RPM_META_KEY and isinstance(values, list)
         }
+        return models, meta
 
-    def _write_state(self, payload: dict[str, list[float]]) -> None:
+    def _write_full_state(
+        self, models: dict[str, list[float]], meta: dict[str, Any]
+    ) -> None:
+        payload: dict[str, Any] = dict(models)
+        if meta:
+            payload[_RPM_META_KEY] = meta
         tmp = self._state_path.with_suffix(".tmp")
         tmp.write_text(json.dumps(payload), encoding="utf-8")
         os.replace(tmp, self._state_path)
 
+    def _read_state(self) -> dict[str, list[float]]:
+        models, _meta = self._read_full_state()
+        return models
+
+    def _write_state(self, payload: dict[str, list[float]]) -> None:
+        _models, meta = self._read_full_state()
+        self._write_full_state(payload, meta)
+
     def _prune(self, timestamps: list[float], now: float) -> list[float]:
         return [stamp for stamp in timestamps if now - stamp < self._window_sec]
 
-    def try_acquire(self, model: str) -> float | None:
+    def _prune_priority_addresses(
+        self, addresses: dict[str, Any], now: float
+    ) -> dict[str, float]:
+        pruned: dict[str, float] = {}
+        for key, stamp in addresses.items():
+            try:
+                ts = float(stamp)
+            except (TypeError, ValueError):
+                continue
+            if now - ts < INTERACTIVE_PRIORITY_ADDRESS_TTL_SEC:
+                pruned[str(key)] = ts
+        return pruned
+
+    def _interactive_demand_active(
+        self, meta: dict[str, Any], now: float
+    ) -> tuple[bool, float]:
+        waiters = int(meta.get("interactive_waiters") or 0)
+        until = float(meta.get("interactive_until") or 0.0)
+        if waiters > 0 and until > now:
+            return True, until
+        if waiters > 0 and until <= now:
+            meta["interactive_waiters"] = 0
+            meta["interactive_until"] = 0.0
+        return False, 0.0
+
+    def begin_interactive_demand(self, address: str | None = None) -> None:
+        """Mark Individual Search as in-flight so the harvester yields RPM."""
+        if not _rpm_enforcement_enabled():
+            return
+
+        def _inner() -> None:
+            now = time.time()
+            models, meta = self._read_full_state()
+            waiters = int(meta.get("interactive_waiters") or 0) + 1
+            meta["interactive_waiters"] = waiters
+            meta["interactive_until"] = now + INTERACTIVE_DEMAND_TTL_SEC
+            addrs = meta.get("priority_addresses")
+            if not isinstance(addrs, dict):
+                addrs = {}
+            addrs = self._prune_priority_addresses(addrs, now)
+            cleaned = str(address or "").strip()
+            if cleaned:
+                addrs[normalize_address_key(cleaned)] = now
+            meta["priority_addresses"] = addrs
+            self._write_full_state(models, meta)
+
+        self._with_cross_process_lock(_inner)
+
+    def end_interactive_demand(self) -> None:
+        if not _rpm_enforcement_enabled():
+            return
+
+        def _inner() -> None:
+            models, meta = self._read_full_state()
+            waiters = max(0, int(meta.get("interactive_waiters") or 0) - 1)
+            meta["interactive_waiters"] = waiters
+            if waiters == 0:
+                meta["interactive_until"] = 0.0
+            self._write_full_state(models, meta)
+
+        self._with_cross_process_lock(_inner)
+
+    def is_interactive_priority_address(self, address: str) -> bool:
+        cleaned = str(address or "").strip()
+        if not cleaned:
+            return False
+        if not _rpm_enforcement_enabled():
+            return False
+        key = normalize_address_key(cleaned)
+
+        def _inner() -> bool:
+            now = time.time()
+            _models, meta = self._read_full_state()
+            addrs = meta.get("priority_addresses")
+            if not isinstance(addrs, dict):
+                return False
+            stamp = addrs.get(key)
+            if stamp is None:
+                return False
+            try:
+                ts = float(stamp)
+            except (TypeError, ValueError):
+                return False
+            return now - ts < INTERACTIVE_PRIORITY_ADDRESS_TTL_SEC
+
+        return bool(self._with_cross_process_lock(_inner))
+
+    def try_acquire(self, model: str, priority: str | None = None) -> float | None:
         """Return seconds to wait, or None when a slot was acquired."""
         if not _rpm_enforcement_enabled():
             return None
         slug = _MODEL_API_SLUGS.get(model, model)
         rpm = model_rpm_limit(slug)
+        resolved = _resolve_rpm_priority(priority)
+        interactive = resolved == RPM_PRIORITY_INTERACTIVE
 
         def _inner() -> float | None:
             now = time.time()
-            state = self._read_state()
+            state, meta = self._read_full_state()
+            addrs = meta.get("priority_addresses")
+            if isinstance(addrs, dict):
+                meta["priority_addresses"] = self._prune_priority_addresses(addrs, now)
+            demand_active, until = self._interactive_demand_active(meta, now)
             window = self._prune(
                 [float(value) for value in state.get(slug, [])],
                 now,
             )
-            if len(window) < rpm:
+            if not interactive and demand_active:
+                self._write_full_state(state, meta)
+                return max(0.05, until - now)
+            effective_rpm = _effective_rpm_limit(rpm, resolved)
+            if len(window) < effective_rpm:
                 window.append(now)
                 state[slug] = window
-                self._write_state(state)
+                self._write_full_state(state, meta)
                 return None
-            return max(0.0, self._window_sec - (now - window[0]))
+            oldest = window[0] if window else now
+            self._write_full_state(state, meta)
+            return max(0.0, self._window_sec - (now - oldest))
 
         return cast(float | None, self._with_cross_process_lock(_inner))
 
-    def acquire(self, model: str) -> None:
+    def acquire(self, model: str, priority: str | None = None) -> None:
         while True:
-            wait_sec = self.try_acquire(model)
+            wait_sec = self.try_acquire(model, priority=priority)
             if wait_sec is None:
                 return
             time.sleep(max(wait_sec, 0.05))
@@ -475,19 +627,46 @@ def get_shared_model_rate_limiter() -> SharedModelRateLimiter:
         return _shared_model_rate_limiter
 
 
-def acquire_model_rpm(model: str) -> None:
+def acquire_model_rpm(model: str, priority: str | None = None) -> None:
     """Block until a per-model RPM slot is available (shared across CLI jobs)."""
-    get_shared_model_rate_limiter().acquire(model)
+    get_shared_model_rate_limiter().acquire(model, priority=priority)
 
 
-async def acquire_model_rpm_async(model: str) -> None:
+async def acquire_model_rpm_async(model: str, priority: str | None = None) -> None:
     """Async wrapper around the shared per-model RPM limiter."""
     limiter = get_shared_model_rate_limiter()
     while True:
-        wait_sec = await asyncio.to_thread(limiter.try_acquire, model)
+        wait_sec = await asyncio.to_thread(limiter.try_acquire, model, priority)
         if wait_sec is None:
             return
         await asyncio.sleep(max(wait_sec, 0.05))
+
+
+def begin_interactive_model_demand(address: str | None = None) -> None:
+    """Pause harvester RPM use while Individual Search researches an address."""
+    get_shared_model_rate_limiter().begin_interactive_demand(address)
+
+
+def end_interactive_model_demand() -> None:
+    get_shared_model_rate_limiter().end_interactive_demand()
+
+
+def is_interactive_priority_address(address: str) -> bool:
+    """True when Individual Search currently owns this address over the harvester."""
+    return get_shared_model_rate_limiter().is_interactive_priority_address(address)
+
+
+@contextmanager
+def interactive_model_priority(address: str | None = None) -> Iterator[None]:
+    """Give Individual Search first claim on Gemini RPM for this address."""
+    limiter = get_shared_model_rate_limiter()
+    limiter.begin_interactive_demand(address)
+    token = _rpm_priority_ctx.set(RPM_PRIORITY_INTERACTIVE)
+    try:
+        yield
+    finally:
+        _rpm_priority_ctx.reset(token)
+        limiter.end_interactive_demand()
 
 
 class ModelRateLimiter:
@@ -772,6 +951,7 @@ def generate_with_retry(
     use_search: bool = False,
     max_retries: int = MAX_API_RETRIES,
     session: GenaiSession | None = None,
+    priority: str | None = None,
 ) -> str:
     """Call Gemini with exponential backoff and full jitter on retriable errors."""
     active = session or get_session()
@@ -786,7 +966,7 @@ def generate_with_retry(
 
     for attempt in range(max_retries):
         try:
-            acquire_model_rpm(model)
+            acquire_model_rpm(model, priority=priority)
             response = active.client.models.generate_content(
                 model=model,
                 contents=contents,

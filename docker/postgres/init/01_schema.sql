@@ -256,6 +256,18 @@ CREATE INDEX IF NOT EXISTS preview_events_created_at_idx
 CREATE INDEX IF NOT EXISTS preview_events_username_idx
   ON public.preview_events (username, created_at DESC);
 
+CREATE TABLE IF NOT EXISTS public.preview_usernames (
+  username_key text PRIMARY KEY,
+  username text NOT NULL,
+  active boolean NOT NULL DEFAULT true,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  created_by text,
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS preview_usernames_active_idx
+  ON public.preview_usernames (active, username);
+
 CREATE INDEX IF NOT EXISTS idx_properties_timestamp_active
   ON public.properties ("timestamp" DESC);
 CREATE INDEX IF NOT EXISTS idx_properties_outreach_queue

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { apiFetch, type AnalysisJob, type FinanceResult } from '../lib/api'
@@ -31,7 +31,7 @@ export function SearchPage() {
     enabled: Boolean(jobId),
     refetchInterval: (q) => {
       const s = q.state.data?.status
-      return s === 'done' || s === 'error' ? false : 2000
+      return s === 'done' || s === 'error' ? false : 1500
     },
     queryFn: () => apiFetch<AnalysisJob>(`/api/analysis/${jobId}`),
   })
@@ -210,8 +210,17 @@ export function SearchPage() {
   const total = jobQuery.data?.deferred_tasks_total || 0
   const done = Math.max(total - deferred.length, 0)
   const fromKb = Boolean(jobQuery.data?.from_kb || (property && !jobProperty && kbMatch))
+  const jobStatus = jobQuery.data?.status
+  const researching =
+    busy ||
+    (Boolean(jobId) && !property && jobStatus !== 'done' && jobStatus !== 'error')
   const stillComputing =
     jobQuery.data?.status === 'running' && (deferred.length > 0 || !property)
+
+  function onSearchSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    void startAnalysis()
+  }
 
   return (
     <PropertyAnalysisView
@@ -235,21 +244,22 @@ export function SearchPage() {
             </p>
           </header>
 
-          <div className="relative rounded-2xl border border-border bg-white p-4 shadow-sm">
+          <form className="relative rounded-2xl border border-border bg-white p-4 shadow-sm" onSubmit={onSearchSubmit}>
             <div className="flex flex-col gap-3 sm:flex-row">
               <input
                 value={query}
                 onChange={(e) => searchAddresses(e.target.value)}
                 placeholder="123 Main St, Austin, TX"
+                autoComplete="off"
+                name="address"
                 className="flex-1 rounded-lg border border-border px-3 py-2 outline-none focus:border-primary"
               />
               <button
-                type="button"
-                disabled={busy}
-                onClick={() => startAnalysis()}
+                type="submit"
+                disabled={busy || researching}
                 className="rounded-lg bg-primary px-5 py-2 font-semibold text-white hover:bg-primary-hover disabled:opacity-60"
               >
-                {busy ? 'Starting…' : 'Analyze Property'}
+                {busy ? 'Starting…' : researching ? 'Researching…' : 'Analyze Property'}
               </button>
             </div>
             {suggestions.length > 0 && (
@@ -267,13 +277,18 @@ export function SearchPage() {
                 ))}
               </ul>
             )}
-          </div>
+          </form>
 
           {error && <p className="text-sm text-red-600">{error}</p>}
           {jobQuery.data?.error && (
             <p className="text-sm text-amber-700">{jobQuery.data.error}</p>
           )}
-          {kbQuery.isLoading && paramAddress && !property && (
+          {researching && (
+            <p className="text-sm text-muted">
+              Researching {query || 'this address'}… Harvesting pauses so this search goes first.
+            </p>
+          )}
+          {kbQuery.isLoading && paramAddress && !property && !researching && (
             <p className="text-sm text-muted">Loading property from catalog…</p>
           )}
 

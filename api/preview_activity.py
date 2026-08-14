@@ -6,7 +6,7 @@ from typing import Any
 
 from postgrest.exceptions import APIError
 
-from api.routes.auth_demo import PREVIEW_EMAIL_DOMAIN, resolve_preview_username
+from api.preview_usernames import PREVIEW_EMAIL_DOMAIN, resolve_preview_username
 from authenticate import get_db_client, get_service_client
 from app_logging import configure_logging, report_error
 

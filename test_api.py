@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from fastapi.testclient import TestClient
+import pytest
 
 from api.main import app
 from api.routes.auth_demo import resolve_preview_username
@@ -34,7 +35,15 @@ def test_preview_login_rejects_invalid_username() -> None:
     assert response.status_code in {403, 422}
 
 
-def test_preview_username_allowlist() -> None:
+def test_preview_username_allowlist(monkeypatch: pytest.MonkeyPatch) -> None:
+    from api import preview_usernames
+
+    monkeypatch.setattr(preview_usernames, "_db_username_rows", lambda: [])
+    monkeypatch.setattr(
+        preview_usernames,
+        "env_username_map",
+        lambda: {"salift": "salifT"},
+    )
     assert resolve_preview_username("salifT") == "salifT"
     assert resolve_preview_username("salift") == "salifT"
     assert resolve_preview_username("nope") is None
@@ -48,6 +57,38 @@ def test_preview_events_require_auth() -> None:
 def test_preview_activity_requires_auth() -> None:
     response = client.get("/api/preview/activity")
     assert response.status_code == 401
+
+
+def test_preview_accounts_require_auth() -> None:
+    response = client.get("/api/preview/accounts")
+    assert response.status_code == 401
+    response = client.post("/api/preview/accounts", json={"username": "newDemo"})
+    assert response.status_code == 401
+    response = client.delete("/api/preview/accounts/newDemo")
+    assert response.status_code == 401
+
+
+def test_removed_username_overrides_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    from api import preview_usernames
+
+    monkeypatch.setattr(
+        preview_usernames,
+        "env_username_map",
+        lambda: {"salift": "salifT", "newdemo": "newDemo"},
+    )
+    monkeypatch.setattr(
+        preview_usernames,
+        "_db_username_rows",
+        lambda: [
+            {
+                "username_key": "newdemo",
+                "username": "newDemo",
+                "active": False,
+            }
+        ],
+    )
+    assert resolve_preview_username("salifT") == "salifT"
+    assert resolve_preview_username("newDemo") is None
 
 
 def test_portfolio_requires_auth() -> None:

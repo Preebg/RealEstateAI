@@ -33,6 +33,29 @@ class PreviewEventListResponse(BaseModel):
     count: int
 
 
+class PreviewAccountCreateRequest(BaseModel):
+    username: str = Field(min_length=2, max_length=32)
+
+
+class PreviewAccount(BaseModel):
+    username: str
+    active: bool
+    source: str
+    created_at: str | None = None
+    created_by: str | None = None
+    last_seen: str | None = None
+    event_count: int = 0
+    login_count: int = 0
+    analyze_count: int = 0
+    compare_count: int = 0
+    pdf_count: int = 0
+
+
+class PreviewAccountListResponse(BaseModel):
+    accounts: list[PreviewAccount]
+    count: int
+
+
 class PreviewLoginRequest(BaseModel):
     username: str = Field(min_length=2, max_length=32)
 

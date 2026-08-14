@@ -4,14 +4,34 @@ from __future__ import annotations
 
 from typing import Any
 
-from engine import get_final_analysis, get_initial_analysis, safe_float
+from engine import (
+    get_final_analysis,
+    get_initial_analysis,
+    interactive_model_priority,
+    safe_float,
+)
 from finance import analyze_investment
-from knowledge_base import lookup_property
+from knowledge_base import lookup_property, save_harvest_property
 from services.deferred_analysis import build_deferred_task_queue
 
 
 class AnalysisError(Exception):
     """Raised when property research cannot produce a usable listing."""
+
+
+def _attach_saved_catalog_id(property_data: dict[str, Any], save_result: Any) -> None:
+    """Copy the canonical row id from a harvest save onto the in-memory listing."""
+    rows = getattr(save_result, "data", None)
+    if not isinstance(rows, list) or not rows:
+        return
+    row = rows[0]
+    if not isinstance(row, dict):
+        return
+    property_id = row.get("id")
+    if not property_id:
+        return
+    property_data["id"] = str(property_id)
+    property_data["property_id"] = str(property_id)
 
 
 def start_property_analysis(
@@ -24,48 +44,58 @@ def start_property_analysis(
     Headless fast path: KB pull or AI research, then prepare deferred task list.
 
     Returns ``{property_data, deferred_tasks, from_kb}`` without UI state.
+    Individual Search takes Gemini RPM priority over the harvester for this
+    address, and a successful live research pass is saved to the catalog so
+    harvest workers skip (and do not overwrite) it.
     """
     cleaned = str(address or "").strip()
     if not cleaned:
         raise AnalysisError("Address is required")
 
-    cached = lookup_property(cleaned, user_id=user_id)
-    if cached:
-        # Catalog rows are already underwritten. Skip get_final_analysis (geocode +
-        # Gemini cash-flow recheck) so Individual Search does not sit on "still
-        # computing" after the listing is already on screen.
-        property_data = dict(cached)
-        property_data["from_kb"] = True
-        property_data["address"] = cleaned
-        queue = build_deferred_task_queue(property_data, guest_mode=guest_mode)
-        return {
-            "property_data": property_data,
-            "deferred_tasks": queue,
-            "from_kb": True,
-        }
+    with interactive_model_priority(cleaned):
+        cached = lookup_property(cleaned, user_id=user_id)
+        if cached:
+            # Catalog rows are already underwritten. Skip get_final_analysis (geocode +
+            # Gemini cash-flow recheck) so Individual Search does not sit on "still
+            # computing" after the listing is already on screen.
+            property_data = dict(cached)
+            property_data["from_kb"] = True
+            property_data["address"] = cleaned
+            queue = build_deferred_task_queue(property_data, guest_mode=guest_mode)
+            return {
+                "property_data": property_data,
+                "deferred_tasks": queue,
+                "from_kb": True,
+            }
 
-    initial_data, from_kb, research_results = get_initial_analysis(cleaned)
+        initial_data, from_kb, research_results = get_initial_analysis(cleaned)
 
-    if not from_kb and safe_float(initial_data.get("price")) == 0:
-        raise AnalysisError(
-            "The AI could not find a valid listing price. "
-            "Please verify the address and try again."
+        if not from_kb and safe_float(initial_data.get("price")) == 0:
+            raise AnalysisError(
+                "The AI could not find a valid listing price. "
+                "Please verify the address and try again."
+            )
+
+        final_result = get_final_analysis(
+            initial_data,
+            cleaned,
+            research_results,
+            skip_comps=True,
         )
-
-    final_result = get_final_analysis(
-        initial_data,
-        cleaned,
-        research_results,
-        skip_comps=True,
-    )
-    final_result["from_kb"] = from_kb
-    final_result["address"] = cleaned
-    queue = build_deferred_task_queue(final_result, guest_mode=guest_mode)
-    return {
-        "property_data": final_result,
-        "deferred_tasks": queue,
-        "from_kb": from_kb,
-    }
+        final_result["from_kb"] = from_kb
+        final_result["address"] = cleaned
+        if not from_kb:
+            try:
+                saved = save_harvest_property(final_result, user_id=user_id)
+                _attach_saved_catalog_id(final_result, saved)
+            except Exception:  # noqa: BLE001 — keep the on-screen analysis
+                pass
+        queue = build_deferred_task_queue(final_result, guest_mode=guest_mode)
+        return {
+            "property_data": final_result,
+            "deferred_tasks": queue,
+            "from_kb": from_kb,
+        }
 
 
 def initialize_hitl_baselines(property_info: dict[str, Any], monthly_rent: float, ai_maint_percent: float) -> None:

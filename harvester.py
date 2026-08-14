@@ -467,6 +467,18 @@ async def _research_listing(
         log.info("listing_already_scanned", address=address)
         return None
 
+    user_priority = await asyncio.to_thread(
+        engine.is_interactive_priority_address, address
+    )
+    if user_priority:
+        print(f"  [research] SKIP {address} — Individual Search has priority")
+        async with report_lock:
+            report["already_scanned"].append(
+                {"address": address, "reason": "Individual Search priority"}
+            )
+        log.info("listing_user_search_priority", address=address)
+        return None
+
     log.info("listing_research_start", address=address, market_city=market_city)
     print(f"  [research] START {address} ({market_city})")
 
@@ -584,6 +596,24 @@ async def _synthesize_listing(
     """Stage 3 + finance + quantum + KB save for one property."""
     address = job.address
     market_city = job.market_city
+    user_priority = await asyncio.to_thread(
+        engine.is_interactive_priority_address, address
+    )
+    already_complete = await asyncio.to_thread(
+        is_property_harvest_complete, address, user_id=admin_user_id
+    )
+    if user_priority or already_complete:
+        reason = (
+            "Individual Search has priority"
+            if user_priority
+            else "already in knowledge base"
+        )
+        print(f"  [synthesis] SKIP {address} — {reason}")
+        async with report_lock:
+            report["already_scanned"].append({"address": address, "reason": reason})
+        log.info("listing_synthesis_skipped_priority", address=address, reason=reason)
+        return
+
     print(f"  [synthesis] START {address} ({market_city})")
 
     geospatial = dict(job.geospatial or {})
@@ -671,6 +701,23 @@ async def _synthesize_listing(
     final_data = await asyncio.to_thread(
         engine.backfill_year_built_if_needed, final_data, address
     )
+
+    user_priority = await asyncio.to_thread(
+        engine.is_interactive_priority_address, address
+    )
+    already_complete = await asyncio.to_thread(
+        is_property_harvest_complete, address, user_id=admin_user_id
+    )
+    if user_priority or already_complete:
+        reason = (
+            "Individual Search has priority"
+            if user_priority
+            else "already in knowledge base"
+        )
+        print(f"  [synthesis] SKIP SAVE {address} — {reason}")
+        async with report_lock:
+            report["already_scanned"].append({"address": address, "reason": reason})
+        return
 
     save_result = await asyncio.to_thread(
         save_harvest_property, final_data, user_id=admin_user_id

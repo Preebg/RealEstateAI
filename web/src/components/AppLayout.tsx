@@ -1,5 +1,5 @@
 import { NavLink, Outlet, useNavigate } from 'react-router-dom'
-import { Map, Search, GitCompare, FlaskConical, LogOut, Menu, X } from 'lucide-react'
+import { Map, Search, GitCompare, FlaskConical, Users, LogOut, Menu, X } from 'lucide-react'
 import { useState } from 'react'
 import { useAuthStore } from '../lib/authStore'
 import { isAdminUser } from '../lib/admin'
@@ -17,7 +17,10 @@ const nav: Array<{
   { to: '/compare', label: 'Compare', icon: GitCompare },
 ]
 
-const adminNav: typeof nav = [{ to: '/validation', label: 'Model Validation', icon: FlaskConical }]
+const adminNav: typeof nav = [
+  { to: '/activity', label: 'Demo accounts', icon: Users },
+  { to: '/validation', label: 'Model Validation', icon: FlaskConical },
+]
 
 export function AppLayout() {
   const { user, signOut } = useAuthStore()
@@ -114,7 +117,7 @@ export function AppLayout() {
                 )
               }
             >
-              Preview
+              Demo
             </NavLink>
           )}
         </header>

@@ -13,7 +13,17 @@ from api.preview_activity import (
     preview_username_for_user,
     record_preview_event,
 )
-from api.schemas import PreviewEventCreateRequest, PreviewEventListResponse
+from api.preview_usernames import (
+    add_preview_username,
+    list_preview_accounts,
+    remove_preview_username,
+)
+from api.schemas import (
+    PreviewAccountCreateRequest,
+    PreviewAccountListResponse,
+    PreviewEventCreateRequest,
+    PreviewEventListResponse,
+)
 
 router = APIRouter(tags=["preview"])
 
@@ -50,3 +60,45 @@ def preview_activity(
 ) -> PreviewEventListResponse:
     events = list_preview_events(username=username, limit=limit)
     return PreviewEventListResponse(events=events, count=len(events))
+
+
+@router.get("/api/preview/accounts", response_model=PreviewAccountListResponse)
+def preview_accounts(_admin: AdminUser) -> PreviewAccountListResponse:
+    accounts = list_preview_accounts()
+    return PreviewAccountListResponse(accounts=accounts, count=len(accounts))
+
+
+@router.post("/api/preview/accounts", response_model=PreviewAccountListResponse)
+def create_preview_account(
+    body: PreviewAccountCreateRequest,
+    admin: AdminUser,
+) -> PreviewAccountListResponse:
+    try:
+        add_preview_username(
+            body.username,
+            created_by=str(admin.get("email") or admin.get("id") or ""),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    accounts = list_preview_accounts()
+    return PreviewAccountListResponse(accounts=accounts, count=len(accounts))
+
+
+@router.delete("/api/preview/accounts/{username}", response_model=PreviewAccountListResponse)
+def delete_preview_account(
+    username: str,
+    admin: AdminUser,
+) -> PreviewAccountListResponse:
+    try:
+        remove_preview_username(
+            username,
+            created_by=str(admin.get("email") or admin.get("id") or ""),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    accounts = list_preview_accounts()
+    return PreviewAccountListResponse(accounts=accounts, count=len(accounts))

@@ -50,6 +50,7 @@ from services.supabase_local_migration import (  # noqa: E402
 )
 
 GUEST_SQL = ROOT / "docker" / "postgres" / "init" / "04_guest_share_functions.sql"
+PREVIEW_USERNAMES_SQL = ROOT / "docker" / "postgres" / "init" / "05_preview_usernames.sql"
 
 
 def _env(name: str) -> str | None:
@@ -114,12 +115,12 @@ def upsert_rows(client: Client, table: str, rows: list[dict[str, Any]]) -> None:
         )
 
 
-def apply_guest_functions() -> None:
-    if not GUEST_SQL.is_file():
-        raise SystemExit(f"Missing {GUEST_SQL}")
+def apply_sql_file(path: Path, label: str) -> None:
+    if not path.is_file():
+        raise SystemExit(f"Missing {path}")
     user = _env("POSTGRES_USER") or "capeigen"
     db = _env("POSTGRES_DB") or "capeigen"
-    sql = GUEST_SQL.read_text(encoding="utf-8")
+    sql = path.read_text(encoding="utf-8")
     cmd = [
         "docker",
         "compose",
@@ -134,7 +135,7 @@ def apply_guest_functions() -> None:
         "-v",
         "ON_ERROR_STOP=1",
     ]
-    print("Applying guest share SQL functions to local Postgres...", flush=True)
+    print(f"Applying {label} to local Postgres...", flush=True)
     result = subprocess.run(
         cmd,
         input=sql,
@@ -146,11 +147,16 @@ def apply_guest_functions() -> None:
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "").strip()
         raise SystemExit(
-            "Failed to apply guest share functions via docker compose exec postgres.\n"
+            f"Failed to apply {label} via docker compose exec postgres.\n"
             f"{detail}\n"
             "Start the stack: docker compose up -d postgres postgrest rest-gateway"
         )
-    print("Guest share functions applied.", flush=True)
+    print(f"{label} applied.", flush=True)
+
+
+def apply_guest_functions() -> None:
+    apply_sql_file(GUEST_SQL, "guest share SQL functions")
+    apply_sql_file(PREVIEW_USERNAMES_SQL, "preview usernames table")
 
 
 def build_plans(source: Client, dest: Client) -> tuple[list[CopyPlan], set[str]]:
