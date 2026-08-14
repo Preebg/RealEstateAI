@@ -294,6 +294,8 @@ DISCOVERY_MAP_MAX_REMOTE_CALLS = 6
 DISCOVERY_TOPUP_MAX_ROUNDS = 3
 MAX_SYNTHESIS_PRICE = 400_000
 MAX_API_RETRIES = 5
+# Same-model 429 attempts before the discovery/synthesis chain switches models.
+MAX_SAME_MODEL_RATE_LIMIT_ATTEMPTS = 2
 BACKOFF_BASE_SEC = 4.0
 BACKOFF_MAX_SEC = 60.0
 BACKOFF_MULTIPLIER = 2.0
@@ -599,6 +601,29 @@ def is_daily_quota_exhausted(error: BaseException) -> bool:
     return False
 
 
+def should_fallback_to_next_model(error: BaseException) -> bool:
+    """True when this Gemini model is rate-limited or out of quota — try the next chain tier."""
+    if is_daily_quota_exhausted(error):
+        return True
+    return _has_quota_client_error(error)
+
+
+def _should_retry_same_model(
+    error: BaseException,
+    attempt: int,
+    max_retries: int,
+) -> bool:
+    """Whether to retry the same model. Persistent 429s stop early so callers can switch models."""
+    if is_daily_quota_exhausted(error):
+        return False
+    if not _is_retriable(error):
+        return False
+    if _has_quota_client_error(error):
+        cap = min(max_retries, MAX_SAME_MODEL_RATE_LIMIT_ATTEMPTS)
+        return attempt < cap - 1
+    return attempt < max_retries - 1
+
+
 def _model_supports_grounding(model: str) -> bool:
     """Google Search grounding is available on Gemini and Gemma 4 models."""
     return model.startswith("gemini") or model.startswith("gemma-4")
@@ -801,7 +826,7 @@ def generate_with_retry(
                     retriable=False,
                 )
                 raise
-            will_retry = _is_retriable(e) and attempt < max_retries - 1
+            will_retry = _should_retry_same_model(e, attempt, max_retries)
             if will_retry:
                 delay_sec = retry_delay_seconds(attempt)
                 total_wait_sec += delay_sec
@@ -916,7 +941,7 @@ def _generate_with_grounding_retry(
                     retriable=False,
                 )
                 raise
-            will_retry = _is_retriable(e) and attempt < max_retries - 1
+            will_retry = _should_retry_same_model(e, attempt, max_retries)
             if will_retry:
                 delay_sec = retry_delay_seconds(attempt)
                 total_wait_sec += delay_sec
@@ -1013,7 +1038,7 @@ async def generate_with_retry_async(
                     retriable=False,
                 )
                 raise
-            will_retry = _is_retriable(e) and attempt < max_retries - 1
+            will_retry = _should_retry_same_model(e, attempt, max_retries)
             if will_retry:
                 delay_sec = retry_delay_seconds(attempt)
                 total_wait_sec += delay_sec
@@ -1640,7 +1665,7 @@ def _generate_with_map_grounding_retry(
             last_error = e
             if is_daily_quota_exhausted(e):
                 raise
-            will_retry = _is_retriable(e) and attempt < max_retries - 1
+            will_retry = _should_retry_same_model(e, attempt, max_retries)
             if will_retry:
                 delay_sec = retry_delay_seconds(attempt)
                 total_wait_sec += delay_sec
@@ -2966,7 +2991,7 @@ def _discover_listings_per_market(
         _discovery_log(
             f"[discovery] Round {round_idx}/{DISCOVERY_TOPUP_MAX_ROUNDS}: "
             f"running {len(plan)} regional discovery agent(s) {run_mode}: "
-            f"{region_summary} (≤{DISCOVERY_RPM_PER_MODEL} RPM)..."
+            f"{region_summary} (<={DISCOVERY_RPM_PER_MODEL} RPM)..."
         )
 
         results = _execute_region_discovery_plan(
@@ -3152,7 +3177,7 @@ def discover_hot_market_listings(
             )
         except _DISCOVERY_API_ERRORS as exc:
             if (
-                is_daily_quota_exhausted(exc)
+                should_fallback_to_next_model(exc)
                 and tier_idx < len(models_to_try) - 1
             ):
                 next_model = models_to_try[tier_idx + 1]
@@ -3163,7 +3188,7 @@ def discover_hot_market_listings(
                     error=str(exc),
                 )
                 _discovery_log(
-                    f"[discovery] {active_model} daily quota exhausted; "
+                    f"[discovery] {active_model} rate-limited or out of quota (429); "
                     f"switching to {next_model}..."
                 )
                 _discovery_log(

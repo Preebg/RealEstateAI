@@ -41,6 +41,7 @@ from engine import (  # noqa: E402
     DEFAULT_MODEL_RPM,
     SharedModelRateLimiter,
     is_daily_quota_exhausted,
+    should_fallback_to_next_model,
     model_rpm_limit,
     research_property,
     is_disallowed_property_type,
@@ -408,6 +409,51 @@ class TestDailyQuotaDetection(unittest.TestCase):
     def test_ignores_non_quota_client_errors(self):
         err = errors.ClientError(400, {"error": {"message": "Invalid request"}})
         self.assertFalse(is_daily_quota_exhausted(err))
+        self.assertFalse(should_fallback_to_next_model(err))
+
+    def test_generic_429_triggers_model_fallback(self) -> None:
+        err = errors.ClientError(
+            429,
+            {"error": {"message": "Too Many Requests"}},
+        )
+        self.assertFalse(is_daily_quota_exhausted(err))
+        self.assertTrue(should_fallback_to_next_model(err))
+
+    def test_generate_with_retry_stops_after_two_generic_429s(self) -> None:
+        from engine import generate_with_retry
+
+        rate_err = errors.ClientError(
+            429,
+            {"error": {"message": "Too Many Requests"}},
+        )
+        with patch("engine.get_session") as mock_session:
+            mock_gen = mock_session.return_value.client.models.generate_content
+            mock_gen.side_effect = rate_err
+            with patch("engine.time.sleep"):
+                with self.assertRaises(errors.ClientError):
+                    generate_with_retry(DISCOVERY_MODEL, "prompt")
+            self.assertEqual(mock_gen.call_count, 2)
+
+    def test_discovery_switches_to_flash_lite_on_generic_429(self) -> None:
+        payload = json.dumps([_VERIFIED_DISCOVERY_ROW])
+        rate_err = errors.ClientError(
+            429,
+            {"error": {"message": "Too Many Requests"}},
+        )
+        calls: list[str] = []
+
+        def fake_generate(model, contents, **kwargs):
+            calls.append(model)
+            if model == "gemini-2.5-flash":
+                raise rate_err
+            return _discovery_generate_return(payload)
+
+        with patch("engine._generate_with_grounding_retry", side_effect=fake_generate):
+            listings = discover_hot_market_listings()
+        self.assertEqual(len(listings), 1)
+        self.assertEqual(calls[0], DISCOVERY_MODEL)
+        self.assertIn("gemini-2.5-flash-lite", calls)
+        self.assertEqual(listings[0].get("discovery_model"), "gemini-2.5-flash-lite")
 
     def test_generate_with_retry_fails_fast_on_daily_quota(self):
         from engine import generate_with_retry

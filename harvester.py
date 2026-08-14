@@ -153,7 +153,7 @@ def execute_with_rpd_fallback(
         # another retry loop here (that blocked RPD fallback for 15+ attempts).
         return func(*args, **kwargs)
     except _HARVESTER_API_ERRORS as exc:
-        if not engine.is_daily_quota_exhausted(exc):
+        if not engine.should_fallback_to_next_model(exc):
             raise
         if current_model == fallback_model:
             raise
