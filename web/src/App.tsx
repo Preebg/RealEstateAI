@@ -1,5 +1,6 @@
 import { Navigate, Outlet, Route, Routes, useLocation, useSearchParams } from 'react-router-dom'
 import { useEffect } from 'react'
+import { isAdminUser } from './lib/admin'
 import { useAuthStore } from './lib/authStore'
 import { AppLayout } from './components/AppLayout'
 import { PreviewActivityTracker } from './components/PreviewActivityTracker'
@@ -23,6 +24,19 @@ function RequireAuth() {
     )
   }
   if (!session) return <Navigate to="/login" replace />
+  return <Outlet />
+}
+
+function RequireAdmin() {
+  const { user, loading } = useAuthStore()
+  if (loading) {
+    return (
+      <div className="flex min-h-screen items-center justify-center text-muted">
+        Loading CapEigen…
+      </div>
+    )
+  }
+  if (!isAdminUser(user)) return <Navigate to="/" replace />
   return <Outlet />
 }
 
@@ -58,8 +72,10 @@ export default function App() {
             <Route index element={<HomePage />} />
             <Route path="search" element={<SearchPage />} />
             <Route path="compare" element={<ComparePage />} />
-            <Route path="validation" element={<ValidationPage />} />
-            <Route path="activity" element={<ActivityPage />} />
+            <Route element={<RequireAdmin />}>
+              <Route path="validation" element={<ValidationPage />} />
+              <Route path="activity" element={<ActivityPage />} />
+            </Route>
           </Route>
         </Route>
         <Route path="*" element={<Navigate to="/" replace />} />

@@ -1,10 +1,12 @@
 import {
   analyzeInvestment,
+  calculateOneYearRoi,
   normalizeMonthlyInsurance,
   normalizePercentRate,
   normalizeTaxRatePercent,
   type FinanceMetrics,
 } from './finance'
+import type { PortfolioItem } from './api'
 import { buildPropertyPdfBlob, pdfDownloadFilename } from './propertyPdf'
 
 export type Assumptions = {
@@ -167,6 +169,77 @@ export function forecastYearlyValues(property: Record<string, unknown>): number[
   if (price <= 0 || !hasRate) return []
   const rate = num(property.forecast_rate ?? property.forecast_growth)
   return Array.from({ length: 11 }, (_, i) => price * (1 + rate / 100) ** i)
+}
+
+export type ComparisonRow = {
+  address: string
+  property_id: string
+  price: number | null
+  monthly_rent: number | null
+  monthly_net_cash_flow: number | null
+  cap_rate: number | null
+  cash_on_cash: number | null
+  one_year_roi: number | null
+  location_score: number | null
+  quantum_overall: number | null
+  strategy: string
+}
+
+function finiteOrNull(value: number): number | null {
+  return Number.isFinite(value) ? value : null
+}
+
+export function comparisonRowFromProperty(property: Record<string, unknown>): ComparisonRow {
+  const hydrated = hydrateProperty(property)
+  const assumptions = assumptionsFromProperty(hydrated)
+  const finance = financeFromProperty(hydrated, assumptions)
+  const price = num(hydrated.price ?? hydrated.predicted_value)
+  const forecastRate = num(hydrated.forecast_rate)
+  const roi = calculateOneYearRoi({
+    currentPrice: price,
+    forecastRatePct: forecastRate,
+    monthlyNetCashFlow: finance.monthly_net_cash_flow,
+    downPaymentPct: assumptions.down_payment_pct,
+  })
+  const quantum = quantumPayload(hydrated.quantum_risk)
+  let quantumOverall: number | null = quantum?.overall_success_pct ?? null
+  if (quantumOverall == null && hydrated.quantum_risk_score != null) {
+    quantumOverall = finiteOrNull(num(hydrated.quantum_risk_score))
+  }
+  const strategy =
+    hydrated.strategy != null && String(hydrated.strategy).trim()
+      ? String(hydrated.strategy)
+      : '—'
+  return {
+    address: String(hydrated.address || 'Unknown'),
+    property_id: String(hydrated.property_id || hydrated.id || ''),
+    price: price > 0 ? price : null,
+    monthly_rent: assumptions.monthly_rent > 0 ? assumptions.monthly_rent : null,
+    monthly_net_cash_flow: finiteOrNull(finance.monthly_net_cash_flow),
+    cap_rate: finiteOrNull(finance.cap_rate),
+    cash_on_cash: finiteOrNull(finance.cash_on_cash),
+    one_year_roi: finiteOrNull(roi),
+    location_score:
+      hydrated.location_score != null ? finiteOrNull(num(hydrated.location_score)) : null,
+    quantum_overall: quantumOverall,
+    strategy,
+  }
+}
+
+export function comparisonRowFromPortfolioItem(item: PortfolioItem): ComparisonRow {
+  return {
+    address: item.address || 'Unknown',
+    property_id: item.id || '',
+    price: item.price ?? item.predicted_value ?? null,
+    monthly_rent: item.rent ?? null,
+    monthly_net_cash_flow: item.monthly_cash_flow ?? null,
+    cap_rate: null,
+    cash_on_cash: null,
+    one_year_roi: item.one_year_roi ?? null,
+    location_score: item.location_score ?? null,
+    quantum_overall: item.quantum_success ?? null,
+    strategy: item.strategy || '—',
+  }
 }
 
 export function downloadPropertyPdf(opts: {

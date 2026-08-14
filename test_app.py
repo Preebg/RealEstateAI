@@ -2143,6 +2143,30 @@ class TestPropertyComparison(unittest.TestCase):
         self.assertLessEqual(metrics["quantum_overall"], 100.0)
 
 
+class TestAdminAccess(unittest.TestCase):
+    def test_admin_email_is_recognized(self):
+        import os
+        from unittest.mock import patch
+
+        from api.deps import user_is_admin
+
+        with patch.dict(os.environ, {"ADMIN_USER_ID": "", "ADMIN_EMAIL": ""}, clear=False):
+            self.assertTrue(user_is_admin({"id": "other", "email": "preebg09@gmail.com"}))
+            self.assertTrue(user_is_admin({"id": "other", "email": "  PREEBG09@GMAIL.COM  "}))
+            self.assertFalse(user_is_admin({"id": "other", "email": "someone@gmail.com"}))
+            self.assertFalse(user_is_admin(None))
+
+    def test_admin_user_id_env_still_counts(self):
+        import os
+        from unittest.mock import patch
+
+        from api.deps import user_is_admin
+
+        with patch.dict(os.environ, {"ADMIN_USER_ID": "admin-uuid", "ADMIN_EMAIL": ""}, clear=False):
+            self.assertTrue(user_is_admin({"id": "admin-uuid", "email": "not-admin@example.com"}))
+            self.assertFalse(user_is_admin({"id": "other-uuid", "email": "not-admin@example.com"}))
+
+
 class TestUserSavedProperties(unittest.TestCase):
     def test_save_property_to_user_account_bookmarks_existing_property(self):
         from unittest.mock import MagicMock, patch

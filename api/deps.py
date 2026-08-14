@@ -150,11 +150,28 @@ async def get_user_client(
     return data_client_for_request(credentials.credentials)
 
 
+ADMIN_EMAIL = "preebg09@gmail.com"
+
+
+def user_is_admin(user: dict[str, Any] | None) -> bool:
+    """True for ADMIN_USER_ID or the hardcoded admin Gmail (plus ADMIN_EMAIL extras)."""
+    if not user:
+        return False
+    admin_id = normalize_secret_value(os.getenv("ADMIN_USER_ID"))
+    if admin_id and user.get("id") == admin_id:
+        return True
+    emails = {ADMIN_EMAIL.lower()}
+    extra = normalize_secret_value(os.getenv("ADMIN_EMAIL"))
+    if extra:
+        emails.update(part.strip().lower() for part in extra.split(",") if part.strip())
+    user_email = str(user.get("email") or "").strip().lower()
+    return bool(user_email and user_email in emails)
+
+
 async def get_admin_user(
     user: Annotated[dict[str, Any], Depends(get_current_user)],
 ) -> dict[str, Any]:
-    admin_id = normalize_secret_value(os.getenv("ADMIN_USER_ID"))
-    if not admin_id or user.get("id") != admin_id:
+    if not user_is_admin(user):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Admin access required",

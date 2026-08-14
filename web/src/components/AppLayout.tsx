@@ -1,29 +1,30 @@
 import { NavLink, Outlet, useNavigate } from 'react-router-dom'
 import { Map, Search, GitCompare, FlaskConical, LogOut, Menu, X } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { useAuthStore } from '../lib/authStore'
-import { apiFetch } from '../lib/api'
+import { isAdminUser } from '../lib/admin'
 import { trackPreviewEvent } from '../lib/previewActivity'
 import { clsx } from 'clsx'
 
-const nav = [
+const nav: Array<{
+  to: string
+  label: string
+  icon: typeof Map
+  end?: boolean
+}> = [
   { to: '/', label: 'Home', icon: Map, end: true },
   { to: '/search', label: 'Individual Search', icon: Search },
   { to: '/compare', label: 'Compare', icon: GitCompare },
-  { to: '/validation', label: 'Model Validation', icon: FlaskConical },
 ]
+
+const adminNav: typeof nav = [{ to: '/validation', label: 'Model Validation', icon: FlaskConical }]
 
 export function AppLayout() {
   const { user, signOut } = useAuthStore()
   const navigate = useNavigate()
   const [open, setOpen] = useState(false)
-  const [isAdmin, setIsAdmin] = useState(false)
-
-  useEffect(() => {
-    void apiFetch<{ is_admin?: boolean }>('/api/me')
-      .then((me) => setIsAdmin(Boolean(me.is_admin)))
-      .catch(() => setIsAdmin(false))
-  }, [user?.id])
+  const isAdmin = isAdminUser(user)
+  const navItems = isAdmin ? [...nav, ...adminNav] : nav
 
   return (
     <div className="min-h-screen lg:grid lg:grid-cols-[260px_1fr]">
@@ -39,7 +40,7 @@ export function AppLayout() {
             <p className="mt-1 text-sm text-muted">AI rental underwriting</p>
           </div>
           <nav className="flex flex-1 flex-col gap-1">
-            {nav.map(({ to, label, icon: Icon, end }) => (
+            {navItems.map(({ to, label, icon: Icon, end }) => (
               <NavLink
                 key={to}
                 to={to}

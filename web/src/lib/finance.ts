@@ -122,6 +122,26 @@ export function analyzeInvestment(input: FinanceAssumptions): FinanceMetrics {
   }
 }
 
+/** One-year ROI aligned with finance.calculate_one_year_roi. */
+export function calculateOneYearRoi(opts: {
+  currentPrice: number
+  forecastRatePct: number
+  monthlyNetCashFlow: number
+  downPaymentPct?: number
+}): number {
+  const currentPrice = opts.currentPrice
+  const forecastRatePct = opts.forecastRatePct
+  const monthlyNetCashFlow = opts.monthlyNetCashFlow
+  const downPaymentPct = opts.downPaymentPct ?? 25
+  if (currentPrice <= 0) return 0
+  const valueAfterOneYear = currentPrice * (1 + forecastRatePct / 100)
+  const appreciationGain = valueAfterOneYear - currentPrice
+  const annualCashFlow = monthlyNetCashFlow * 12
+  const downPaymentAmount = currentPrice * (downPaymentPct / 100)
+  if (downPaymentAmount <= 0) return 0
+  return ((appreciationGain + annualCashFlow) / downPaymentAmount) * 100
+}
+
 export function flattenFinanceNumbers(
   source: Record<string, unknown>,
 ): Record<string, number> {
