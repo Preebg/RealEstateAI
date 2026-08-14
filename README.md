@@ -6,15 +6,16 @@
 [![Qiskit](https://img.shields.io/badge/Qiskit-Aer-6929C4.svg)](https://qiskit.org/)
 [![FastAPI](https://img.shields.io/badge/API-FastAPI-009688.svg)](https://fastapi.tiangolo.com/)
 [![React](https://img.shields.io/badge/UI-React%20%2B%20Vite-61DAFB.svg)](https://vitejs.dev/)
-[![Supabase](https://img.shields.io/badge/data-Supabase%20%2F%20PostgreSQL-3FCF8E.svg)](https://supabase.com/)
+[![PostgreSQL](https://img.shields.io/badge/data-Postgres%20%2B%20PostgREST-4169E1.svg)](https://www.postgresql.org/)
+[![Supabase](https://img.shields.io/badge/auth-Supabase-3FCF8E.svg)](https://supabase.com/)
 [![CI](https://img.shields.io/badge/CI-ruff%20%7C%20mypy%20%7C%20pytest-success.svg)](.github/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Proprietary-lightgrey.svg)](#license)
 
 <p align="center">
-  <img src="assets/capeigen-architecture.png" alt="CapEigen hybrid architecture — SPA, FastAPI, agentic LLM, classical finance, QAOA, Supabase" width="920" />
+  <img src="assets/capeigen-architecture.png" alt="CapEigen hybrid architecture — SPA, FastAPI, agentic LLM, classical finance, QAOA, Postgres" width="920" />
 </p>
 
-<p align="center"><em>Figure 1.</em> CapEigen hybrid stack: presentation → API → agentic / classical / quantum cores → Supabase.</p>
+<p align="center"><em>Figure 1.</em> CapEigen hybrid stack: presentation → API → agentic / classical / quantum cores → local Postgres (Auth on Supabase).</p>
 
 ---
 
@@ -27,8 +28,8 @@
 5. [Classical Financial Engine](#classical-financial-engine)
 6. [Quantum Alignment Engine (QAOA)](#quantum-alignment-engine-qaoa)
 7. [Data Plane & Knowledge Base](#data-plane--knowledge-base)
-8. [Repository Structure](#repository-structure)
-9. [Setup & Installation](#setup--installation)
+8. [Auth & Product Surface](#auth--product-surface)
+9. [Repository Structure](#repository-structure)
 10. [Usage & API Specs](#usage--api-specs)
 11. [Testing & Quality Assurance](#testing--quality-assurance)
 12. [Further Reading](#further-reading)
@@ -45,9 +46,9 @@ Residential underwriting still leans on static rules of thumb—gross rent multi
 |--------|-----------|------|
 | **Agentic research** | `engine.py` | Multi-model Gemini / Gemma chains with Search + Maps grounding, RPM limits, KB-augmented prompts |
 | **Classical underwriting** | `finance.py` | Debt service, OpEx, NOI, cap rate, cash-on-cash, rent resolution, tax/insurance normalization, 10-year Monte Carlo appreciation |
-| **Quantum alignment** | `quantum_portfolio.py` | Three-qubit QAOA on Qiskit Aer; SciPy COBYLA over \((\gamma,\beta)\); histogram → success probabilities |
+| **Quantum alignment** | `quantum_portfolio.py` | Three-qubit QAOA on Qiskit Aer; SciPy COBYLA over (γ, β); histogram → success probabilities |
 
-The product surface is a **React (Vite) SPA** on Netlify talking to a **FastAPI** backend (Docker). Domain logic lives in root Python modules.
+The product surface is a **React (Vite) SPA** on Netlify talking to a **FastAPI** backend on the harvest machine (Docker). Property data lives in **local Postgres** behind PostgREST; **login stays on hosted Supabase**. Domain logic lives in root Python modules.
 
 ---
 
@@ -60,28 +61,38 @@ flowchart TB
     subgraph Actors
         INV[Investor / Analyst]
         ADM[Admin / Harvester]
+        DEMO[Preview / demo account]
     end
 
     subgraph CapEigen["CapEigen platform"]
         SPA[React SPA · Netlify]
+        NF[Netlify Functions<br/>Google token · demo login]
         API[FastAPI · Docker]
         CORE[engine · finance · QAOA · KB]
+        PG[(Local Postgres)]
+        PGR[PostgREST + REST gateway]
     end
 
     subgraph Externals
         GEM[Google GenAI<br/>Gemini / Gemma + Search & Maps]
-        SB[(Supabase Auth + PostgreSQL)]
+        AUTH[Supabase Auth]
+        GOOG[Google Identity Services]
         LIST[Listing sources<br/>Zillow / Redfin / Realtor]
     end
 
     INV -->|Analyze · HITL · PDF| SPA
-    INV -->|Sign-in JWT| SB
-    ADM -->|Harvest · archive| CORE
+    INV -->|Google sign-in| GOOG
+    DEMO -->|Username login| NF
+    SPA -->|OAuth callback| NF
     SPA -->|CORS / VITE_API_URL| API
+    INV -->|JWT session| AUTH
+    ADM -->|Harvest · archive| CORE
     API --> CORE
+    API --> PGR --> PG
     CORE -->|generate_content| GEM
-    CORE -->|PostgREST / RLS| SB
+    CORE -->|PostgREST| PGR
     CORE -->|optional scrape| LIST
+    API -.->|validate JWT| AUTH
 ```
 
 ### Logical layers (C4-L2)
@@ -89,13 +100,14 @@ flowchart TB
 ```mermaid
 flowchart TB
     subgraph Presentation["Presentation"]
-        SPA["web/ — React + Vite SPA<br/>Netlify"]
+        SPA["web/ — React + Vite SPA<br/>Netlify · GIS Google login · demo usernames"]
+        NF["web/netlify/functions<br/>google-token · demo-login"]
     end
 
     subgraph Edge["API Edge"]
         API["api/main.py — FastAPI<br/>JWT middleware · CORS · OpenAPI"]
         JOBS["api/jobs.py<br/>In-process job store + ThreadPoolExecutor"]
-        ROUTES["routes: health · properties · analysis<br/>guest · compare_pdf · validation"]
+        ROUTES["routes: health · auth · properties · analysis<br/>guest · compare_pdf · preview · validation"]
     end
 
     subgraph Domain["Domain Core"]
@@ -108,32 +120,39 @@ flowchart TB
     end
 
     subgraph Data["Data & Externals"]
-        SB[(Supabase / PostgreSQL)]
+        PG[(Local Postgres · Docker)]
+        PGR[PostgREST :3001]
+        AUTH[Supabase Auth]
         GEM[Google GenAI]
         DISC["discovery/<br/>HTTP + parsers"]
     end
 
     SPA -->|Bearer JWT / JSON| API
+    SPA --> NF
     API --> ROUTES --> JOBS
     JOBS --> SVC
     SVC --> ENG & FIN & QAOA & KB & COMPS
     ENG --> GEM
     ENG --> KB
-    KB --> SB
+    KB --> PGR --> PG
     ENG --> DISC
-    API -.->|bind request Supabase client| SB
+    API -.->|validate JWT| AUTH
 ```
 
 ### Deployment topology
 
 ```mermaid
 flowchart LR
-    U[Browser] --> N[Netlify SPA]
+    U[Browser] --> N[Netlify SPA + Functions]
     U --> S[Supabase Auth]
+    U --> GGL[Google Identity Services]
     N -->|VITE_API_URL| F[FastAPI container<br/>:8000]
-    F -->|anon / service role| P[(Postgres)]
+    F --> GW[REST gateway :3001]
+    GW --> PR[PostgREST]
+    PR --> P[(Postgres 16)]
+    F -->|validate JWT| S
     F -->|GEMINI_API_KEY| G[Gemini API]
-    H[harvester.py CLI] -->|service role| P
+    H[harvester.py CLI] --> GW
     H --> G
 
     style N fill:#e8f4f8,stroke:#1a5f7a
@@ -141,6 +160,8 @@ flowchart LR
     style P fill:#eef6ee,stroke:#40916c
     style G fill:#f5f0e6,stroke:#7a5c2e
 ```
+
+Live product: SPA at the CapEigen domain (Netlify); API and database on the harvest machine (`postgres`, `postgrest`, `rest-gateway`, `api` via `docker compose`). Public `/api/*` is reverse-proxied; Postgres and PostgREST stay on localhost.
 
 > **Scale note.** Analysis / quantum jobs are **asynchronous** and stored **in-process** (`api/jobs.py`). Multi-replica API deployments require an external job store (Redis, DB, queue). Poll: `GET /api/analysis/{job_id}`.
 
@@ -161,10 +182,10 @@ sequenceDiagram
     participant Eng as engine
     participant Fin as finance
     participant Q as quantum_portfolio
-    participant DB as Supabase
+    participant DB as Local Postgres
 
     User->>SPA: Analyze address
-    SPA->>API: POST /api/analysis (JWT)
+    SPA->>API: POST /api/analysis/start (JWT)
     API->>Jobs: create_job(queued)
 
     alt Catalog hit (≤ 30 days)
@@ -254,7 +275,7 @@ flowchart LR
 | Property value | `gemma-4-26b-a4b-it` | triggered `gemma-4-31b-it` |
 | Geocoding / Maps | `gemini-3.1-flash-lite` | parallel with research; Maps + Search grounding |
 
-Hot-market discovery targets metros in `HOT_MARKETS` (NY, PA, FL, NC, SC, …).
+Hot-market discovery (`HOT_MARKETS`) targets Upstate NY (Rochester, Syracuse, Buffalo, Albany), Mid-Atlantic (Philadelphia, Pittsburgh), Florida (Orlando, Tampa, Miami), and the Carolinas (Charlotte, Raleigh, Charleston).
 
 ### Rate limiting & grounding budgets
 
@@ -332,7 +353,7 @@ Currency outputs in underwriting paths are rounded to **two decimal places** whe
   <img src="assets/capeigen-qaoa-circuit.png" alt="Three-qubit CapEigen QAOA alignment circuit" width="880" />
 </p>
 
-<p align="center"><em>Figure 2.</em> Depth-1 QAOA circuit: \(H^{\otimes 3}\) → cost \(R_z / R_{ZZ}\) → mixer \(R_x(2\beta)\) → measure.</p>
+<p align="center"><em>Figure 2.</em> Depth-1 QAOA circuit: H<sup>⊗3</sup> → cost R<sub>z</sub> / R<sub>ZZ</sub> → mixer R<sub>x</sub>(2β) → measure.</p>
 
 ### Module boundary
 
@@ -349,19 +370,19 @@ Public library API: **`score_portfolio(PortfolioInputs) → AlignmentBreakdown`*
 
 ### Target encoding
 
-| Input | Normalization \(t \in [0,1]\) |
-|-------|-------------------------------|
-| Monthly cash flow | \(t_{\mathrm{cf}} = \min(\mathrm{CF}/800, 1)\); **≤ 0 → 0** |
-| Forecast rate (%/yr) | \(t_{\mathrm{rate}} = \mathrm{clamp}(\mathrm{rate}/8, 0, 1)\) |
-| Location score (0–10) | \(t_{\mathrm{loc}} = \mathrm{clamp}(\mathrm{score}/10, 0, 1)\) |
+| Input | Normalization *t* ∈ [0, 1] |
+|-------|----------------------------|
+| Monthly cash flow | *t*<sub>cf</sub> = min(CF / 800, 1); **≤ 0 → 0** |
+| Forecast rate (%/yr) | *t*<sub>rate</sub> = clamp(rate / 8, 0, 1) |
+| Location score (0–10) | *t*<sub>loc</sub> = clamp(score / 10, 0, 1) |
 
 ### Cost Hamiltonian (classical form)
 
-\[
-C(x_0,x_1,x_2) =
-(t_{\mathrm{cf}}-x_0)^2 + (t_{\mathrm{rate}}-x_1)^2 + (t_{\mathrm{loc}}-x_2)^2
-+ \lambda\bigl[(x_0-x_1)^2 + (x_1-x_2)^2\bigr], \quad \lambda = 0.15
-\]
+```
+C(x₀, x₁, x₂) =
+    (t_cf − x₀)² + (t_rate − x₁)² + (t_loc − x₂)²
+  + λ [(x₀ − x₁)² + (x₁ − x₂)²],     λ = 0.15
+```
 
 ### Optimization & measurement loop
 
@@ -386,38 +407,40 @@ flowchart TB
     style FINAL fill:#e8f0e8,stroke:#2d6a4f
 ```
 
-**Parameter search:** `scipy.optimize.minimize(..., method="COBYLA")`, `maxiter=30`, `rhobeg=0.35`, initial \((\gamma,\beta)\approx(1.047, 0.524)\).
+**Parameter search:** `scipy.optimize.minimize(..., method="COBYLA")`, `maxiter=30`, `rhobeg=0.35`, initial (γ, β) ≈ (1.047, 0.524).
 
-**Bounds:** \(\gamma \in [0,\pi]\), \(\beta \in [0,\pi/2]\).
+**Bounds:** γ ∈ [0, π], β ∈ [0, π/2].
 
-**Circuit layers:** Hadamard → \(R_z(\gamma(2t_i-1))\) + \(R_{ZZ}(-\lambda\gamma)\) on \((0,1),(1,2)\) → \(R_x(2\beta)\).
+**Circuit layers:** Hadamard → R<sub>z</sub>(γ(2*t<sub>i</sub> − 1)) + R<sub>ZZ</sub>(−λγ) on (0,1), (1,2) → R<sub>x</sub>(2β).
 
 ### Score readout
 
-\[
-\begin{aligned}
-\mathrm{CF\%} &= 100 \cdot t_{\mathrm{cf}} \cdot \mathbb{E}[x_0] \\
-\mathrm{App\%} &= 100 \cdot t_{\mathrm{rate}} \cdot \mathbb{E}[x_1] \\
-\mathrm{Loc\%} &= 100 \cdot t_{\mathrm{loc}} \cdot \mathbb{E}[x_2] \\
-\mathrm{Combined\%} &= 100 \cdot t_{\mathrm{cf}} \cdot t_{\mathrm{rate}} \cdot \mathbb{E}[x_0]\mathbb{E}[x_1] \\
-\mathrm{Overall\%} &= 0.45\cdot\mathrm{CF\%} + 0.35\cdot\mathrm{App\%} + 0.20\cdot\mathrm{Loc\%}
-\end{aligned}
-\]
+```
+CF%        = 100 · t_cf   · E[x₀]
+App%       = 100 · t_rate · E[x₁]
+Loc%       = 100 · t_loc  · E[x₂]
+Combined%  = 100 · t_cf · t_rate · E[x₀] E[x₁]
+Overall%   = 0.45·CF% + 0.35·App% + 0.20·Loc%
+```
 
-Negative cash flow cannot inflate cash-flow success because \(t_{\mathrm{cf}}=0\) zeros that term.
+Negative cash flow cannot inflate cash-flow success because *t*<sub>cf</sub> = 0 zeros that term.
 
-> Shipping path uses CPU **`AerSimulator`** for reproducible CI golden values (`seed_simulator=42`). Full Ising derivation: [`docs/QUANTUM_METHOD.md`](docs/QUANTUM_METHOD.md).
+> Shipping path uses CPU **`AerSimulator`** for reproducible CI golden values (`seed_simulator=42`).
 
 ---
 
 ## Data Plane & Knowledge Base
+
+Auth stays on **hosted Supabase**. Catalog, overrides, shares, comps, and preview activity live in **local Postgres** on the harvest machine (PostgREST at `:3001`) when `DATABASE_REST_URL` is set. FastAPI validates the Supabase JWT, then reads/writes local data.
 
 ```mermaid
 erDiagram
     properties ||--o{ user_property_overrides : "per-user assumptions"
     properties ||--o{ user_saved_properties : "bookmarks ≤20"
     properties ||--o{ property_comparables : "normalized comps"
+    properties ||--o{ property_shares : "guest links"
     properties ||--o| archived_properties : "age > 30d"
+    preview_usernames ||--o{ preview_events : "demo telemetry"
 
     properties {
         uuid id PK
@@ -441,6 +464,12 @@ erDiagram
         float management_fee
         bool is_outlier
     }
+
+    preview_usernames {
+        text username_key PK
+        text username
+        bool active
+    }
 ```
 
 ```mermaid
@@ -463,7 +492,24 @@ flowchart LR
     CTX[get_kb_context] --> PROMPT[LLM synthesis prompt]
 ```
 
-Auth: browser JWT → FastAPI middleware binds a request-scoped Supabase client. Harvester / archive paths use **`SUPABASE_SERVICE_ROLE_KEY`**. Admin catalog ownership: **`ADMIN_USER_ID`**.
+Schema lives in `docker/postgres/init/` and is applied on first Postgres volume create. Harvester / archive paths use **`SUPABASE_SERVICE_ROLE_KEY`** (any non-empty value works against local PostgREST). Admin catalog ownership: **`ADMIN_USER_ID`**.
+
+---
+
+## Auth & Product Surface
+
+| Path | Who | What |
+|------|-----|------|
+| `/login` | Anyone | Google Identity Services, or allowlisted preview username |
+| `/auth/google/callback` | Google OAuth | Token exchange via Netlify `google-token` (secret stays off the browser) |
+| `/` Home | Signed-in | Portfolio map from `/api/portfolio` (harvest-machine catalog) |
+| `/search` | Signed-in | Individual address analysis |
+| `/compare` | Signed-in | Side-by-side underwriting + PDF |
+| `/share/:token` | Guest | Read-only share (no login) |
+| `/validation` | Admin | Backtesting upload |
+| `/activity` | Admin | Preview-account telemetry; add/remove demo usernames |
+
+Google Web OAuth uses CapEigen redirect URIs (`/auth/google/callback`), not `supabase.co`. Preview usernames are stored in `preview_usernames` (dashboard-managed; fallback `DEMO_USERNAMES`).
 
 ---
 
@@ -471,102 +517,34 @@ Auth: browser JWT → FastAPI middleware binds a request-scoped Supabase client.
 
 ```
 RealEstateAI/
-├── api/                      # FastAPI (health, properties, analysis jobs, PDF, validation)
+├── api/                      # FastAPI (health, auth, properties, analysis jobs, PDF, preview, validation)
 │   ├── main.py               # App, CORS, JWT middleware
 │   ├── jobs.py               # In-memory async job store
+│   ├── preview_usernames.py  # Demo allowlist (DB + env fallback)
 │   └── routes/               # HTTP surface
 ├── web/                      # React + Vite SPA (Netlify)
+│   └── netlify/functions/    # google-token, demo-login
+├── docker/postgres/init/     # Local schema, roles, RPCs
+├── docker/rest/              # Caddy REST gateway for PostgREST
 ├── assets/                   # README figures (architecture, QAOA circuit)
 ├── engine.py                 # Gemini agents, rate limits, quantum risk wrappers
 ├── quantum_portfolio.py      # QAOA portfolio alignment (Aer + COBYLA)
 ├── finance.py                # Cash flow, appreciation MC, normalizers
-├── knowledge_base.py         # Supabase catalog, overrides, KB context
+├── knowledge_base.py         # Catalog, overrides, KB context
 ├── comps_analysis.py         # Sale comps
 ├── rent_comps_analysis.py    # Rental comps + rent uplift
-├── harvester.py              # Optional batch discovery CLI
+├── harvester.py              # Batch discovery CLI (harvest machine)
+├── authenticate.py           # Auth vs data URL split (Supabase Auth / local PostgREST)
 ├── discovery/                # Listing source adapters & parsers
 ├── services/                 # property_analysis_flow, deferred_analysis
 ├── validation/               # Backtesting helpers
-├── docs/                     # DEPLOY, HARVESTER_SETUP, …
+├── docs/                     # DEPLOY, HARVESTER_SETUP, LOCAL_POSTGRES
 ├── test_app.py               # Domain / quantum / finance / KB tests
 ├── test_api.py               # API tests
-├── docker-compose.yml
+├── docker-compose.yml        # postgres · postgrest · rest-gateway · api
 ├── Dockerfile
 ├── netlify.toml
 └── .env.example
-```
-
----
-
-## Setup & Installation
-
-### Prerequisites
-
-- **Python 3.11+** (Dockerfile / CI)
-- **Node 20+**
-- Supabase project (Auth + Postgres)
-- Google AI / Gemini API key
-
-### 1. Clone and Python environment
-
-```bash
-git clone <repository-url> CapEigen
-cd CapEigen
-
-python -m venv .venv
-# Windows
-.venv\Scripts\activate
-# macOS / Linux
-source .venv/bin/activate
-
-pip install --upgrade pip
-pip install -r requirements.txt
-pip install pytest ruff mypy   # optional QA tooling
-```
-
-Core deps: **`qiskit`**, **`qiskit-aer`**, **`scipy`**, **`google-genai`**, **`supabase`** (PostgREST via client).
-
-### 2. Environment variables
-
-Copy `.env.example` → `.env`:
-
-| Variable | Purpose |
-|----------|---------|
-| `GEMINI_API_KEY` | Google GenAI client |
-| `SUPABASE_URL` | Supabase project URL |
-| `SUPABASE_KEY` | Anon / publishable key |
-| `SUPABASE_SERVICE_ROLE_KEY` | Harvester / admin RPCs |
-| `ADMIN_USER_ID` | Admin UUID (catalog / validation) |
-| `CORS_ORIGINS` | Comma-separated SPA origins |
-
-Frontend (`web/.env`):
-
-| Variable | Purpose |
-|----------|---------|
-| `VITE_SUPABASE_URL` | Same project URL |
-| `VITE_SUPABASE_ANON_KEY` | Browser-safe anon key |
-| `VITE_API_URL` | Public API base (empty locally → Vite `/api` proxy) |
-
-Add your Netlify (or local) origin to Supabase Auth redirect URLs.
-
-### 3. Run the stack
-
-```bash
-# API (Docker)
-docker compose up --build
-# http://localhost:8000/api/health · OpenAPI /docs
-
-# API (local)
-uvicorn api.main:app --reload --port 8000
-
-# Frontend
-cd web && npm install && npm run dev
-# http://localhost:5173
-
-# Tests
-# Windows PowerShell:
-$env:GEMINI_API_KEY = "fake_key_for_ci"
-pytest test_app.py test_api.py -v
 ```
 
 ---
@@ -615,9 +593,15 @@ With Aer seed `42` and COBYLA `maxiter=30`, “perfect” inputs `(1000, 10, 10)
 
 | Area | Role |
 |------|------|
-| `GET /api/health` | Liveness |
-| Properties / analysis | Auth underwriting jobs; poll by `job_id` |
-| Guest / compare PDF / validation | Sharing, export, admin checks |
+| `GET /api/health` | Liveness; `data_backend` is `local-postgres` or `supabase` |
+| `GET /api/me` | Current user, admin / preview flags |
+| `POST /api/auth/google/exchange` | Google OAuth code → session (also on Netlify Functions) |
+| `POST /api/auth/demo` | Preview-username login |
+| Properties / portfolio | Catalog search, detail, bookmarks, overrides |
+| `POST /api/analysis/start` | Auth underwriting job; poll `GET /api/analysis/{job_id}` |
+| Guest / compare PDF | Share links, export |
+| Preview activity | Admin telemetry + username allowlist |
+| Validation | Admin backtest upload |
 
 OpenAPI: `/docs` when the API is running.
 
@@ -639,7 +623,7 @@ flowchart LR
 | Layer | Location | Focus |
 |-------|----------|-------|
 | Domain / quantum | `test_app.py` | Goldens, bounds, determinism, finance MC, rent/tax normalizers, KB, discovery, deferred analysis |
-| API | `test_api.py` | FastAPI routes |
+| API | `test_api.py` | FastAPI routes, preview usernames |
 | Lint / types | Ruff + mypy | Core modules |
 | Frontend | Vite production build | `web/` |
 
@@ -657,10 +641,9 @@ flowchart LR
 
 | Document | Contents |
 |----------|----------|
-| [`docs/QUANTUM_METHOD.md`](docs/QUANTUM_METHOD.md) | Cost Hamiltonian → Ising derivation |
-| [`docs/DEPLOY.md`](docs/DEPLOY.md) | Deployment |
-| [`docs/HARVESTER_SETUP.md`](docs/HARVESTER_SETUP.md) | Batch harvester |
-| [`AGENTS.md`](AGENTS.md) | Contributor / Cloud agent runbook |
+| [`docs/DEPLOY.md`](docs/DEPLOY.md) | Netlify SPA + harvest-machine API |
+| [`docs/LOCAL_POSTGRES.md`](docs/LOCAL_POSTGRES.md) | Self-hosted Postgres / PostgREST |
+| [`docs/HARVESTER_SETUP.md`](docs/HARVESTER_SETUP.md) | Batch harvester + Task Scheduler |
 
 ---
 
