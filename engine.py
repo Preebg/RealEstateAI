@@ -609,7 +609,7 @@ def should_fallback_to_next_model(error: BaseException) -> bool:
 
 
 def _should_retry_same_model(
-    error: BaseException,
+    error: Exception,
     attempt: int,
     max_retries: int,
 ) -> bool:
