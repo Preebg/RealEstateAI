@@ -11,7 +11,7 @@ CapEigen can run **Auth on Supabase** and **property data on local Postgres** (D
 | REST gateway | Docker `rest-gateway` (:3001) | Exposes `/rest/v1/*` for `supabase-py` |
 | FastAPI | Docker `api` (:8000) | Validates Supabase JWTs; reads/writes local data |
 | Harvester | Host Python | Same `DATABASE_REST_URL` as the API |
-| React SPA | Netlify / Vite | Supabase Auth; catalog reads `/api/portfolio` on the harvest machine |
+| React SPA | Cloudflare Pages / Vite | Supabase Auth; catalog reads `/api/portfolio` on the harvest machine |
 
 Auth stays remote (`SUPABASE_URL` / `SUPABASE_AUTH_URL`). Do **not** point the browser PostgREST client at your home IP without a VPN/firewall plan.
 
@@ -87,7 +87,7 @@ docker compose up -d postgres postgrest rest-gateway
 
 Existing root `Caddyfile` already proxies `/api/*` → `:8000`. Keep Postgres/PostgREST bound to localhost (compose ports). Do not publish `:5432` / `:3001` on the public internet.
 
-The Netlify SPA must call this origin: set `VITE_API_URL` to the Cloudflare Tunnel hostname (no trailing slash) and redeploy. Confirm with:
+The Pages SPA must call this origin: set `VITE_API_URL` to the Cloudflare Tunnel hostname (no trailing slash) and redeploy. Confirm with:
 
 ```powershell
 curl https://capeigen.preebg.dev/api/health

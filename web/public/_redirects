@@ -1,0 +1,2 @@
+# SPA fallback. Pages Functions take precedence for /api/auth/*.
+/*    /index.html   200

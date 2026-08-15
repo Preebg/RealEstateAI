@@ -38,3 +38,6 @@ web/node_modules/
 web/dist/
 web/.env
 .netlify/
+.wrangler/
+.dev.vars
+web/.dev.vars

@@ -48,7 +48,7 @@ Residential underwriting still leans on static rules of thumb—gross rent multi
 | **Classical underwriting** | `finance.py` | Debt service, OpEx, NOI, cap rate, cash-on-cash, rent resolution, tax/insurance normalization, 10-year Monte Carlo appreciation |
 | **Quantum alignment** | `quantum_portfolio.py` | Three-qubit QAOA on Qiskit Aer; SciPy COBYLA over (γ, β); histogram → success probabilities |
 
-The product surface is a **React (Vite) SPA** on Netlify talking to a **FastAPI** backend on the harvest machine (Docker). Property data lives in **local Postgres** behind PostgREST; **login stays on hosted Supabase**. Domain logic lives in root Python modules.
+The product surface is a **React (Vite) SPA** on Cloudflare Pages talking to a **FastAPI** backend on the harvest machine (Docker). Property data lives in **local Postgres** behind PostgREST; **login stays on hosted Supabase**. Domain logic lives in root Python modules.
 
 ---
 
@@ -65,8 +65,8 @@ flowchart TB
     end
 
     subgraph CapEigen["CapEigen platform"]
-        SPA[React SPA · Netlify]
-        NF[Netlify Functions<br/>Google token · demo login]
+        SPA[React SPA · Cloudflare Pages]
+        NF[Pages Functions<br/>Google token · demo login]
         API[FastAPI · Docker]
         CORE[engine · finance · QAOA · KB]
         PG[(Local Postgres)]
@@ -100,8 +100,8 @@ flowchart TB
 ```mermaid
 flowchart TB
     subgraph Presentation["Presentation"]
-        SPA["web/ — React + Vite SPA<br/>Netlify · GIS Google login · demo usernames"]
-        NF["web/netlify/functions<br/>google-token · demo-login"]
+        SPA["web/ — React + Vite SPA<br/>Cloudflare Pages · GIS Google login · demo usernames"]
+        NF["web/functions<br/>/api/auth/google/exchange · /api/auth/demo"]
     end
 
     subgraph Edge["API Edge"]
@@ -143,7 +143,7 @@ flowchart TB
 
 ```mermaid
 flowchart LR
-    U[Browser] --> N[Netlify SPA + Functions]
+    U[Browser] --> N[Cloudflare Pages SPA + Functions]
     U --> S[Supabase Auth]
     U --> GGL[Google Identity Services]
     N -->|VITE_API_URL| F[FastAPI container<br/>:8000]
@@ -161,7 +161,7 @@ flowchart LR
     style G fill:#f5f0e6,stroke:#7a5c2e
 ```
 
-Live product: SPA at the CapEigen domain (Netlify); API and database on the harvest machine (`postgres`, `postgrest`, `rest-gateway`, `api` via `docker compose`). Public `/api/*` is reverse-proxied; Postgres and PostgREST stay on localhost.
+Live product: SPA at the CapEigen domain (Cloudflare Pages); API and database on the harvest machine (`postgres`, `postgrest`, `rest-gateway`, `api` via `docker compose`). Public `/api/*` is reverse-proxied; Postgres and PostgREST stay on localhost.
 
 > **Scale note.** Analysis / quantum jobs are **asynchronous** and stored **in-process** (`api/jobs.py`). Multi-replica API deployments require an external job store (Redis, DB, queue). Poll: `GET /api/analysis/{job_id}`.
 
@@ -501,7 +501,7 @@ Schema lives in `docker/postgres/init/` and is applied on first Postgres volume 
 | Path | Who | What |
 |------|-----|------|
 | `/login` | Anyone | Google Identity Services, or allowlisted preview username |
-| `/auth/google/callback` | Google OAuth | Token exchange via Netlify `google-token` (secret stays off the browser) |
+| `/auth/google/callback` | Google OAuth | Token exchange via Pages Function `/api/auth/google/exchange` (secret stays off the browser) |
 | `/` Home | Signed-in | Portfolio map from `/api/portfolio` (harvest-machine catalog) |
 | `/search` | Signed-in | Individual address analysis |
 | `/compare` | Signed-in | Side-by-side underwriting + PDF |
@@ -522,8 +522,8 @@ RealEstateAI/
 │   ├── jobs.py               # In-memory async job store
 │   ├── preview_usernames.py  # Demo allowlist (DB + env fallback)
 │   └── routes/               # HTTP surface
-├── web/                      # React + Vite SPA (Netlify)
-│   └── netlify/functions/    # google-token, demo-login
+├── web/                      # React + Vite SPA (Cloudflare Pages)
+│   └── functions/            # /api/auth/google/exchange, /api/auth/demo
 ├── docker/postgres/init/     # Local schema, roles, RPCs
 ├── docker/rest/              # Caddy REST gateway for PostgREST
 ├── assets/                   # README figures (architecture, QAOA circuit)
@@ -543,7 +543,7 @@ RealEstateAI/
 ├── test_api.py               # API tests
 ├── docker-compose.yml        # postgres · postgrest · rest-gateway · api
 ├── Dockerfile
-├── netlify.toml
+├── web/wrangler.jsonc
 └── .env.example
 ```
 
@@ -595,7 +595,7 @@ With Aer seed `42` and COBYLA `maxiter=30`, “perfect” inputs `(1000, 10, 10)
 |------|------|
 | `GET /api/health` | Liveness; `data_backend` is `local-postgres` or `supabase` |
 | `GET /api/me` | Current user, admin / preview flags |
-| `POST /api/auth/google/exchange` | Google OAuth code → session (also on Netlify Functions) |
+| `POST /api/auth/google/exchange` | Google OAuth code → session (also a Cloudflare Pages Function) |
 | `POST /api/auth/demo` | Preview-username login |
 | Properties / portfolio | Catalog search, detail, bookmarks, overrides |
 | `POST /api/analysis/start` | Auth underwriting job; poll `GET /api/analysis/{job_id}` |
@@ -641,7 +641,7 @@ flowchart LR
 
 | Document | Contents |
 |----------|----------|
-| [`docs/DEPLOY.md`](docs/DEPLOY.md) | Netlify SPA + harvest-machine API |
+| [`docs/DEPLOY.md`](docs/DEPLOY.md) | Cloudflare Pages SPA + harvest-machine API |
 | [`docs/LOCAL_POSTGRES.md`](docs/LOCAL_POSTGRES.md) | Self-hosted Postgres / PostgREST |
 | [`docs/HARVESTER_SETUP.md`](docs/HARVESTER_SETUP.md) | Batch harvester + Task Scheduler |
 

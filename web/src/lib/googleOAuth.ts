@@ -110,10 +110,13 @@ export function readGoogleOAuthCallback(): GoogleOAuthCallbackParts {
 function exchangeEndpoints(): string[] {
   const host = window.location.hostname
   const local = host === 'localhost' || host === '127.0.0.1'
-  // Prefer the Netlify function on CapEigen hosts so a generic /api → FastAPI proxy
-  // cannot swallow Google token exchange. Local Vite proxies /api → FastAPI.
+  // Same-origin Pages Function first so a generic /api → FastAPI proxy cannot
+  // swallow Google token exchange. Local Vite proxies /api → FastAPI.
   if (local) return ['/api/auth/google/exchange']
-  return ['/.netlify/functions/google-token', '/api/auth/google/exchange']
+  const urls = ['/api/auth/google/exchange']
+  const api = (import.meta.env.VITE_API_URL as string | undefined)?.replace(/\/$/, '')
+  if (api) urls.push(`${api}/api/auth/google/exchange`)
+  return urls
 }
 
 async function postExchange(
@@ -156,7 +159,7 @@ async function postExchange(
   return { ok: true, idToken: payload.id_token }
 }
 
-/** Exchange the auth code via CapEigen Netlify function and/or FastAPI. */
+/** Exchange the auth code via CapEigen Pages Function and/or FastAPI. */
 export async function exchangeGoogleAuthCode(parts: GoogleOAuthCallbackParts): Promise<string> {
   const errors: string[] = []
   for (const url of exchangeEndpoints()) {
@@ -174,6 +177,6 @@ export async function exchangeGoogleAuthCode(parts: GoogleOAuthCallbackParts): P
   }
   throw new Error(
     errors.join(' | ') ||
-      'Google token exchange failed. Set GOOGLE_WEB_CLIENT_ID and GOOGLE_WEB_CLIENT_SECRET on Netlify, then redeploy.',
+      'Google token exchange failed. Set GOOGLE_WEB_CLIENT_ID and GOOGLE_WEB_CLIENT_SECRET on Cloudflare Pages, then redeploy.',
   )
 }

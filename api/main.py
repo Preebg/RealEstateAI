@@ -54,7 +54,7 @@ _cors_origins = [
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
-    allow_origin_regex=r"https://([a-z0-9-]+\.)?netlify\.app",
+    allow_origin_regex=r"https://([a-z0-9-]+\.)*(netlify\.app|pages\.dev)",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -104,7 +104,7 @@ app.include_router(validation.router)
 
 @app.get("/")
 def root() -> dict[str, str]:
-    """Browser landing for the API host (UI is the Netlify/Vite SPA)."""
+    """Browser landing for the API host (UI is the Cloudflare Pages / Vite SPA)."""
     return {
         "service": "capeigen-api",
         "health": "/api/health",

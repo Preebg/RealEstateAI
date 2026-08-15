@@ -23,7 +23,7 @@ That UUID is your admin identity. Harvested rows are saved with `properties.user
 
 | Workload | Where to run | Why |
 |----------|--------------|-----|
-| **React web** (`web/`) | Netlify or `npm run dev` | User-facing UI (login, analyze, portfolio) |
+| **React web** (`web/`) | Cloudflare Pages or `npm run dev` | User-facing UI (login, analyze, portfolio) |
 | **FastAPI** (`api/`) | Docker / local uvicorn | Analysis jobs, guest shares, PDF |
 | **Harvester** (`python harvester.py`) | Local PC or always-on machine | Long API job; not a serverless cron host |
 | **Scheduled harvest every 1.5 hrs** | Same harvest machine via Task Scheduler | Headless CLI |

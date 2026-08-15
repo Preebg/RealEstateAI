@@ -35,7 +35,7 @@ def _google_web_credentials() -> tuple[str, str]:
             status_code=503,
             detail=(
                 "Google OAuth is not configured on the API. Set GOOGLE_WEB_CLIENT_ID "
-                "and GOOGLE_WEB_CLIENT_SECRET in the API host environment (Netlify "
+                "and GOOGLE_WEB_CLIENT_SECRET in the API host environment (Pages "
                 "function env, Docker .env, or shell), then restart/redeploy."
             ),
         )

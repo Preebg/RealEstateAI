@@ -174,7 +174,7 @@ export function ActivityPage() {
           <h1 className="font-display text-3xl font-semibold">Demo accounts</h1>
           <p className="mt-1 text-muted">
             Add or remove preview usernames and watch how they use CapEigen. Changes apply to
-            login immediately — no .env or Netlify restart.
+            login immediately — no .env or Pages restart.
           </p>
         </div>
         <button

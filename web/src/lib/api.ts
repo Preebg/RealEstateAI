@@ -11,7 +11,7 @@ async function authHeader(): Promise<HeadersInit> {
 function apiMisconfiguredMessage(): string {
   if (import.meta.env.PROD && !API_BASE) {
     return (
-      'API is not configured. Set VITE_API_URL in Netlify to your FastAPI base URL ' +
+      'API is not configured. Set VITE_API_URL on Cloudflare Pages to your FastAPI base URL ' +
       '(e.g. https://your-api.example.com), then redeploy the site.'
     )
   }

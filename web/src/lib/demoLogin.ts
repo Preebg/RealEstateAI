@@ -11,10 +11,9 @@ function previewLoginEndpoints(): string[] {
   const local = host === 'localhost' || host === '127.0.0.1'
   if (local) return ['/api/auth/demo']
 
-  const urls = ['/.netlify/functions/demo-login']
+  const urls = ['/api/auth/demo']
   const api = (import.meta.env.VITE_API_URL as string | undefined)?.replace(/\/$/, '')
   if (api) urls.push(`${api}/api/auth/demo`)
-  urls.push('/api/auth/demo')
   return urls
 }
 
