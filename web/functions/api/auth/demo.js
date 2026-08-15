@@ -21,7 +21,7 @@ export async function onRequestPost(ctx) {
   }
 
   const username = typeof body.username === 'string' ? body.username.trim() : ''
-  const api = envStr(env, 'API_URL', 'VITE_API_URL').replace(/\/$/, '')
+  const api = (envStr(env, 'API_URL', 'VITE_API_URL') || 'https://capeigen.preebg.dev').replace(/\/$/, '')
 
   // Prefer FastAPI so dashboard-managed usernames apply without a Pages env change.
   if (api && username) {
@@ -191,7 +191,7 @@ async function issueSession(display, env, serviceKey) {
 }
 
 async function recordPreviewLogin(display, access, serviceKey, env) {
-  const api = envStr(env, 'API_URL', 'VITE_API_URL').replace(/\/$/, '')
+  const api = (envStr(env, 'API_URL', 'VITE_API_URL') || 'https://capeigen.preebg.dev').replace(/\/$/, '')
   if (api) {
     try {
       const res = await fetch(`${api}/api/preview/events`, {

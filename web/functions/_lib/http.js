@@ -19,6 +19,7 @@ export function json(status, body) {
 }
 
 export function envStr(env, ...keys) {
+  if (!env || typeof env !== 'object') return ''
   for (const key of keys) {
     const value = env[key]
     if (typeof value === 'string' && value.trim()) return value.trim()

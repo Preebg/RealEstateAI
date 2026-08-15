@@ -1,23 +1,17 @@
 /**
- * Pages Function: exchange Google auth code (PKCE) for an id_token.
+ * Worker route: exchange Google auth code (PKCE) for an id_token.
+ * Prefers FastAPI (harvest machine already has GOOGLE_WEB_CLIENT_SECRET).
  * Route: POST /api/auth/google/exchange
  */
-import { envStr, json, onRequestOptions } from '../../../_lib/http.js'
+import { corsHeaders, envStr, json, onRequestOptions } from '../../../_lib/http.js'
 
 const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token'
+const DEFAULT_API_URL = 'https://capeigen.preebg.dev'
 
 export { onRequestOptions }
 
 export async function onRequestPost(ctx) {
   const env = ctx.env
-  const clientId = envStr(env, 'GOOGLE_WEB_CLIENT_ID', 'VITE_GOOGLE_CLIENT_ID')
-  const clientSecret = envStr(env, 'GOOGLE_WEB_CLIENT_SECRET')
-  if (!clientId || !clientSecret) {
-    return json(503, {
-      detail:
-        'Google OAuth secret missing on Cloudflare Pages. Settings → Environment variables → add GOOGLE_WEB_CLIENT_ID and GOOGLE_WEB_CLIENT_SECRET (Production, available to Functions), then redeploy.',
-    })
-  }
 
   let body
   try {
@@ -31,6 +25,41 @@ export async function onRequestPost(ctx) {
   const redirectUri = typeof body.redirect_uri === 'string' ? body.redirect_uri : ''
   if (!code || !codeVerifier || !redirectUri) {
     return json(400, { detail: 'code, code_verifier, and redirect_uri are required' })
+  }
+
+  const api = (envStr(env, 'API_URL', 'VITE_API_URL') || DEFAULT_API_URL).replace(/\/$/, '')
+  try {
+    const res = await fetch(`${api}/api/auth/google/exchange`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        code,
+        code_verifier: codeVerifier,
+        redirect_uri: redirectUri,
+      }),
+    })
+    const payload = await res.text()
+    // Do not retry on 4xx: the Google auth code is one-time-use once FastAPI talks to Google.
+    if (res.ok || res.status < 500) {
+      return new Response(payload, {
+        status: res.status,
+        headers: {
+          'Content-Type': 'application/json',
+          ...corsHeaders(),
+        },
+      })
+    }
+  } catch {
+    // FastAPI unreachable: fall through to Worker-local Google credentials.
+  }
+
+  const clientId = envStr(env, 'GOOGLE_WEB_CLIENT_ID', 'VITE_GOOGLE_CLIENT_ID')
+  const clientSecret = envStr(env, 'GOOGLE_WEB_CLIENT_SECRET')
+  if (!clientId || !clientSecret) {
+    return json(503, {
+      detail:
+        'Google OAuth is not available. The Worker could not reach the API and has no GOOGLE_WEB_CLIENT_SECRET. Confirm https://capeigen.preebg.dev/api/health, then retry.',
+    })
   }
 
   const form = new URLSearchParams({

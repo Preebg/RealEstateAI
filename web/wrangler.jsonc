@@ -2,6 +2,9 @@
   "name": "capeigen",
   "main": "./worker.js",
   "compatibility_date": "2026-08-15",
+  "vars": {
+    "API_URL": "https://capeigen.preebg.dev"
+  },
   "assets": {
     "directory": "./dist",
     "binding": "ASSETS",

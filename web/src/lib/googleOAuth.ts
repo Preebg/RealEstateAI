@@ -167,8 +167,9 @@ export async function exchangeGoogleAuthCode(parts: GoogleOAuthCallbackParts): P
       const result = await postExchange(url, parts)
       if (result.ok) return result.idToken
       errors.push(`${url}: ${result.detail}`)
-      // Auth codes are one-time-use. Stop after first reachable backend response.
-      if (result.status !== 404 && result.status !== 405) {
+      // Auth codes are one-time-use after a backend talks to Google.
+      // 503 means this host is not configured; try FastAPI next. The code is still unused.
+      if (result.status !== 404 && result.status !== 405 && result.status !== 503) {
         break
       }
     } catch (err) {
@@ -177,6 +178,6 @@ export async function exchangeGoogleAuthCode(parts: GoogleOAuthCallbackParts): P
   }
   throw new Error(
     errors.join(' | ') ||
-      'Google token exchange failed. Set GOOGLE_WEB_CLIENT_ID and GOOGLE_WEB_CLIENT_SECRET on Cloudflare Pages, then redeploy.',
+      'Google token exchange failed. Confirm the harvest API is up and Google redirect URI includes this site.',
   )
 }
