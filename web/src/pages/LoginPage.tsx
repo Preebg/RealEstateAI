@@ -6,6 +6,7 @@ import { useAuthStore } from '../lib/authStore'
 import { signInWithPreviewUsername } from '../lib/demoLogin'
 import { getGoogleClientId } from '../lib/googleGis'
 import { startGoogleOAuthRedirect } from '../lib/googleOAuth'
+import { trackPreviewEvent } from '../lib/previewActivity'
 
 export function LoginPage() {
   const { session, loading } = useAuthStore()
@@ -33,6 +34,7 @@ export function LoginPage() {
       if (mode === 'signin') {
         const { error: err } = await supabase.auth.signInWithPassword({ email, password })
         if (err) throw err
+        trackPreviewEvent('login', { path: '/login', label: 'Email sign-in' })
         navigate('/')
         return
       }
@@ -48,6 +50,7 @@ export function LoginPage() {
       if (err) throw err
 
       if (data.session) {
+        trackPreviewEvent('login', { path: '/login', label: 'Email sign-up' })
         navigate('/')
         return
       }
@@ -59,6 +62,7 @@ export function LoginPage() {
         setInfo('Account created. Sign in with your email and password.')
         return
       }
+      trackPreviewEvent('login', { path: '/login', label: 'Email sign-up' })
       navigate('/')
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Authentication failed')

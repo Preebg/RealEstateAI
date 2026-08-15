@@ -13,6 +13,8 @@ import { ValidationPage } from './pages/ValidationPage'
 import { LegalPage } from './pages/LegalPage'
 import { GuestSharePage } from './pages/GuestSharePage'
 import { ActivityPage } from './pages/ActivityPage'
+import { UsagePage } from './pages/UsagePage'
+import { LegalAdminPage } from './pages/LegalAdminPage'
 
 function RequireAuth() {
   const { session, loading } = useAuthStore()
@@ -75,6 +77,8 @@ export default function App() {
             <Route element={<RequireAdmin />}>
               <Route path="validation" element={<ValidationPage />} />
               <Route path="activity" element={<ActivityPage />} />
+              <Route path="usage" element={<UsagePage />} />
+              <Route path="legal-admin" element={<LegalAdminPage />} />
             </Route>
           </Route>
         </Route>

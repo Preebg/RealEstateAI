@@ -1,17 +1,19 @@
-"""Preview-user tracking ingest and admin activity feed."""
+"""Usage tracking ingest, admin activity feed, and legal document admin."""
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query
 
 from api.deps import AdminUser, CurrentUser
+from api.legal_store import get_legal_document, save_legal_document
 from api.preview_activity import (
     ALLOWED_EVENT_TYPES,
+    actor_for_user,
     list_preview_events,
-    preview_username_for_user,
     record_preview_event,
+    summarize_usage,
 )
 from api.preview_usernames import (
     add_preview_username,
@@ -19,13 +21,18 @@ from api.preview_usernames import (
     remove_preview_username,
 )
 from api.schemas import (
+    LegalDocumentResponse,
+    LegalDocumentUpdateRequest,
     PreviewAccountCreateRequest,
     PreviewAccountListResponse,
     PreviewEventCreateRequest,
     PreviewEventListResponse,
+    UsageSummaryResponse,
 )
 
 router = APIRouter(tags=["preview"])
+
+AudienceParam = Literal["all", "demo", "registered"]
 
 
 @router.post("/api/preview/events")
@@ -33,9 +40,7 @@ def ingest_preview_event(
     body: PreviewEventCreateRequest,
     user: CurrentUser,
 ) -> dict[str, Any]:
-    username = preview_username_for_user(user)
-    if username is None:
-        raise HTTPException(status_code=403, detail="Preview tracking is only for demo logins.")
+    username, is_preview = actor_for_user(user)
     kind = body.event_type.strip().lower()
     if kind not in ALLOWED_EVENT_TYPES:
         raise HTTPException(status_code=400, detail="Unknown event type.")
@@ -46,9 +51,10 @@ def ingest_preview_event(
         path=body.path,
         label=body.label,
         payload=body.payload,
+        is_preview=is_preview,
     )
     if not ok:
-        raise HTTPException(status_code=500, detail="Could not record preview activity.")
+        raise HTTPException(status_code=500, detail="Could not record activity.")
     return {"ok": True}
 
 
@@ -58,8 +64,29 @@ def preview_activity(
     username: str | None = Query(default=None),
     limit: int = Query(default=200, ge=1, le=500),
 ) -> PreviewEventListResponse:
-    events = list_preview_events(username=username, limit=limit)
+    events = list_preview_events(username=username, limit=limit, audience="demo")
     return PreviewEventListResponse(events=events, count=len(events))
+
+
+@router.get("/api/usage/activity", response_model=PreviewEventListResponse)
+def usage_activity(
+    _admin: AdminUser,
+    username: str | None = Query(default=None),
+    audience: AudienceParam = Query(default="all"),
+    limit: int = Query(default=200, ge=1, le=500),
+) -> PreviewEventListResponse:
+    events = list_preview_events(username=username, limit=limit, audience=audience)
+    return PreviewEventListResponse(events=events, count=len(events))
+
+
+@router.get("/api/usage/summary", response_model=UsageSummaryResponse)
+def usage_summary(
+    _admin: AdminUser,
+    days: int = Query(default=90, ge=1, le=365),
+    audience: AudienceParam = Query(default="all"),
+) -> UsageSummaryResponse:
+    payload = summarize_usage(days=days, audience=audience)
+    return UsageSummaryResponse(**payload)
 
 
 @router.get("/api/preview/accounts", response_model=PreviewAccountListResponse)
@@ -102,3 +129,33 @@ def delete_preview_account(
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     accounts = list_preview_accounts()
     return PreviewAccountListResponse(accounts=accounts, count=len(accounts))
+
+
+@router.get("/api/legal/{slug}", response_model=LegalDocumentResponse)
+def read_legal_document(slug: str) -> LegalDocumentResponse:
+    try:
+        document = get_legal_document(slug)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return LegalDocumentResponse(**document)
+
+
+@router.put("/api/legal/{slug}", response_model=LegalDocumentResponse)
+def update_legal_document(
+    slug: str,
+    body: LegalDocumentUpdateRequest,
+    admin: AdminUser,
+) -> LegalDocumentResponse:
+    try:
+        document = save_legal_document(
+            slug,
+            body=body.body,
+            title=body.title,
+            effective_date=body.effective_date,
+            updated_by=str(admin.get("email") or admin.get("id") or ""),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return LegalDocumentResponse(**document)

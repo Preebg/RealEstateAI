@@ -255,6 +255,7 @@ async function recordPreviewLogin(display, access, serviceKey) {
         path: '/login',
         label: 'Preview login',
         payload: { username: display, source: 'netlify' },
+        is_preview: true,
       }),
     })
   } catch {

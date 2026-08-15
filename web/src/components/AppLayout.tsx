@@ -1,5 +1,5 @@
 import { NavLink, Outlet, useNavigate } from 'react-router-dom'
-import { Map, Search, GitCompare, FlaskConical, Users, LogOut, Menu, X } from 'lucide-react'
+import { Map, Search, GitCompare, FlaskConical, Users, BarChart3, ScrollText, LogOut, Menu, X } from 'lucide-react'
 import { useState } from 'react'
 import { useAuthStore } from '../lib/authStore'
 import { isAdminUser } from '../lib/admin'
@@ -19,6 +19,8 @@ const nav: Array<{
 
 const adminNav: typeof nav = [
   { to: '/activity', label: 'Demo accounts', icon: Users },
+  { to: '/usage', label: 'Site usage', icon: BarChart3 },
+  { to: '/legal-admin', label: 'Legal', icon: ScrollText },
   { to: '/validation', label: 'Model Validation', icon: FlaskConical },
 ]
 
@@ -107,7 +109,7 @@ export function AppLayout() {
           </div>
           {isAdmin && (
             <NavLink
-              to="/activity"
+              to="/usage"
               className={({ isActive }) =>
                 clsx(
                   'rounded-lg border px-3 py-1.5 text-sm font-medium',
@@ -117,7 +119,7 @@ export function AppLayout() {
                 )
               }
             >
-              Demo
+              Usage
             </NavLink>
           )}
         </header>

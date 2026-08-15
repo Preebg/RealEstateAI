@@ -213,7 +213,8 @@ def _event_stats() -> dict[str, dict[str, Any]]:
         response = _rest_get(
             "preview_events",
             {
-                "select": "username,event_type,created_at",
+                "select": "username,event_type,created_at,is_preview",
+                "is_preview": "eq.true",
                 "order": "created_at.desc",
                 "limit": "2000",
             },
@@ -222,14 +223,29 @@ def _event_stats() -> dict[str, dict[str, Any]]:
         report_error(log, "preview_username_stats_failed", exc)
         return stats
     if response.status_code >= 400:
-        report_error(log, "preview_username_stats_failed", RuntimeError(response.text[:300]))
-        return stats
+        try:
+            response = _rest_get(
+                "preview_events",
+                {
+                    "select": "username,event_type,created_at",
+                    "order": "created_at.desc",
+                    "limit": "2000",
+                },
+            )
+        except httpx.HTTPError as retry_exc:
+            report_error(log, "preview_username_stats_failed", retry_exc)
+            return stats
+        if response.status_code >= 400:
+            report_error(log, "preview_username_stats_failed", RuntimeError(response.text[:300]))
+            return stats
     events = response.json()
     if not isinstance(events, list):
         return stats
 
     for event in events:
         if not isinstance(event, dict):
+            continue
+        if event.get("is_preview") is False:
             continue
         display = str(event.get("username") or "").strip()
         if not display:

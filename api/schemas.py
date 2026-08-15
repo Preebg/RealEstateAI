@@ -33,6 +33,31 @@ class PreviewEventListResponse(BaseModel):
     count: int
 
 
+class UsageSummaryResponse(BaseModel):
+    days: int
+    audience: str
+    totals: dict[str, int]
+    actions: list[dict[str, Any]]
+    pages: list[dict[str, Any]]
+    users: list[dict[str, Any]]
+
+
+class LegalDocumentResponse(BaseModel):
+    slug: str
+    title: str
+    body: str
+    effective_date: str
+    updated_at: str | None = None
+    updated_by: str | None = None
+    is_default: bool = False
+
+
+class LegalDocumentUpdateRequest(BaseModel):
+    body: str = Field(min_length=40)
+    title: str | None = Field(default=None, max_length=120)
+    effective_date: str | None = Field(default=None, max_length=10)
+
+
 class PreviewAccountCreateRequest(BaseModel):
     username: str = Field(min_length=2, max_length=32)
 

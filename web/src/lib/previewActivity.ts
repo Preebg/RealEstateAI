@@ -1,5 +1,5 @@
 import { apiFetch } from './api'
-import { useAuthStore } from './authStore'
+import { supabase } from './supabase'
 import type { User } from '@supabase/supabase-js'
 
 export type PreviewEventType =
@@ -28,17 +28,19 @@ export function trackPreviewEvent(
   eventType: PreviewEventType,
   details?: { path?: string; label?: string; payload?: Record<string, unknown> },
 ): void {
-  const user = useAuthStore.getState().user
-  if (!isPreviewUser(user)) return
-  void apiFetch('/api/preview/events', {
-    method: 'POST',
-    body: JSON.stringify({
-      event_type: eventType,
-      path: details?.path ?? window.location.pathname,
-      label: details?.label,
-      payload: details?.payload ?? {},
-    }),
-  }).catch(() => {
+  void (async () => {
+    const { data } = await supabase.auth.getSession()
+    if (!data.session) return
+    await apiFetch('/api/preview/events', {
+      method: 'POST',
+      body: JSON.stringify({
+        event_type: eventType,
+        path: details?.path ?? window.location.pathname,
+        label: details?.label,
+        payload: details?.payload ?? {},
+      }),
+    })
+  })().catch(() => {
     // Tracking must never block the product UI.
   })
 }

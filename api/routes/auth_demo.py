@@ -160,6 +160,7 @@ def preview_login(body: PreviewLoginRequest, request: Request) -> PreviewLoginRe
             path="/login",
             label="Preview login",
             payload={"username": display},
+            is_preview=True,
         )
     except Exception as exc:  # noqa: BLE001
         report_error(log, "preview_login_track_failed", exc)

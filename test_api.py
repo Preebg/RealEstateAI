@@ -59,6 +59,45 @@ def test_preview_activity_requires_auth() -> None:
     assert response.status_code == 401
 
 
+def test_usage_summary_requires_auth() -> None:
+    response = client.get("/api/usage/summary")
+    assert response.status_code == 401
+
+
+def test_usage_activity_requires_auth() -> None:
+    response = client.get("/api/usage/activity")
+    assert response.status_code == 401
+
+
+def test_legal_document_is_public() -> None:
+    response = client.get("/api/legal/privacy")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["slug"] == "privacy"
+    assert "Usage analytics" in body["body"]
+    assert body["title"]
+
+
+def test_legal_document_unknown_slug() -> None:
+    response = client.get("/api/legal/cookies")
+    assert response.status_code == 404
+
+
+def test_legal_update_requires_auth() -> None:
+    response = client.put("/api/legal/privacy", json={"body": "x" * 50})
+    assert response.status_code == 401
+
+
+def test_actor_for_registered_user() -> None:
+    from api.preview_activity import actor_for_user
+
+    label, is_preview = actor_for_user(
+        {"id": "abc", "email": "investor@example.com", "app_metadata": {}}
+    )
+    assert label == "investor@example.com"
+    assert is_preview is False
+
+
 def test_preview_accounts_require_auth() -> None:
     response = client.get("/api/preview/accounts")
     assert response.status_code == 401

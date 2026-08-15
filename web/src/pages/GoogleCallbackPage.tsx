@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { exchangeGoogleAuthCode, readGoogleOAuthCallback } from '../lib/googleOAuth'
+import { trackPreviewEvent } from '../lib/previewActivity'
 
 export function GoogleCallbackPage() {
   const navigate = useNavigate()
@@ -20,6 +21,7 @@ export function GoogleCallbackPage() {
           nonce: parts.nonce,
         })
         if (err) throw err
+        trackPreviewEvent('login', { path: '/login', label: 'Google sign-in' })
         window.history.replaceState(null, '', '/auth/google/callback')
         if (!cancelled) navigate('/', { replace: true })
       } catch (err) {
