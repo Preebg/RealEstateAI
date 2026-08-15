@@ -6,7 +6,7 @@ import { Link } from 'react-router-dom'
 import {
   fetchPortfolio,
   formatAddedAt,
-  numericBounds,
+  niceRange,
   propertySearchPath,
   rangeActive,
   type RangeBounds,
@@ -27,7 +27,9 @@ L.Icon.Default.mergeOptions({
 
 function money(n?: number) {
   if (n == null || Number.isNaN(n)) return '—'
-  return `$${Math.round(n).toLocaleString()}`
+  const rounded = Math.round(n)
+  if (rounded < 0) return `-$${Math.abs(rounded).toLocaleString()}`
+  return `$${rounded.toLocaleString()}`
 }
 
 function pct(n?: number, digits = 1) {
@@ -39,10 +41,16 @@ type Filters = {
   states: string[]
   cities: string[]
   price: RangeBounds
-  homeAge: RangeBounds
+  yearBuilt: RangeBounds
   rentalYield: RangeBounds
   cashFlow: RangeBounds
   locationScore: RangeBounds
+}
+
+function roundToStep(n: number, step: number): number {
+  if (!Number.isFinite(step) || step <= 0) return n
+  const decimals = Math.min((String(step).split('.')[1] || '').length, 8)
+  return Number((Math.round(n / step) * step).toFixed(decimals))
 }
 
 function RangeFilter({
@@ -61,6 +69,12 @@ function RangeFilter({
   step: number
 }) {
   const disabled = bounds.max <= bounds.min
+  const span = bounds.max - bounds.min || 1
+  const leftPct = ((value.min - bounds.min) / span) * 100
+  const rightPct = ((value.max - bounds.min) / span) * 100
+  const gap = bounds.max - bounds.min > step ? step : 0
+  const [dragging, setDragging] = useState<'min' | 'max' | null>(null)
+
   return (
     <div className="space-y-2 text-sm">
       <div className="flex items-baseline justify-between gap-2">
@@ -69,45 +83,63 @@ function RangeFilter({
           {format(value.min)} – {format(value.max)}
         </span>
       </div>
-      <label className="block">
-        <span className="sr-only">{label} minimum</span>
+      <div className="relative h-6">
+        <div className="pointer-events-none absolute top-1/2 h-1.5 w-full -translate-y-1/2 rounded-full bg-border" />
+        <div
+          className="pointer-events-none absolute top-1/2 h-1.5 -translate-y-1/2 rounded-full bg-primary"
+          style={{
+            left: `${leftPct}%`,
+            width: `${Math.max(rightPct - leftPct, 0)}%`,
+          }}
+        />
         <input
           type="range"
+          className="dual-range absolute top-1/2 left-0 w-full -translate-y-1/2"
+          style={{ zIndex: dragging === 'min' ? 5 : 3 }}
           min={bounds.min}
           max={bounds.max}
           step={step}
           disabled={disabled}
           value={value.min}
-          onChange={(e) => {
-            const min = Number(e.target.value)
-            onChange({ min: Math.min(min, value.max), max: value.max })
+          aria-label={`${label} minimum`}
+          onPointerDown={(e) => {
+            setDragging('min')
+            e.currentTarget.setPointerCapture(e.pointerId)
           }}
-          className="w-full accent-primary disabled:opacity-40"
+          onPointerUp={() => setDragging(null)}
+          onChange={(e) => {
+            const min = Math.min(roundToStep(Number(e.target.value), step), value.max - gap)
+            onChange({ min, max: value.max })
+          }}
         />
-      </label>
-      <label className="block">
-        <span className="sr-only">{label} maximum</span>
         <input
           type="range"
+          className="dual-range absolute top-1/2 left-0 w-full -translate-y-1/2"
+          style={{ zIndex: dragging === 'max' ? 5 : 4 }}
           min={bounds.min}
           max={bounds.max}
           step={step}
           disabled={disabled}
           value={value.max}
-          onChange={(e) => {
-            const max = Number(e.target.value)
-            onChange({ min: value.min, max: Math.max(max, value.min) })
+          aria-label={`${label} maximum`}
+          onPointerDown={(e) => {
+            setDragging('max')
+            e.currentTarget.setPointerCapture(e.pointerId)
           }}
-          className="w-full accent-primary disabled:opacity-40"
+          onPointerUp={() => setDragging(null)}
+          onChange={(e) => {
+            const max = Math.max(roundToStep(Number(e.target.value), step), value.min + gap)
+            onChange({ min: value.min, max })
+          }}
         />
-      </label>
+      </div>
     </div>
   )
 }
 
 function applyFilters(properties: PortfolioItem[], filters: Filters, bounds: {
   price: RangeBounds
-  homeAge: RangeBounds
+  yearBuilt: RangeBounds
   rentalYield: RangeBounds
   cashFlow: RangeBounds
   locationScore: RangeBounds
@@ -128,11 +160,11 @@ function applyFilters(properties: PortfolioItem[], filters: Filters, bounds: {
       return false
     }
 
-    if (rangeActive(filters.homeAge, bounds.homeAge)) {
-      // Unknown age stays visible (matches Streamlit year_built mask).
+    if (rangeActive(filters.yearBuilt, bounds.yearBuilt)) {
+      // Unknown year stays visible (matches Streamlit year_built mask).
       if (
-        p.home_age != null &&
-        (p.home_age < filters.homeAge.min || p.home_age > filters.homeAge.max)
+        p.year_built != null &&
+        (p.year_built < filters.yearBuilt.min || p.year_built > filters.yearBuilt.max)
       ) {
         return false
       }
@@ -178,24 +210,25 @@ export function HomePage() {
   const properties = data?.properties ?? []
 
   const filterBounds = useMemo(() => {
+    const currentYear = new Date().getFullYear()
     return {
-      price: numericBounds(
+      price: niceRange(
         properties.map((p) => p.price ?? p.predicted_value),
         { min: 0, max: 1_000_000 },
       ),
-      homeAge: numericBounds(
-        properties.map((p) => p.home_age),
-        { min: 0, max: 100 },
+      yearBuilt: niceRange(
+        properties.map((p) => p.year_built),
+        { min: 1900, max: currentYear },
       ),
-      rentalYield: numericBounds(
+      rentalYield: niceRange(
         properties.map((p) => p.rental_yield),
         { min: 0, max: 20 },
       ),
-      cashFlow: numericBounds(
+      cashFlow: niceRange(
         properties.map((p) => p.monthly_cash_flow),
         { min: -2000, max: 5000 },
       ),
-      locationScore: numericBounds(
+      locationScore: niceRange(
         properties.map((p) => p.location_score),
         { min: 0, max: 10 },
       ),
@@ -222,22 +255,28 @@ export function HomePage() {
     setFilters({
       states: [],
       cities: [],
-      price: { ...filterBounds.price },
-      homeAge: { ...filterBounds.homeAge },
-      rentalYield: { ...filterBounds.rentalYield },
-      cashFlow: { ...filterBounds.cashFlow },
-      locationScore: { ...filterBounds.locationScore },
+      price: { min: filterBounds.price.min, max: filterBounds.price.max },
+      yearBuilt: { min: filterBounds.yearBuilt.min, max: filterBounds.yearBuilt.max },
+      rentalYield: { min: filterBounds.rentalYield.min, max: filterBounds.rentalYield.max },
+      cashFlow: { min: filterBounds.cashFlow.min, max: filterBounds.cashFlow.max },
+      locationScore: {
+        min: filterBounds.locationScore.min,
+        max: filterBounds.locationScore.max,
+      },
     })
   }, [filterBounds, filters, properties.length])
 
   const activeFilters = filters ?? {
     states: [],
     cities: [],
-    price: filterBounds.price,
-    homeAge: filterBounds.homeAge,
-    rentalYield: filterBounds.rentalYield,
-    cashFlow: filterBounds.cashFlow,
-    locationScore: filterBounds.locationScore,
+    price: { min: filterBounds.price.min, max: filterBounds.price.max },
+    yearBuilt: { min: filterBounds.yearBuilt.min, max: filterBounds.yearBuilt.max },
+    rentalYield: { min: filterBounds.rentalYield.min, max: filterBounds.rentalYield.max },
+    cashFlow: { min: filterBounds.cashFlow.min, max: filterBounds.cashFlow.max },
+    locationScore: {
+      min: filterBounds.locationScore.min,
+      max: filterBounds.locationScore.max,
+    },
   }
 
   const filtered = useMemo(
@@ -266,33 +305,16 @@ export function HomePage() {
     setFilters({
       states: [],
       cities: [],
-      price: { ...filterBounds.price },
-      homeAge: { ...filterBounds.homeAge },
-      rentalYield: { ...filterBounds.rentalYield },
-      cashFlow: { ...filterBounds.cashFlow },
-      locationScore: { ...filterBounds.locationScore },
+      price: { min: filterBounds.price.min, max: filterBounds.price.max },
+      yearBuilt: { min: filterBounds.yearBuilt.min, max: filterBounds.yearBuilt.max },
+      rentalYield: { min: filterBounds.rentalYield.min, max: filterBounds.rentalYield.max },
+      cashFlow: { min: filterBounds.cashFlow.min, max: filterBounds.cashFlow.max },
+      locationScore: {
+        min: filterBounds.locationScore.min,
+        max: filterBounds.locationScore.max,
+      },
     })
   }
-
-  const priceStep = Math.max(
-    1000,
-    Math.round((filterBounds.price.max - filterBounds.price.min) / 100) || 1000,
-  )
-  const yieldStep = Math.max(
-    0.1,
-    Number(((filterBounds.rentalYield.max - filterBounds.rentalYield.min) / 100).toFixed(2)) ||
-      0.1,
-  )
-  const cashStep = Math.max(
-    50,
-    Math.round((filterBounds.cashFlow.max - filterBounds.cashFlow.min) / 100) || 50,
-  )
-  const locationStep = Math.max(
-    0.1,
-    Number(
-      ((filterBounds.locationScore.max - filterBounds.locationScore.min) / 20).toFixed(1),
-    ) || 0.1,
-  )
 
   return (
     <div className="space-y-6">
@@ -376,23 +398,23 @@ export function HomePage() {
               label="Price"
               bounds={filterBounds.price}
               value={activeFilters.price}
-              step={priceStep}
+              step={filterBounds.price.step}
               format={(n) => money(n)}
               onChange={(price) => setFilters({ ...activeFilters, price })}
             />
             <RangeFilter
-              label="Home age (years)"
-              bounds={filterBounds.homeAge}
-              value={activeFilters.homeAge}
-              step={1}
-              format={(n) => `${Math.round(n)} yrs`}
-              onChange={(homeAge) => setFilters({ ...activeFilters, homeAge })}
+              label="Year built"
+              bounds={filterBounds.yearBuilt}
+              value={activeFilters.yearBuilt}
+              step={filterBounds.yearBuilt.step}
+              format={(n) => String(Math.round(n))}
+              onChange={(yearBuilt) => setFilters({ ...activeFilters, yearBuilt })}
             />
             <RangeFilter
               label="Rental yield"
               bounds={filterBounds.rentalYield}
               value={activeFilters.rentalYield}
-              step={yieldStep}
+              step={filterBounds.rentalYield.step}
               format={(n) => pct(n)}
               onChange={(rentalYield) => setFilters({ ...activeFilters, rentalYield })}
             />
@@ -400,7 +422,7 @@ export function HomePage() {
               label="Monthly cash flow"
               bounds={filterBounds.cashFlow}
               value={activeFilters.cashFlow}
-              step={cashStep}
+              step={filterBounds.cashFlow.step}
               format={(n) => money(n)}
               onChange={(cashFlow) => setFilters({ ...activeFilters, cashFlow })}
             />
@@ -408,7 +430,7 @@ export function HomePage() {
               label="Location score"
               bounds={filterBounds.locationScore}
               value={activeFilters.locationScore}
-              step={locationStep}
+              step={filterBounds.locationScore.step}
               format={(n) => n.toFixed(1)}
               onChange={(locationScore) => setFilters({ ...activeFilters, locationScore })}
             />
@@ -436,6 +458,7 @@ export function HomePage() {
                 <div className="space-y-1 text-sm">
                   <p className="font-semibold">{p.address}</p>
                   <p>Price: {money(p.price ?? p.predicted_value)}</p>
+                  <p>Year built: {p.year_built != null ? p.year_built : '—'}</p>
                   <p>Rent: {money(p.rent)}/mo</p>
                   <p>Yield: {pct(p.rental_yield)}</p>
                   <p title={p.added_at ? new Date(p.added_at).toLocaleString() : undefined}>
@@ -467,7 +490,7 @@ export function HomePage() {
                 <th className="px-3 py-2 font-medium">Price</th>
                 <th className="px-3 py-2 font-medium">Rent</th>
                 <th className="px-3 py-2 font-medium">Yield</th>
-                <th className="px-3 py-2 font-medium">Age</th>
+                <th className="px-3 py-2 font-medium">Year built</th>
                 <th className="px-3 py-2 font-medium">Cash flow</th>
                 <th className="px-3 py-2 font-medium">Score</th>
               </tr>
@@ -493,7 +516,7 @@ export function HomePage() {
                   <td className="px-3 py-2">{money(p.rent)}</td>
                   <td className="px-3 py-2">{pct(p.rental_yield)}</td>
                   <td className="px-3 py-2">
-                    {p.home_age != null ? `${p.home_age} yrs` : '—'}
+                    {p.year_built != null ? p.year_built : '—'}
                   </td>
                   <td className="px-3 py-2">{money(p.monthly_cash_flow)}</td>
                   <td className="px-3 py-2">

@@ -105,7 +105,6 @@ export type PortfolioItem = {
   location_score?: number
   rent?: number
   year_built?: number
-  home_age?: number
   monthly_cash_flow?: number
   rental_yield?: number
   one_year_roi?: number

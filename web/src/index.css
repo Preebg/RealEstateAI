@@ -37,3 +37,56 @@
     letter-spacing: -0.025em;
   }
 }
+
+@layer components {
+  /* Dual-thumb range: two stacked inputs, only the thumbs receive pointer events. */
+  .dual-range {
+    -webkit-appearance: none;
+    appearance: none;
+    background: transparent;
+    pointer-events: none;
+    height: 1rem;
+  }
+
+  .dual-range::-webkit-slider-runnable-track {
+    height: 1rem;
+    background: transparent;
+  }
+
+  .dual-range::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    pointer-events: auto;
+    width: 1rem;
+    height: 1rem;
+    margin-top: 0;
+    border-radius: 9999px;
+    background: var(--color-primary);
+    border: 2px solid #fff;
+    box-shadow: 0 1px 2px rgb(0 0 0 / 0.25);
+    cursor: pointer;
+  }
+
+  .dual-range::-moz-range-track {
+    height: 1rem;
+    background: transparent;
+    border: none;
+  }
+
+  .dual-range::-moz-range-thumb {
+    pointer-events: auto;
+    width: 1rem;
+    height: 1rem;
+    border: 2px solid #fff;
+    border-radius: 9999px;
+    background: var(--color-primary);
+    box-shadow: 0 1px 2px rgb(0 0 0 / 0.25);
+    cursor: pointer;
+  }
+
+  .dual-range:disabled::-webkit-slider-thumb,
+  .dual-range:disabled::-moz-range-thumb {
+    cursor: not-allowed;
+    opacity: 0.45;
+  }
+}

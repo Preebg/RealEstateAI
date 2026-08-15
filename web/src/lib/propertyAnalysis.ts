@@ -54,6 +54,20 @@ export function moneyExact(n: number): string {
   return n < 0 ? `-$${abs}` : `$${abs}`
 }
 
+export function parseYearBuilt(raw: Record<string, unknown>): number | undefined {
+  for (const key of ['year_built', 'year'] as const) {
+    const n = Number(raw[key])
+    if (Number.isFinite(n) && n >= 1800) return Math.round(n)
+  }
+  return undefined
+}
+
+export function formatYearBuilt(value: unknown): string {
+  const n = Number(value)
+  if (!Number.isFinite(n) || n < 1800) return '—'
+  return String(Math.round(n))
+}
+
 export function hydrateProperty(raw: Record<string, unknown>): Record<string, unknown> {
   const rent = num(raw.rent ?? raw.estimated_rent ?? raw.original_ai_rent, 0)
   const score = num(raw.quantum_risk_score)
@@ -75,6 +89,7 @@ export function hydrateProperty(raw: Record<string, unknown>): Record<string, un
     property_id: raw.property_id ?? raw.id,
     rent: rent > 0 ? rent : raw.rent,
     sqft: raw.square_footage ?? raw.sqft,
+    year_built: parseYearBuilt(raw),
     strategy:
       raw.strategy || raw.strategy_tag || raw.property_label || raw.property_category,
     quantum_risk: quantum,
@@ -256,6 +271,7 @@ export function downloadPropertyPdf(opts: {
     summary: typeof property.summary === 'string' ? property.summary : undefined,
     locationScore: num(property.location_score, 5),
     strategy: property.strategy != null ? String(property.strategy) : undefined,
+    yearBuilt: parseYearBuilt(property),
     price,
     assumptions,
     finance,

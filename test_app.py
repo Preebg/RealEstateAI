@@ -3338,6 +3338,7 @@ class TestPdfGenerator(unittest.TestCase):
 
         property_info = {
             "summary": "Test property summary.",
+            "year_built": 1968,
             "comps_analysis": {
                 "comparable_properties": [
                     {
@@ -3408,7 +3409,19 @@ class TestPdfGenerator(unittest.TestCase):
         self.assertGreater(len(pdf_bytes), 5000)
         self.assertIn(b"CapEigen", pdf_bytes)
 
-    def test_pdf_download_filename_includes_brand_and_address(self):
+    def test_pdf_params_include_year_built(self):
+        from pdf_generator import _params_with_year_built
+
+        merged = _params_with_year_built(
+            {"Offer Amount": "$100,000"},
+            {"year_built": 1968},
+        )
+        self.assertEqual(merged["Year built"], "1968")
+        already = _params_with_year_built(
+            {"Year built": "1999"},
+            {"year_built": 1968},
+        )
+        self.assertEqual(already["Year built"], "1999")
         from pdf_generator import pdf_content_disposition, pdf_download_filename
 
         name = pdf_download_filename("123 Main St, Austin, TX")

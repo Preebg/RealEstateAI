@@ -606,6 +606,34 @@ def _data_table(
     return table
 
 
+def _format_year_built(property_info: dict[str, Any]) -> str | None:
+    """4-digit construction year from listing facts, if trustworthy."""
+    for key in ("year_built", "year"):
+        raw = property_info.get(key)
+        if raw in (None, "", 0):
+            continue
+        try:
+            year = int(float(raw))
+        except (TypeError, ValueError):
+            continue
+        if year >= 1800:
+            return str(year)
+    return None
+
+
+def _params_with_year_built(
+    params: dict[str, Any], property_info: dict[str, Any]
+) -> dict[str, Any]:
+    year_built = _format_year_built(property_info)
+    if not year_built:
+        return params
+    if any(str(key).strip().lower() == "year built" for key in params):
+        return params
+    merged = dict(params)
+    merged["Year built"] = year_built
+    return merged
+
+
 def generate_property_pdf(
     address,
     property_info,
@@ -626,6 +654,7 @@ def generate_property_pdf(
         metrics = {}
     if not isinstance(property_info, dict):
         property_info = {}
+    params = _params_with_year_built(params, property_info)
 
     story: list[Any] = []
     story.append(_hero(str(address or ""), styles))

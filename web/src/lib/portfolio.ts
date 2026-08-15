@@ -24,9 +24,12 @@ function resolvePrice(row: Record<string, unknown>): number | undefined {
   return asNumber(row.predicted_value)
 }
 
-function computeHomeAge(yearBuilt: number | undefined): number | undefined {
-  if (yearBuilt == null || yearBuilt < 1800) return undefined
-  return Math.max(new Date().getFullYear() - yearBuilt, 0)
+function parseYearBuilt(row: Record<string, unknown>): number | undefined {
+  for (const key of ['year_built', 'year'] as const) {
+    const n = asNumber(row[key])
+    if (n != null && n >= 1800) return Math.round(n)
+  }
+  return undefined
 }
 
 /** Gross rental yield: annual rent / price. */
@@ -56,7 +59,7 @@ function computeOneYearRoi(
 function rowToItem(row: Record<string, unknown>): PortfolioItem {
   const price = resolvePrice(row)
   const rent = resolveRent(row)
-  const yearBuilt = asNumber(row.year_built)
+  const yearBuilt = parseYearBuilt(row)
   const monthlyCashFlow =
     asNumber(row.monthly_cash_flow) ?? asNumber(row.monthly_net_cash_flow)
   const forecastRate = asNumber(row.forecast_rate)
@@ -73,7 +76,6 @@ function rowToItem(row: Record<string, unknown>): PortfolioItem {
     location_score: asNumber(row.location_score),
     rent,
     year_built: yearBuilt,
-    home_age: computeHomeAge(yearBuilt),
     monthly_cash_flow: monthlyCashFlow,
     rental_yield: computeRentalYield(rent, price),
     one_year_roi: computeOneYearRoi(price, monthlyCashFlow, forecastRate),
@@ -322,17 +324,53 @@ export async function fetchPortfolio(): Promise<{
 }
 
 export type RangeBounds = { min: number; max: number }
+export type RangeSpec = RangeBounds & { step: number }
 
-export function numericBounds(
+function stepDecimals(step: number): number {
+  const text = String(step)
+  const i = text.indexOf('.')
+  return i === -1 ? 0 : text.length - i - 1
+}
+
+function snap(value: number, step: number, mode: 'floor' | 'ceil'): number {
+  const decimals = Math.min(stepDecimals(step), 8)
+  const scaled = value / step
+  const snapped = (mode === 'floor' ? Math.floor(scaled + 1e-9) : Math.ceil(scaled - 1e-9)) * step
+  return Number(snapped.toFixed(decimals))
+}
+
+/** 1-2-5 magnitude so slider ticks land on round numbers. */
+export function niceStep(span: number, targetTicks = 20): number {
+  if (!Number.isFinite(span) || span <= 0) return 1
+  const raw = span / targetTicks
+  const exp = Math.floor(Math.log10(raw))
+  const mag = 10 ** exp
+  const residual = raw / mag
+  const nice = residual <= 1 ? 1 : residual <= 2 ? 2 : residual <= 5 ? 5 : 10
+  const step = nice * mag
+  const decimals = Math.min(Math.max(-exp, 0), 8)
+  return Number(step.toFixed(decimals))
+}
+
+/** Expand data min/max to round endpoints and a matching slider step. */
+export function niceRange(
   values: Array<number | undefined>,
   fallback: RangeBounds,
-): RangeBounds {
+): RangeSpec {
   const nums = values.filter((v): v is number => v != null && Number.isFinite(v))
-  if (nums.length === 0) return fallback
-  const min = Math.min(...nums)
-  const max = Math.max(...nums)
-  if (max <= min) return { min, max: min + 1 }
-  return { min, max }
+  if (nums.length === 0) {
+    const span = fallback.max - fallback.min
+    const step = niceStep(span > 0 ? span : 1)
+    return { min: fallback.min, max: fallback.max, step }
+  }
+  const dataMin = Math.min(...nums)
+  const dataMax = Math.max(...nums)
+  const span = dataMax - dataMin
+  const step = niceStep(span > 0 ? span : Math.abs(dataMin) || 1)
+  const min = snap(dataMin, step, 'floor')
+  let max = snap(dataMax, step, 'ceil')
+  if (max <= min) max = Number((min + step).toFixed(Math.min(stepDecimals(step), 8)))
+  return { min, max, step }
 }
 
 export function rangeActive(

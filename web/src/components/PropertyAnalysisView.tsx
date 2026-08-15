@@ -16,6 +16,7 @@ import {
   downloadPropertyPdf,
   financeFromProperty,
   forecastYearlyValues,
+  formatYearBuilt,
   hydrateProperty,
   money,
   num,
@@ -226,6 +227,7 @@ export function PropertyAnalysisView({
                 ['Cap rate', `${num(finance?.cap_rate).toFixed(2)}%`],
                 ['Cash on cash', `${num(finance?.cash_on_cash).toFixed(2)}%`],
                 ['Location score', `${num(property.location_score, 5).toFixed(1)}/10`],
+                ['Year built', formatYearBuilt(property.year_built)],
                 [
                   'Quantum alignment',
                   property.quantum_risk

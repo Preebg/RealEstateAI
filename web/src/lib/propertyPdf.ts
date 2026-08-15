@@ -29,6 +29,7 @@ export type PropertyPdfInput = {
   summary?: string
   locationScore: number
   strategy?: string
+  yearBuilt?: number
   price: number
   assumptions: {
     down_payment_pct: number
@@ -293,6 +294,7 @@ export function buildPropertyPdfBlob(input: PropertyPdfInput): Blob {
   y = sectionTitle(doc, 'Underwriting assumptions', y)
   const params: Array<[string, string]> = [
     ['Offer amount', money(input.price)],
+    ['Year built', input.yearBuilt != null && input.yearBuilt >= 1800 ? String(input.yearBuilt) : '—'],
     ['Down payment', `${input.assumptions.down_payment_pct}%`],
     ['Interest rate', `${input.assumptions.interest_rate}%`],
     ['Loan term', `${input.assumptions.loan_term} years`],
