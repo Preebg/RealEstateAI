@@ -46,6 +46,7 @@ services:
 
   api:
     build: .
+    restart: unless-stopped
     ports:
       - "8000:8000"
     env_file:
@@ -64,6 +65,9 @@ services:
       - rest-gateway
     command: >
       uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
+      --reload-exclude __pycache__
+      --reload-exclude "*.pyc"
+      --reload-exclude .git
 
 volumes:
   postgres_data:

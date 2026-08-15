@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from datetime import datetime, timezone
 from typing import Any
 
-from postgrest.exceptions import APIError
+import httpx
 
-from authenticate import get_db_client, get_service_client
+from authenticate import get_data_base_url, using_local_database
 from app_logging import configure_logging, report_error
 from config_secrets import normalize_secret_value
 
@@ -18,6 +19,7 @@ log = configure_logging("preview_usernames")
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_]{2,32}$")
 PREVIEW_EMAIL_DOMAIN = "demo.capeigen.app"
 _DEFAULT_USERNAMES = "salifT"
+_CONFIG_KEY = "preview_usernames"
 
 
 def preview_email_for(username_key: str) -> str:
@@ -35,12 +37,134 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _data_client() -> Any | None:
+def _rest_key() -> str:
+    return (
+        normalize_secret_value(os.getenv("SUPABASE_SERVICE_ROLE_KEY"))
+        or normalize_secret_value(os.getenv("SUPABASE_KEY"))
+        or "local-service-key"
+    )
+
+
+def _rest_headers(*, prefer: str) -> dict[str, str]:
+    key = _rest_key()
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "apikey": key,
+        "Prefer": prefer,
+    }
+    # Local PostgREST has no JWT secret. Authorization → PGRST300.
+    if not using_local_database():
+        headers["Authorization"] = f"Bearer {key}"
+    return headers
+
+
+def _rest_url(path: str) -> str:
+    return f"{get_data_base_url().rstrip('/')}/rest/v1/{path.lstrip('/')}"
+
+
+def _table_missing(response: httpx.Response) -> bool:
+    text = (response.text or "").lower()
+    return response.status_code in {404, 406} or "pgrst205" in text or "could not find the table" in text
+
+
+def _rest_error_message(response: httpx.Response, action: str) -> str:
+    raw = (response.text or "").strip()
+    payload: dict[str, Any] = {}
     try:
-        return get_service_client() or get_db_client()
-    except Exception as exc:  # noqa: BLE001
-        report_error(log, "preview_usernames_client_failed", exc)
+        parsed = response.json()
+        if isinstance(parsed, dict):
+            payload = parsed
+    except Exception:
+        payload = {}
+    detail = str(
+        payload.get("message")
+        or payload.get("hint")
+        or payload.get("details")
+        or raw
+        or response.reason_phrase
+    )
+    if _table_missing(response):
+        return (
+            "The harvest API cannot write preview usernames because Docker Postgres "
+            "is missing preview_usernames (or PostgREST has not reloaded it). "
+            "Start postgres, postgrest, rest-gateway, and api, then retry."
+        )
+    if "pgrst300" in detail.lower() or "jwt secret" in detail.lower():
+        return (
+            "Local Postgres rejected a JWT. The harvest API must call PostgREST "
+            "without an Authorization header."
+        )
+    return f"Could not {action} (HTTP {response.status_code}): {detail[:280]}"
+
+
+def _rest_get(path: str, params: dict[str, str]) -> httpx.Response:
+    with httpx.Client(timeout=20.0) as client:
+        return client.get(
+            _rest_url(path),
+            params=params,
+            headers=_rest_headers(prefer="count=none"),
+        )
+
+
+def _rest_upsert(path: str, row: dict[str, Any]) -> httpx.Response:
+    with httpx.Client(timeout=20.0) as client:
+        return client.post(
+            _rest_url(path),
+            json=row,
+            headers=_rest_headers(prefer="resolution=merge-duplicates,return=minimal"),
+        )
+
+
+def _fetch_table_rows() -> list[dict[str, Any]] | None:
+    """Rows from preview_usernames, or None if the table is unavailable."""
+    try:
+        response = _rest_get(
+            "preview_usernames",
+            {
+                "select": "username_key,username,active,created_at,created_by,updated_at",
+                "order": "created_at.asc",
+            },
+        )
+    except httpx.HTTPError as exc:
+        report_error(log, "preview_usernames_list_failed", exc)
         return None
+    if response.status_code >= 400:
+        report_error(log, "preview_usernames_list_failed", RuntimeError(response.text[:300]))
+        return None
+    data = response.json()
+    return data if isinstance(data, list) else []
+
+
+def _fetch_config_rows() -> list[dict[str, Any]]:
+    try:
+        response = _rest_get(
+            "app_runtime_config",
+            {"select": "value", "key": f"eq.{_CONFIG_KEY}"},
+        )
+    except httpx.HTTPError as exc:
+        report_error(log, "preview_usernames_config_list_failed", exc)
+        return []
+    if response.status_code >= 400:
+        return []
+    data = response.json()
+    if not isinstance(data, list) or not data:
+        return []
+    raw = data[0].get("value") if isinstance(data[0], dict) else "[]"
+    try:
+        parsed = json.loads(raw or "[]")
+    except json.JSONDecodeError:
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
+def _save_config_rows(rows: list[dict[str, Any]]) -> None:
+    response = _rest_upsert(
+        "app_runtime_config?on_conflict=key",
+        {"key": _CONFIG_KEY, "value": json.dumps(rows)},
+    )
+    if response.status_code >= 400:
+        raise RuntimeError(_rest_error_message(response, "save preview username"))
 
 
 def env_username_map() -> dict[str, str]:
@@ -55,23 +179,10 @@ def env_username_map() -> dict[str, str]:
 
 
 def _db_username_rows() -> list[dict[str, Any]]:
-    client = _data_client()
-    if client is None:
-        return []
-    try:
-        response = (
-            client.table("preview_usernames")
-            .select("username_key,username,active,created_at,created_by,updated_at")
-            .order("created_at")
-            .execute()
-        )
-    except APIError as exc:
-        report_error(log, "preview_usernames_list_failed", exc)
-        return []
-    except Exception as exc:  # noqa: BLE001
-        report_error(log, "preview_usernames_list_failed", exc)
-        return []
-    return response.data or []
+    table_rows = _fetch_table_rows()
+    if table_rows is not None:
+        return table_rows
+    return _fetch_config_rows()
 
 
 def preview_username_map() -> dict[str, str]:
@@ -98,25 +209,28 @@ def resolve_preview_username(username: str) -> str | None:
 
 def _event_stats() -> dict[str, dict[str, Any]]:
     stats: dict[str, dict[str, Any]] = {}
-    client = _data_client()
-    if client is None:
-        return stats
     try:
-        response = (
-            client.table("preview_events")
-            .select("username,event_type,created_at")
-            .order("created_at", desc=True)
-            .limit(2000)
-            .execute()
+        response = _rest_get(
+            "preview_events",
+            {
+                "select": "username,event_type,created_at",
+                "order": "created_at.desc",
+                "limit": "2000",
+            },
         )
-    except APIError as exc:
+    except httpx.HTTPError as exc:
         report_error(log, "preview_username_stats_failed", exc)
         return stats
-    except Exception as exc:  # noqa: BLE001
-        report_error(log, "preview_username_stats_failed", exc)
+    if response.status_code >= 400:
+        report_error(log, "preview_username_stats_failed", RuntimeError(response.text[:300]))
+        return stats
+    events = response.json()
+    if not isinstance(events, list):
         return stats
 
-    for event in response.data or []:
+    for event in events:
+        if not isinstance(event, dict):
+            continue
         display = str(event.get("username") or "").strip()
         if not display:
             continue
@@ -202,23 +316,49 @@ def upsert_preview_username(username: str, *, active: bool, created_by: str | No
     display = normalize_username(username)
     if display is None:
         raise ValueError("Usernames must be 2–32 letters, numbers, or underscores.")
-    client = _data_client()
-    if client is None:
-        raise RuntimeError("Preview username storage is not available.")
     key = display.lower()
+    now = _now_iso()
     row = {
         "username_key": key,
         "username": display,
         "active": active,
-        "updated_at": _now_iso(),
+        "updated_at": now,
     }
     if created_by:
         row["created_by"] = created_by
+
+    table_rows = _fetch_table_rows()
+    if table_rows is not None:
+        try:
+            response = _rest_upsert("preview_usernames?on_conflict=username_key", row)
+        except httpx.HTTPError as exc:
+            report_error(log, "preview_username_upsert_failed", exc, username=display)
+            raise RuntimeError(
+                "Harvest API cannot reach local Postgres. Start Docker (postgres/postgrest/api)."
+            ) from exc
+        if response.status_code < 400:
+            return display
+        if not _table_missing(response):
+            raise RuntimeError(_rest_error_message(response, "save preview username"))
+
+    rows = [item for item in _fetch_config_rows() if isinstance(item, dict)]
+    found = False
+    for existing in rows:
+        if str(existing.get("username_key") or "").lower() == key:
+            existing.update(row)
+            if "created_at" not in existing:
+                existing["created_at"] = now
+            found = True
+            break
+    if not found:
+        rows.append({**row, "created_at": now})
     try:
-        client.table("preview_usernames").upsert(row, on_conflict="username_key").execute()
-    except APIError as exc:
+        _save_config_rows(rows)
+    except httpx.HTTPError as exc:
         report_error(log, "preview_username_upsert_failed", exc, username=display)
-        raise RuntimeError("Could not save preview username.") from exc
+        raise RuntimeError(
+            "Harvest API cannot reach local Postgres. Start Docker (postgres/postgrest/api)."
+        ) from exc
     return display
 
 
