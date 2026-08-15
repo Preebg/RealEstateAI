@@ -31,7 +31,7 @@ The portfolio map reads `/api/portfolio` from the harvest machine (local Postgre
 
 If you see `Unexpected token '<'… is not valid JSON`, the SPA called `/api/*` on Pages and got `index.html` back — set `VITE_API_URL` to the harvest Caddy/Tunnel origin and redeploy.
 
-SPA client routes are rewritten via `web/public/_redirects`. Function routes are listed in `web/functions/_routes.json` so static assets are not billed as Worker invocations.
+SPA client routes use Wrangler `not_found_handling: "single-page-application"`. Auth routes run in `web/worker.js` (`/api/auth/*`).
 
 ## Backend (Docker)
 
