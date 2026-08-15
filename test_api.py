@@ -157,3 +157,110 @@ def test_portfolio_list_item_uses_ai_rent_and_timestamp() -> None:
     assert item["monthly_cash_flow"] == 250
     assert item["sqft"] == 1200
     assert item["added_at"] == "2026-08-14T12:00:00+00:00"
+    assert item["app_view_count"] == 0
+
+
+def test_property_view_requires_auth() -> None:
+    response = client.post(
+        "/api/properties/view",
+        json={"property_id": "7f35bc1e-9de5-484d-8f73-27fd3da733eb"},
+    )
+    assert response.status_code == 401
+
+
+def test_property_of_the_day_requires_auth() -> None:
+    response = client.get("/api/property-of-the-day")
+    assert response.status_code == 401
+
+
+def test_legal_document_mentions_property_of_the_day() -> None:
+    privacy = client.get("/api/legal/privacy")
+    assert privacy.status_code == 200
+    assert "Property of the Day" in privacy.json()["body"]
+    assert "viewership" in privacy.json()["body"].lower()
+    terms = client.get("/api/legal/terms")
+    assert terms.status_code == 200
+    assert "Property of the Day" in terms.json()["body"]
+
+
+def test_select_property_of_the_day_prefers_cashflow_low_risk_neighborhood() -> None:
+    from datetime import date
+
+    from property_popularity import select_property_of_the_day
+
+    properties = [
+        {
+            "id": "11111111-1111-1111-1111-111111111111",
+            "address": "Negative CF",
+            "monthly_net_cash_flow": -50,
+            "quantum_risk_score": 90,
+            "location_score": 9,
+        },
+        {
+            "id": "22222222-2222-2222-2222-222222222222",
+            "address": "Cashflow but high risk",
+            "monthly_net_cash_flow": 400,
+            "quantum_risk_score": 20,
+            "location_score": 8,
+        },
+        {
+            "id": "33333333-3333-3333-3333-333333333333",
+            "address": "Best match",
+            "monthly_net_cash_flow": 250,
+            "quantum_risk_score": 80,
+            "location_score": 8.5,
+        },
+        {
+            "id": "44444444-4444-4444-4444-444444444444",
+            "address": "Low risk weaker neighborhood",
+            "monthly_net_cash_flow": 300,
+            "quantum_risk_score": 85,
+            "location_score": 4,
+        },
+    ]
+    chosen = select_property_of_the_day(properties, date(2026, 8, 15))
+    assert chosen is not None
+    assert chosen["address"] == "Best match"
+
+
+def test_select_property_of_the_day_is_deterministic_for_a_date() -> None:
+    from datetime import date
+
+    from property_popularity import select_property_of_the_day
+
+    properties = [
+        {
+            "id": f"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa{i}",
+            "address": f"Deal {i}",
+            "monthly_net_cash_flow": 200 + i,
+            "quantum_risk_score": 70,
+            "location_score": 8,
+        }
+        for i in range(5)
+    ]
+    first = select_property_of_the_day(properties, date(2026, 1, 1))
+    second = select_property_of_the_day(properties, date(2026, 1, 1))
+    other = select_property_of_the_day(properties, date(2026, 1, 2))
+    assert first is not None and second is not None
+    assert first["id"] == second["id"]
+    assert other is not None
+    assert other["id"] != first["id"] or len(properties) == 1
+
+
+def test_select_property_of_the_day_returns_none_without_positive_cashflow() -> None:
+    from datetime import date
+
+    from property_popularity import select_property_of_the_day
+
+    chosen = select_property_of_the_day(
+        [
+            {
+                "id": "55555555-5555-5555-5555-555555555555",
+                "monthly_net_cash_flow": 0,
+                "quantum_risk_score": 99,
+                "location_score": 10,
+            }
+        ],
+        date(2026, 8, 15),
+    )
+    assert chosen is None

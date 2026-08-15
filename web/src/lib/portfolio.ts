@@ -89,6 +89,9 @@ function rowToItem(row: Record<string, unknown>): PortfolioItem {
       (row.property_label as string | undefined) ||
       (row.property_category as string | undefined),
     added_at: added != null ? String(added) : undefined,
+    app_view_count: Math.max(0, Math.round(asNumber(row.app_view_count) ?? 0)),
+    primary_image_url:
+      row.primary_image_url != null ? String(row.primary_image_url) : undefined,
   }
 }
 
@@ -379,4 +382,43 @@ export function rangeActive(
   epsilon = 1e-9,
 ): boolean {
   return selected.min > bounds.min + epsilon || selected.max < bounds.max - epsilon
+}
+
+export async function recordPropertyView(propertyId: string): Promise<number> {
+  const id = firstCatalogUuid(propertyId)
+  if (!id) return 0
+  const data = await apiFetch<{ app_view_count?: number }>('/api/properties/view', {
+    method: 'POST',
+    body: JSON.stringify({ property_id: id }),
+  })
+  return Math.max(0, Math.round(Number(data.app_view_count) || 0))
+}
+
+export type PropertyOfDayPayload = {
+  show: boolean
+  feature_date: string
+  viewer_date: string
+  property: PortfolioItem | null
+  reasons: string[]
+}
+
+export async function fetchPropertyOfTheDay(timeZone?: string): Promise<PropertyOfDayPayload> {
+  const params = new URLSearchParams()
+  if (timeZone) params.set('tz', timeZone)
+  const qs = params.toString()
+  const data = await apiFetch<{
+    show?: boolean
+    feature_date?: string
+    viewer_date?: string
+    property?: Record<string, unknown> | null
+    reasons?: string[]
+  }>(`/api/property-of-the-day${qs ? `?${qs}` : ''}`)
+  const raw = data.property && typeof data.property === 'object' ? data.property : null
+  return {
+    show: data.show === true,
+    feature_date: data.feature_date || '',
+    viewer_date: data.viewer_date || '',
+    property: raw ? rowToItem(raw) : null,
+    reasons: Array.isArray(data.reasons) ? data.reasons.map(String) : [],
+  }
 }

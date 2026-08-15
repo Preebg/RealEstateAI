@@ -65,6 +65,7 @@ ACTIVE_PROPERTY_LIST_COLUMNS = (
     "listing_status",
     "days_on_market",
     "view_count",
+    "app_view_count",
     "timestamp",
     "environmental_risk",
 )

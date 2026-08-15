@@ -164,6 +164,23 @@ class BookmarkRequest(BaseModel):
     property_data: dict[str, Any] | None = None
 
 
+class PropertyViewRequest(BaseModel):
+    property_id: str = Field(min_length=1, max_length=80)
+
+
+class PropertyViewResponse(BaseModel):
+    property_id: str
+    app_view_count: int
+
+
+class PropertyOfDayResponse(BaseModel):
+    show: bool
+    feature_date: str
+    viewer_date: str
+    property: dict[str, Any] | None = None
+    reasons: list[str] = Field(default_factory=list)
+
+
 class ShareCreateRequest(BaseModel):
     property_id: str
     include_assumptions: bool = True

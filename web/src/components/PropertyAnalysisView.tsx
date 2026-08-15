@@ -229,6 +229,10 @@ export function PropertyAnalysisView({
                 ['Location score', `${num(property.location_score, 5).toFixed(1)}/10`],
                 ['Year built', formatYearBuilt(property.year_built)],
                 [
+                  'In-app views',
+                  Number(property.app_view_count || 0).toLocaleString(),
+                ],
+                [
                   'Quantum alignment',
                   property.quantum_risk
                     ? `${num((property.quantum_risk as { overall_success_pct?: number }).overall_success_pct).toFixed(1)}%`

@@ -10,12 +10,16 @@ from api.deps import CurrentUser, UserClient
 from api.schemas import (
     AddressSearchResponse,
     BookmarkRequest,
+    PropertyOfDayResponse,
+    PropertyViewRequest,
+    PropertyViewResponse,
     SaveOverrideRequest,
 )
 from knowledge_base import (
     get_kb_raw_data,
     get_user_saved_properties,
     invalidate_kb_cache,
+    is_valid_uuid,
     lookup_catalog_property,
     save_knowledge_base,
     save_property_to_user_account,
@@ -23,6 +27,7 @@ from knowledge_base import (
     search_kb_addresses,
     unsave_property_from_user_account,
 )
+from property_popularity import claim_property_of_the_day, record_property_view
 
 router = APIRouter(tags=["properties"])
 
@@ -68,6 +73,8 @@ def _portfolio_list_item(prop: dict[str, Any]) -> dict[str, Any]:
         "forecast_rate": prop.get("forecast_rate"),
         "quantum_success": prop.get("quantum_risk_score"),
         "quantum_risk_score": prop.get("quantum_risk_score"),
+        "app_view_count": int(prop.get("app_view_count") or 0),
+        "primary_image_url": prop.get("primary_image_url"),
         "strategy": (
             prop.get("strategy")
             or prop.get("strategy_tag")
@@ -217,3 +224,41 @@ def unbookmark_property(
     if not ok:
         raise HTTPException(status_code=400, detail="Failed to remove bookmark")
     return {"ok": True}
+
+
+@router.post("/api/properties/view", response_model=PropertyViewResponse)
+def record_view(body: PropertyViewRequest, user: CurrentUser) -> PropertyViewResponse:
+    property_id = str(body.property_id or "").strip()
+    if not is_valid_uuid(property_id):
+        raise HTTPException(status_code=400, detail="A valid property id is required")
+    try:
+        count = record_property_view(user["id"], property_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return PropertyViewResponse(property_id=property_id, app_view_count=count)
+
+
+@router.get("/api/property-of-the-day", response_model=PropertyOfDayResponse)
+def property_of_the_day(
+    user: CurrentUser,
+    tz: str | None = Query(default=None, max_length=80),
+) -> PropertyOfDayResponse:
+    try:
+        payload = claim_property_of_the_day(user["id"], timezone_name=tz)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    featured = payload.get("property")
+    shaped = _portfolio_list_item(featured) if isinstance(featured, dict) else None
+    if shaped and featured:
+        reasons = payload.get("reasons") or []
+        shaped["reasons"] = reasons
+        shaped["summary"] = featured.get("summary")
+    return PropertyOfDayResponse(
+        show=bool(payload.get("show")),
+        feature_date=str(payload.get("feature_date") or ""),
+        viewer_date=str(payload.get("viewer_date") or ""),
+        property=shaped,
+        reasons=list(payload.get("reasons") or []),
+    )

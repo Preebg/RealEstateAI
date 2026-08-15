@@ -1,165 +1,39 @@
--- Trusted local helpers. AuthZ is enforced in FastAPI; PostgREST uses one app role.
+-- In-app viewership (unique users per listing) and Property of the Day impressions.
+-- Distinct from properties.view_count, which stores portal listing views when harvested.
+-- Safe to re-run on existing volumes (init scripts only run on first Postgres start).
 
-CREATE OR REPLACE FUNCTION public.catalog_admin_user_id()
-RETURNS uuid
-LANGUAGE sql
-STABLE
-SET search_path TO 'public'
-AS $$
-  SELECT NULLIF(value, '')::uuid
-  FROM public.app_runtime_config
-  WHERE key = 'catalog_admin_user_id';
-$$;
+ALTER TABLE public.properties
+  ADD COLUMN IF NOT EXISTS app_view_count integer NOT NULL DEFAULT 0;
 
-CREATE OR REPLACE FUNCTION public.is_catalog_admin(p_uid uuid)
-RETURNS boolean
-LANGUAGE sql
-STABLE
-SET search_path TO 'public'
-AS $$
-  SELECT p_uid IS NOT NULL AND p_uid = public.catalog_admin_user_id();
-$$;
+ALTER TABLE public.archived_properties
+  ADD COLUMN IF NOT EXISTS app_view_count integer NOT NULL DEFAULT 0;
 
-CREATE OR REPLACE FUNCTION public.is_service_role_caller()
-RETURNS boolean
-LANGUAGE sql
-STABLE
-SET search_path TO 'public'
-AS $$
-  -- Local PostgREST has no Kong JWT gate; the API/harvester are trusted callers.
-  SELECT true;
-$$;
+CREATE TABLE IF NOT EXISTS public.property_app_views (
+  user_id uuid NOT NULL,
+  property_id uuid NOT NULL REFERENCES public.properties (id) ON DELETE CASCADE,
+  first_viewed_at timestamptz NOT NULL DEFAULT now(),
+  last_viewed_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (user_id, property_id)
+);
 
-CREATE OR REPLACE FUNCTION public.can_write_property(p_property_id uuid)
-RETURNS boolean
-LANGUAGE sql
-STABLE
-SET search_path TO 'public'
-AS $$
-  SELECT public.is_service_role_caller()
-    OR (
-      EXISTS (
-        SELECT 1
-        FROM public.properties p
-        WHERE p.id = p_property_id
-      )
-    );
-$$;
+CREATE INDEX IF NOT EXISTS property_app_views_property_id_idx
+  ON public.property_app_views (property_id);
 
-CREATE OR REPLACE FUNCTION public.set_catalog_admin_user_id(p_uid uuid)
-RETURNS uuid
-LANGUAGE plpgsql
-SET search_path TO 'public'
-AS $$
-BEGIN
-  IF p_uid IS NULL THEN
-    RAISE EXCEPTION 'catalog admin user id required';
-  END IF;
-  INSERT INTO public.app_runtime_config (key, value)
-  VALUES ('catalog_admin_user_id', p_uid::text)
-  ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
-  RETURN p_uid;
-END;
-$$;
+CREATE INDEX IF NOT EXISTS properties_app_view_count_idx
+  ON public.properties (app_view_count DESC);
 
-CREATE OR REPLACE FUNCTION public.save_property_comps(
-  p_property_id uuid,
-  p_comps_analysis jsonb,
-  p_predicted_value numeric DEFAULT NULL,
-  p_prediction_reasoning text DEFAULT NULL
-)
-RETURNS boolean
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path TO 'public'
-AS $$
-DECLARE
-  v_comp jsonb;
-  v_idx integer := 0;
-BEGIN
-  IF p_property_id IS NULL OR p_comps_analysis IS NULL THEN
-    RETURN false;
-  END IF;
+CREATE TABLE IF NOT EXISTS public.property_of_day_impressions (
+  user_id uuid NOT NULL,
+  shown_on date NOT NULL,
+  property_id uuid REFERENCES public.properties (id) ON DELETE SET NULL,
+  shown_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (user_id, shown_on)
+);
 
-  IF NOT public.can_write_property(p_property_id) THEN
-    RETURN false;
-  END IF;
-
-  UPDATE public.properties
-  SET
-    comps_analysis = p_comps_analysis,
-    predicted_value = COALESCE(p_predicted_value, predicted_value),
-    prediction_reasoning = COALESCE(p_prediction_reasoning, prediction_reasoning)
-  WHERE id = p_property_id;
-
-  IF NOT FOUND THEN
-    RETURN false;
-  END IF;
-
-  DELETE FROM public.property_comparables WHERE property_id = p_property_id;
-
-  FOR v_comp IN
-    SELECT value
-    FROM jsonb_array_elements(COALESCE(p_comps_analysis->'comparable_properties', '[]'::jsonb))
-  LOOP
-    INSERT INTO public.property_comparables (
-      property_id,
-      sort_order,
-      address,
-      sale_price,
-      sale_date,
-      square_footage,
-      bedrooms,
-      bathrooms,
-      distance_miles,
-      comparison_notes
-    ) VALUES (
-      p_property_id,
-      v_idx,
-      v_comp->>'address',
-      NULLIF(v_comp->>'sale_price', '')::numeric,
-      v_comp->>'sale_date',
-      NULLIF(v_comp->>'square_footage', '')::numeric,
-      v_comp->>'bedrooms',
-      v_comp->>'bathrooms',
-      v_comp->>'distance_miles',
-      v_comp->>'comparison_notes'
-    );
-    v_idx := v_idx + 1;
-  END LOOP;
-
-  RETURN true;
-END;
-$$;
-
-CREATE OR REPLACE FUNCTION public.save_property_rent_comps(
-  p_property_id uuid,
-  p_rent_comps_analysis jsonb,
-  p_rent numeric DEFAULT NULL
-)
-RETURNS boolean
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path TO 'public'
-AS $$
-BEGIN
-  IF p_property_id IS NULL OR p_rent_comps_analysis IS NULL THEN
-    RETURN false;
-  END IF;
-
-  IF NOT public.can_write_property(p_property_id) THEN
-    RETURN false;
-  END IF;
-
-  UPDATE public.properties
-  SET
-    rent_comps_analysis = p_rent_comps_analysis,
-    rent = COALESCE(p_rent, rent)
-  WHERE id = p_property_id;
-
-  RETURN FOUND;
-END;
-$$;
+CREATE INDEX IF NOT EXISTS property_of_day_impressions_shown_on_idx
+  ON public.property_of_day_impressions (shown_on DESC);
+CREATE INDEX IF NOT EXISTS property_of_day_impressions_property_id_idx
+  ON public.property_of_day_impressions (property_id);
 
 CREATE OR REPLACE FUNCTION public.record_property_app_view(
   p_user_id uuid,
@@ -266,3 +140,9 @@ BEGIN
   RETURN v_moved;
 END;
 $$;
+
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.property_app_views TO capeigen_app;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.property_of_day_impressions TO capeigen_app;
+GRANT EXECUTE ON FUNCTION public.record_property_app_view(uuid, uuid) TO capeigen_app;
+
+NOTIFY pgrst, 'reload schema';

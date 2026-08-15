@@ -3,7 +3,7 @@ import { useSearchParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { apiFetch, type AnalysisJob, type FinanceResult } from '../lib/api'
 import { PropertyAnalysisView } from '../components/PropertyAnalysisView'
-import { firstCatalogUuid, fetchPropertyDetail, createPropertyShare } from '../lib/portfolio'
+import { firstCatalogUuid, fetchPropertyDetail, createPropertyShare, recordPropertyView } from '../lib/portfolio'
 import type { Assumptions } from '../lib/propertyAnalysis'
 import { trackPreviewEvent } from '../lib/previewActivity'
 
@@ -23,6 +23,7 @@ export function SearchPage() {
   const [shareUrl, setShareUrl] = useState<string | null>(null)
   const [shareCopied, setShareCopied] = useState(false)
   const [shareBusy, setShareBusy] = useState(false)
+  const [viewCount, setViewCount] = useState<number | null>(null)
   const autoStartedKey = useRef<string | null>(null)
   const lastRecalcSig = useRef<string>('')
 
@@ -65,6 +66,36 @@ export function SearchPage() {
     }
     return base
   }, [jobProperty, kbMatch, paramId])
+
+  const catalogId = firstCatalogUuid(
+    property?.id,
+    property?.property_id,
+    kbMatch?.id,
+    kbMatch?.property_id,
+    paramId,
+  )
+
+  const displayProperty = useMemo(() => {
+    if (!property) return null
+    if (viewCount == null) return property
+    return { ...property, app_view_count: viewCount }
+  }, [property, viewCount])
+
+  useEffect(() => {
+    setViewCount(null)
+    if (!catalogId) return
+    let cancelled = false
+    void recordPropertyView(catalogId)
+      .then((count) => {
+        if (!cancelled) setViewCount(count)
+      })
+      .catch(() => {
+        // Viewership is optional.
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [catalogId])
 
   useEffect(() => {
     document.title = 'Individual Search · CapEigen'
@@ -225,7 +256,7 @@ export function SearchPage() {
   return (
     <PropertyAnalysisView
       variant="account"
-      property={property}
+      property={displayProperty}
       addressLabel={query}
       sourceLabel={property ? (fromKb ? 'Loaded from knowledge base' : 'AI research') : undefined}
       stillComputing={stillComputing}

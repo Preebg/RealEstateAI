@@ -4,6 +4,7 @@ import { useState } from 'react'
 import { useAuthStore } from '../lib/authStore'
 import { isAdminUser } from '../lib/admin'
 import { trackPreviewEvent } from '../lib/previewActivity'
+import { PropertyOfTheDayModal } from './PropertyOfTheDayModal'
 import { clsx } from 'clsx'
 
 const nav: Array<{
@@ -126,6 +127,7 @@ export function AppLayout() {
         <main className="px-4 py-6 sm:px-8">
           <Outlet />
         </main>
+        <PropertyOfTheDayModal />
       </div>
     </div>
   )

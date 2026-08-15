@@ -249,6 +249,7 @@ export function HomePage() {
   )
 
   const [filters, setFilters] = useState<Filters | null>(null)
+  const [sortBy, setSortBy] = useState<'added' | 'views'>('added')
 
   useEffect(() => {
     if (filters != null || properties.length === 0) return
@@ -284,7 +285,14 @@ export function HomePage() {
     [properties, activeFilters, filterBounds],
   )
 
-  const pinned = filtered.filter(
+  const displayed = useMemo(() => {
+    if (sortBy !== 'views') return filtered
+    return [...filtered].sort(
+      (a, b) => (b.app_view_count ?? 0) - (a.app_view_count ?? 0),
+    )
+  }, [filtered, sortBy])
+
+  const pinned = displayed.filter(
     (p) =>
       typeof p.latitude === 'number' &&
       typeof p.longitude === 'number' &&
@@ -461,6 +469,7 @@ export function HomePage() {
                   <p>Year built: {p.year_built != null ? p.year_built : '—'}</p>
                   <p>Rent: {money(p.rent)}/mo</p>
                   <p>Yield: {pct(p.rental_yield)}</p>
+                  <p>Views: {(p.app_view_count ?? 0).toLocaleString()}</p>
                   <p title={p.added_at ? new Date(p.added_at).toLocaleString() : undefined}>
                     Added: {formatAddedAt(p.added_at)}
                   </p>
@@ -478,9 +487,36 @@ export function HomePage() {
       </div>
 
       <section>
-        <h2 className="mb-3 font-display text-xl font-semibold">
-          Properties ({filtered.length.toLocaleString()})
-        </h2>
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+          <h2 className="font-display text-xl font-semibold">
+            Properties ({filtered.length.toLocaleString()})
+          </h2>
+          <div className="flex items-center gap-2 text-sm">
+            <span className="text-muted">Sort</span>
+            <button
+              type="button"
+              onClick={() => setSortBy('added')}
+              className={`rounded-lg border px-3 py-1.5 ${
+                sortBy === 'added'
+                  ? 'border-primary bg-primary/10 text-primary'
+                  : 'border-border hover:bg-surface'
+              }`}
+            >
+              Newest
+            </button>
+            <button
+              type="button"
+              onClick={() => setSortBy('views')}
+              className={`rounded-lg border px-3 py-1.5 ${
+                sortBy === 'views'
+                  ? 'border-primary bg-primary/10 text-primary'
+                  : 'border-border hover:bg-surface'
+              }`}
+            >
+              Most viewed
+            </button>
+          </div>
+        </div>
         <div className="overflow-x-auto rounded-xl border border-border bg-white">
           <table className="min-w-full text-left text-sm">
             <thead className="bg-surface text-muted">
@@ -493,10 +529,11 @@ export function HomePage() {
                 <th className="px-3 py-2 font-medium">Year built</th>
                 <th className="px-3 py-2 font-medium">Cash flow</th>
                 <th className="px-3 py-2 font-medium">Score</th>
+                <th className="px-3 py-2 font-medium">Views</th>
               </tr>
             </thead>
             <tbody>
-              {filtered.slice(0, 100).map((p) => (
+              {displayed.slice(0, 100).map((p) => (
                 <tr key={p.id || p.address} className="border-t border-border">
                   <td className="px-3 py-2">
                     <Link
@@ -522,11 +559,14 @@ export function HomePage() {
                   <td className="px-3 py-2">
                     {p.location_score != null ? Number(p.location_score).toFixed(1) : '—'}
                   </td>
+                  <td className="px-3 py-2 tabular-nums">
+                    {(p.app_view_count ?? 0).toLocaleString()}
+                  </td>
                 </tr>
               ))}
               {filtered.length === 0 && !isLoading && (
                 <tr>
-                  <td colSpan={8} className="px-3 py-6 text-center text-muted">
+                  <td colSpan={9} className="px-3 py-6 text-center text-muted">
                     No properties match the current filters. Widen a range or reset.
                   </td>
                 </tr>

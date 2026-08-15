@@ -60,6 +60,7 @@ CREATE TABLE IF NOT EXISTS public.properties (
   listing_status text,
   days_on_market integer,
   view_count integer,
+  app_view_count integer NOT NULL DEFAULT 0,
   discord_alert_sent_at timestamptz
 );
 
@@ -120,6 +121,7 @@ CREATE TABLE IF NOT EXISTS public.archived_properties (
   listing_status text,
   days_on_market integer,
   view_count integer,
+  app_view_count integer NOT NULL DEFAULT 0,
   discord_alert_sent_at timestamptz,
   archived_at timestamptz NOT NULL DEFAULT now()
 );
@@ -193,6 +195,22 @@ CREATE TABLE IF NOT EXISTS public.user_notification_preferences (
   last_digest_sent_at timestamptz,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS public.property_app_views (
+  user_id uuid NOT NULL,
+  property_id uuid NOT NULL REFERENCES public.properties (id) ON DELETE CASCADE,
+  first_viewed_at timestamptz NOT NULL DEFAULT now(),
+  last_viewed_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (user_id, property_id)
+);
+
+CREATE TABLE IF NOT EXISTS public.property_of_day_impressions (
+  user_id uuid NOT NULL,
+  shown_on date NOT NULL,
+  property_id uuid REFERENCES public.properties (id) ON DELETE SET NULL,
+  shown_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (user_id, shown_on)
 );
 
 CREATE TABLE IF NOT EXISTS public.recommendation_feedback (
@@ -293,6 +311,14 @@ CREATE INDEX IF NOT EXISTS idx_properties_outreach_agent_email
   ON public.properties (lower(outreach_agent_email)) WHERE (outreach_agent_email IS NOT NULL);
 CREATE INDEX IF NOT EXISTS properties_turnkey_identified_idx
   ON public.properties (turnkey_identified_at DESC) WHERE (is_turnkey = true);
+CREATE INDEX IF NOT EXISTS properties_app_view_count_idx
+  ON public.properties (app_view_count DESC);
+CREATE INDEX IF NOT EXISTS property_app_views_property_id_idx
+  ON public.property_app_views (property_id);
+CREATE INDEX IF NOT EXISTS property_of_day_impressions_shown_on_idx
+  ON public.property_of_day_impressions (shown_on DESC);
+CREATE INDEX IF NOT EXISTS property_of_day_impressions_property_id_idx
+  ON public.property_of_day_impressions (property_id);
 
 CREATE INDEX IF NOT EXISTS idx_user_property_overrides_property_id
   ON public.user_property_overrides (property_id);

@@ -114,4 +114,6 @@ export type PortfolioItem = {
   strategy?: string
   id?: string
   added_at?: string
+  app_view_count?: number
+  primary_image_url?: string
 }
