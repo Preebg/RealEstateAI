@@ -1,17 +1,31 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { MapContainer, TileLayer, Marker, Popup } from 'react-leaflet'
 import L from 'leaflet'
 import { Link } from 'react-router-dom'
+import { ArrowUpDown, Check, ChevronDown } from 'lucide-react'
+import { clsx } from 'clsx'
 import {
+  CASH_FLOW_STEP,
+  CASH_ON_CASH_STEP,
   fetchPortfolio,
+  fixedStepRange,
   formatAddedAt,
   niceRange,
+  PRICE_SLIDER_MAX,
+  PRICE_SLIDER_MIN,
+  PRICE_SLIDER_STEP,
   propertySearchPath,
-  rangeActive,
-  type RangeBounds,
+  YEAR_BUILT_MIN,
 } from '../lib/portfolio'
 import type { PortfolioItem } from '../lib/api'
+import {
+  applyFilters,
+  defaultFilters,
+  PortfolioFilters,
+  type FilterBounds,
+  type Filters,
+} from '../components/PortfolioFilters'
 import markerIcon2x from 'leaflet/dist/images/marker-icon-2x.png'
 import markerIcon from 'leaflet/dist/images/marker-icon.png'
 import markerShadow from 'leaflet/dist/images/marker-shadow.png'
@@ -37,168 +51,134 @@ function pct(n?: number, digits = 1) {
   return `${n.toFixed(digits)}%`
 }
 
-type Filters = {
-  states: string[]
-  cities: string[]
-  price: RangeBounds
-  yearBuilt: RangeBounds
-  rentalYield: RangeBounds
-  cashFlow: RangeBounds
-  locationScore: RangeBounds
+const SORT_OPTIONS = [
+  { id: 'added_desc', label: 'Newest added' },
+  { id: 'added_asc', label: 'Oldest added' },
+  { id: 'year_desc', label: 'Youngest (year built)' },
+  { id: 'year_asc', label: 'Oldest (year built)' },
+  { id: 'cashflow_desc', label: 'Highest cash flow' },
+  { id: 'cashflow_asc', label: 'Lowest cash flow' },
+  { id: 'coc_desc', label: 'Highest cash on cash' },
+  { id: 'price_desc', label: 'Highest price' },
+  { id: 'price_asc', label: 'Lowest price' },
+  { id: 'views_desc', label: 'Most viewed' },
+] as const
+
+type SortId = (typeof SORT_OPTIONS)[number]['id']
+
+function compareNullable(
+  a: number | undefined,
+  b: number | undefined,
+  dir: 1 | -1,
+): number {
+  if (a == null && b == null) return 0
+  if (a == null) return 1
+  if (b == null) return -1
+  return (a - b) * dir
 }
 
-function roundToStep(n: number, step: number): number {
-  if (!Number.isFinite(step) || step <= 0) return n
-  const decimals = Math.min((String(step).split('.')[1] || '').length, 8)
-  return Number((Math.round(n / step) * step).toFixed(decimals))
+function sortProperties(items: PortfolioItem[], sortBy: SortId): PortfolioItem[] {
+  const copy = [...items]
+  copy.sort((a, b) => {
+    switch (sortBy) {
+      case 'added_asc':
+        return (a.added_at || '').localeCompare(b.added_at || '')
+      case 'added_desc':
+        return (b.added_at || '').localeCompare(a.added_at || '')
+      case 'year_asc':
+        return compareNullable(a.year_built, b.year_built, 1)
+      case 'year_desc':
+        return compareNullable(a.year_built, b.year_built, -1)
+      case 'cashflow_asc':
+        return compareNullable(a.monthly_cash_flow, b.monthly_cash_flow, 1)
+      case 'cashflow_desc':
+        return compareNullable(a.monthly_cash_flow, b.monthly_cash_flow, -1)
+      case 'coc_desc':
+        return compareNullable(a.cash_on_cash, b.cash_on_cash, -1)
+      case 'price_asc':
+        return compareNullable(a.price ?? a.predicted_value, b.price ?? b.predicted_value, 1)
+      case 'price_desc':
+        return compareNullable(a.price ?? a.predicted_value, b.price ?? b.predicted_value, -1)
+      case 'views_desc':
+        return compareNullable(a.app_view_count, b.app_view_count, -1)
+      default:
+        return 0
+    }
+  })
+  return copy
 }
 
-function RangeFilter({
-  label,
-  bounds,
-  value,
+function SortMenu({
+  sortBy,
   onChange,
-  format,
-  step,
 }: {
-  label: string
-  bounds: RangeBounds
-  value: RangeBounds
-  onChange: (next: RangeBounds) => void
-  format: (n: number) => string
-  step: number
+  sortBy: SortId
+  onChange: (next: SortId) => void
 }) {
-  const disabled = bounds.max <= bounds.min
-  const span = bounds.max - bounds.min || 1
-  const leftPct = ((value.min - bounds.min) / span) * 100
-  const rightPct = ((value.max - bounds.min) / span) * 100
-  const gap = bounds.max - bounds.min > step ? step : 0
-  const [dragging, setDragging] = useState<'min' | 'max' | null>(null)
+  const [open, setOpen] = useState(false)
+  const rootRef = useRef<HTMLDivElement>(null)
+  const current = SORT_OPTIONS.find((o) => o.id === sortBy) ?? SORT_OPTIONS[0]
 
-  return (
-    <div className="space-y-2 text-sm">
-      <div className="flex items-baseline justify-between gap-2">
-        <span className="font-medium text-text/90">{label}</span>
-        <span className="text-xs text-muted">
-          {format(value.min)} – {format(value.max)}
-        </span>
-      </div>
-      <div className="relative h-6">
-        <div className="pointer-events-none absolute top-1/2 h-1.5 w-full -translate-y-1/2 rounded-full bg-border" />
-        <div
-          className="pointer-events-none absolute top-1/2 h-1.5 -translate-y-1/2 rounded-full bg-primary"
-          style={{
-            left: `${leftPct}%`,
-            width: `${Math.max(rightPct - leftPct, 0)}%`,
-          }}
-        />
-        <input
-          type="range"
-          className="dual-range absolute top-1/2 left-0 w-full -translate-y-1/2"
-          style={{ zIndex: dragging === 'min' ? 5 : 3 }}
-          min={bounds.min}
-          max={bounds.max}
-          step={step}
-          disabled={disabled}
-          value={value.min}
-          aria-label={`${label} minimum`}
-          onPointerDown={(e) => {
-            setDragging('min')
-            e.currentTarget.setPointerCapture(e.pointerId)
-          }}
-          onPointerUp={() => setDragging(null)}
-          onChange={(e) => {
-            const min = Math.min(roundToStep(Number(e.target.value), step), value.max - gap)
-            onChange({ min, max: value.max })
-          }}
-        />
-        <input
-          type="range"
-          className="dual-range absolute top-1/2 left-0 w-full -translate-y-1/2"
-          style={{ zIndex: dragging === 'max' ? 5 : 4 }}
-          min={bounds.min}
-          max={bounds.max}
-          step={step}
-          disabled={disabled}
-          value={value.max}
-          aria-label={`${label} maximum`}
-          onPointerDown={(e) => {
-            setDragging('max')
-            e.currentTarget.setPointerCapture(e.pointerId)
-          }}
-          onPointerUp={() => setDragging(null)}
-          onChange={(e) => {
-            const max = Math.max(roundToStep(Number(e.target.value), step), value.min + gap)
-            onChange({ min: value.min, max })
-          }}
-        />
-      </div>
-    </div>
-  )
-}
-
-function applyFilters(properties: PortfolioItem[], filters: Filters, bounds: {
-  price: RangeBounds
-  yearBuilt: RangeBounds
-  rentalYield: RangeBounds
-  cashFlow: RangeBounds
-  locationScore: RangeBounds
-}): PortfolioItem[] {
-  return properties.filter((p) => {
-    if (filters.states.length > 0 && !filters.states.includes(p.state_code || '')) {
-      return false
-    }
-    if (filters.cities.length > 0 && !filters.cities.includes(p.market_city || '')) {
-      return false
-    }
-
-    const price = p.price ?? p.predicted_value
-    if (
-      rangeActive(filters.price, bounds.price) &&
-      (price == null || price < filters.price.min || price > filters.price.max)
-    ) {
-      return false
-    }
-
-    if (rangeActive(filters.yearBuilt, bounds.yearBuilt)) {
-      // Unknown year stays visible (matches Streamlit year_built mask).
-      if (
-        p.year_built != null &&
-        (p.year_built < filters.yearBuilt.min || p.year_built > filters.yearBuilt.max)
-      ) {
-        return false
+  useEffect(() => {
+    if (!open) return
+    function onPointer(e: MouseEvent) {
+      if (rootRef.current && !rootRef.current.contains(e.target as Node)) {
+        setOpen(false)
       }
     }
-
-    if (
-      rangeActive(filters.rentalYield, bounds.rentalYield) &&
-      (p.rental_yield == null ||
-        p.rental_yield < filters.rentalYield.min ||
-        p.rental_yield > filters.rentalYield.max)
-    ) {
-      return false
+    function onKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') setOpen(false)
     }
-
-    if (
-      rangeActive(filters.cashFlow, bounds.cashFlow) &&
-      (p.monthly_cash_flow == null ||
-        p.monthly_cash_flow < filters.cashFlow.min ||
-        p.monthly_cash_flow > filters.cashFlow.max)
-    ) {
-      return false
+    document.addEventListener('mousedown', onPointer)
+    window.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onPointer)
+      window.removeEventListener('keydown', onKey)
     }
+  }, [open])
 
-    if (
-      rangeActive(filters.locationScore, bounds.locationScore) &&
-      (p.location_score == null ||
-        p.location_score < filters.locationScore.min ||
-        p.location_score > filters.locationScore.max)
-    ) {
-      return false
-    }
-
-    return true
-  })
+  return (
+    <div ref={rootRef} className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="inline-flex items-center gap-2 rounded-lg border border-border bg-white/95 px-3 py-2 text-sm font-medium shadow-sm backdrop-blur hover:bg-white"
+        aria-expanded={open}
+        aria-haspopup="listbox"
+      >
+        <ArrowUpDown size={15} />
+        {current.label}
+        <ChevronDown size={14} className={clsx('text-muted transition', open && 'rotate-180')} />
+      </button>
+      {open && (
+        <ul
+          role="listbox"
+          className="absolute right-0 z-[1200] mt-1.5 max-h-80 w-64 overflow-y-auto rounded-xl border border-border bg-white py-1 shadow-lg"
+        >
+          {SORT_OPTIONS.map((option) => (
+            <li key={option.id}>
+              <button
+                type="button"
+                role="option"
+                aria-selected={option.id === sortBy}
+                onClick={() => {
+                  onChange(option.id)
+                  setOpen(false)
+                }}
+                className={clsx(
+                  'flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-sm hover:bg-surface',
+                  option.id === sortBy && 'bg-primary/5 text-primary',
+                )}
+              >
+                {option.label}
+                {option.id === sortBy && <Check size={14} />}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  )
 }
 
 export function HomePage() {
@@ -209,24 +189,30 @@ export function HomePage() {
 
   const properties = data?.properties ?? []
 
-  const filterBounds = useMemo(() => {
+  const filterBounds: FilterBounds = useMemo(() => {
     const currentYear = new Date().getFullYear()
     return {
-      price: niceRange(
-        properties.map((p) => p.price ?? p.predicted_value),
-        { min: 0, max: 1_000_000 },
-      ),
-      yearBuilt: niceRange(
-        properties.map((p) => p.year_built),
-        { min: 1900, max: currentYear },
-      ),
+      price: {
+        min: PRICE_SLIDER_MIN,
+        max: PRICE_SLIDER_MAX,
+        step: PRICE_SLIDER_STEP,
+      },
+      yearBuilt: {
+        min: YEAR_BUILT_MIN,
+        max: currentYear,
+        step: 1,
+      },
       rentalYield: niceRange(
         properties.map((p) => p.rental_yield),
         { min: 0, max: 20 },
       ),
-      cashFlow: niceRange(
+      cashFlow: fixedStepRange(
         properties.map((p) => p.monthly_cash_flow),
-        { min: -2000, max: 5000 },
+        { fallbackMin: -2000, fallbackMax: 5000, step: CASH_FLOW_STEP },
+      ),
+      cashOnCash: fixedStepRange(
+        properties.map((p) => p.cash_on_cash),
+        { fallbackMin: -20, fallbackMax: 40, step: CASH_ON_CASH_STEP },
       ),
       locationScore: niceRange(
         properties.map((p) => p.location_score),
@@ -235,62 +221,25 @@ export function HomePage() {
     }
   }, [properties])
 
-  const stateOptions = useMemo(
-    () =>
-      [...new Set(properties.map((p) => p.state_code).filter(Boolean) as string[])].sort(),
-    [properties],
-  )
-  const cityOptions = useMemo(
-    () =>
-      [
-        ...new Set(properties.map((p) => p.market_city).filter(Boolean) as string[]),
-      ].sort(),
-    [properties],
-  )
-
   const [filters, setFilters] = useState<Filters | null>(null)
-  const [sortBy, setSortBy] = useState<'added' | 'views'>('added')
+  const [sortBy, setSortBy] = useState<SortId>('added_desc')
 
   useEffect(() => {
     if (filters != null || properties.length === 0) return
-    setFilters({
-      states: [],
-      cities: [],
-      price: { min: filterBounds.price.min, max: filterBounds.price.max },
-      yearBuilt: { min: filterBounds.yearBuilt.min, max: filterBounds.yearBuilt.max },
-      rentalYield: { min: filterBounds.rentalYield.min, max: filterBounds.rentalYield.max },
-      cashFlow: { min: filterBounds.cashFlow.min, max: filterBounds.cashFlow.max },
-      locationScore: {
-        min: filterBounds.locationScore.min,
-        max: filterBounds.locationScore.max,
-      },
-    })
+    setFilters(defaultFilters(filterBounds))
   }, [filterBounds, filters, properties.length])
 
-  const activeFilters = filters ?? {
-    states: [],
-    cities: [],
-    price: { min: filterBounds.price.min, max: filterBounds.price.max },
-    yearBuilt: { min: filterBounds.yearBuilt.min, max: filterBounds.yearBuilt.max },
-    rentalYield: { min: filterBounds.rentalYield.min, max: filterBounds.rentalYield.max },
-    cashFlow: { min: filterBounds.cashFlow.min, max: filterBounds.cashFlow.max },
-    locationScore: {
-      min: filterBounds.locationScore.min,
-      max: filterBounds.locationScore.max,
-    },
-  }
+  const activeFilters = filters ?? defaultFilters(filterBounds)
 
   const filtered = useMemo(
     () => applyFilters(properties, activeFilters, filterBounds),
     [properties, activeFilters, filterBounds],
   )
 
-  const displayed = useMemo(() => {
-    if (sortBy !== 'views') return filtered
-    return [...filtered].sort(
-      (a, b) => (b.app_view_count ?? 0) - (a.app_view_count ?? 0),
-    )
-  }, [filtered, sortBy])
+  const displayed = useMemo(
+    () => sortProperties(filtered, sortBy),
+    [filtered, sortBy],
+  )
 
   const pinned = displayed.filter(
     (p) =>
@@ -309,21 +258,6 @@ export function HomePage() {
     document.title = 'Home · CapEigen'
   }, [])
 
-  function resetFilters() {
-    setFilters({
-      states: [],
-      cities: [],
-      price: { min: filterBounds.price.min, max: filterBounds.price.max },
-      yearBuilt: { min: filterBounds.yearBuilt.min, max: filterBounds.yearBuilt.max },
-      rentalYield: { min: filterBounds.rentalYield.min, max: filterBounds.rentalYield.max },
-      cashFlow: { min: filterBounds.cashFlow.min, max: filterBounds.cashFlow.max },
-      locationScore: {
-        min: filterBounds.locationScore.min,
-        max: filterBounds.locationScore.max,
-      },
-    })
-  }
-
   return (
     <div className="space-y-6">
       <header>
@@ -337,153 +271,62 @@ export function HomePage() {
       {error && <p className="text-red-600">{(error as Error).message}</p>}
 
       {!isLoading && !error && (
-        <section className="space-y-4 rounded-2xl border border-border bg-white/90 p-4 shadow-sm">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <h2 className="font-display text-lg font-semibold">Filters</h2>
-              <p className="text-sm text-muted">
-                Showing {filtered.length.toLocaleString()} of{' '}
-                {properties.length.toLocaleString()} properties
-              </p>
-            </div>
-            <button
-              type="button"
-              onClick={resetFilters}
-              className="rounded-lg border border-border px-3 py-1.5 text-sm hover:bg-surface"
-            >
-              Reset filters
-            </button>
-          </div>
-
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-            <label className="block text-sm">
-              <span className="font-medium text-text/90">State</span>
-              <select
-                multiple
-                value={activeFilters.states}
-                onChange={(e) =>
-                  setFilters({
-                    ...activeFilters,
-                    states: Array.from(e.target.selectedOptions, (o) => o.value),
-                  })
-                }
-                className="mt-1 h-24 w-full rounded-lg border border-border bg-white px-2 py-1.5 outline-none focus:border-primary"
-              >
-                {stateOptions.map((s) => (
-                  <option key={s} value={s}>
-                    {s}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="block text-sm">
-              <span className="font-medium text-text/90">City</span>
-              <select
-                multiple
-                value={activeFilters.cities}
-                onChange={(e) =>
-                  setFilters({
-                    ...activeFilters,
-                    cities: Array.from(e.target.selectedOptions, (o) => o.value),
-                  })
-                }
-                className="mt-1 h-24 w-full rounded-lg border border-border bg-white px-2 py-1.5 outline-none focus:border-primary"
-              >
-                {cityOptions.map((c) => (
-                  <option key={c} value={c}>
-                    {c}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <p className="text-sm text-muted sm:col-span-2 lg:col-span-1 lg:self-end">
-              Hold Ctrl/Cmd to select multiple states or cities. Leave empty for all.
-            </p>
-          </div>
-
-          <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
-            <RangeFilter
-              label="Price"
-              bounds={filterBounds.price}
-              value={activeFilters.price}
-              step={filterBounds.price.step}
-              format={(n) => money(n)}
-              onChange={(price) => setFilters({ ...activeFilters, price })}
-            />
-            <RangeFilter
-              label="Year built"
-              bounds={filterBounds.yearBuilt}
-              value={activeFilters.yearBuilt}
-              step={filterBounds.yearBuilt.step}
-              format={(n) => String(Math.round(n))}
-              onChange={(yearBuilt) => setFilters({ ...activeFilters, yearBuilt })}
-            />
-            <RangeFilter
-              label="Rental yield"
-              bounds={filterBounds.rentalYield}
-              value={activeFilters.rentalYield}
-              step={filterBounds.rentalYield.step}
-              format={(n) => pct(n)}
-              onChange={(rentalYield) => setFilters({ ...activeFilters, rentalYield })}
-            />
-            <RangeFilter
-              label="Monthly cash flow"
-              bounds={filterBounds.cashFlow}
-              value={activeFilters.cashFlow}
-              step={filterBounds.cashFlow.step}
-              format={(n) => money(n)}
-              onChange={(cashFlow) => setFilters({ ...activeFilters, cashFlow })}
-            />
-            <RangeFilter
-              label="Location score"
-              bounds={filterBounds.locationScore}
-              value={activeFilters.locationScore}
-              step={filterBounds.locationScore.step}
-              format={(n) => n.toFixed(1)}
-              onChange={(locationScore) => setFilters({ ...activeFilters, locationScore })}
-            />
-          </div>
-        </section>
+        <PortfolioFilters
+          filters={activeFilters}
+          bounds={filterBounds}
+          properties={properties}
+          matchCount={filtered.length}
+          onChange={setFilters}
+          onReset={() => setFilters(defaultFilters(filterBounds))}
+        />
       )}
 
-      <div className="overflow-hidden rounded-2xl border border-border shadow-sm">
-        <MapContainer
-          key={`${center[0]}-${center[1]}-${pinned.length}`}
-          center={center}
-          zoom={pinned.length ? 10 : 4}
-          className="h-[420px] w-full"
-        >
-          <TileLayer
-            attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a>'
-            url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-          />
-          {pinned.map((p) => (
-            <Marker
-              key={`${p.address}-${p.latitude}-${p.longitude}`}
-              position={[p.latitude as number, p.longitude as number]}
-            >
-              <Popup>
-                <div className="space-y-1 text-sm">
-                  <p className="font-semibold">{p.address}</p>
-                  <p>Price: {money(p.price ?? p.predicted_value)}</p>
-                  <p>Year built: {p.year_built != null ? p.year_built : '—'}</p>
-                  <p>Rent: {money(p.rent)}/mo</p>
-                  <p>Yield: {pct(p.rental_yield)}</p>
-                  <p>Views: {(p.app_view_count ?? 0).toLocaleString()}</p>
-                  <p title={p.added_at ? new Date(p.added_at).toLocaleString() : undefined}>
-                    Added: {formatAddedAt(p.added_at)}
-                  </p>
-                  <Link
-                    className="text-primary underline"
-                    to={propertySearchPath(p)}
-                  >
-                    Analyze
-                  </Link>
-                </div>
-              </Popup>
-            </Marker>
-          ))}
-        </MapContainer>
+      <div className="relative">
+        <div className="overflow-hidden rounded-2xl border border-border shadow-sm">
+          <MapContainer
+            key={`${center[0]}-${center[1]}-${pinned.length}`}
+            center={center}
+            zoom={pinned.length ? 10 : 4}
+            className="z-0 h-[420px] w-full"
+          >
+            <TileLayer
+              attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a>'
+              url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+            />
+            {pinned.map((p) => (
+              <Marker
+                key={`${p.address}-${p.latitude}-${p.longitude}`}
+                position={[p.latitude as number, p.longitude as number]}
+              >
+                <Popup>
+                  <div className="space-y-1 text-sm">
+                    <p className="font-semibold">{p.address}</p>
+                    <p>Price: {money(p.price ?? p.predicted_value)}</p>
+                    <p>Year built: {p.year_built != null ? p.year_built : '—'}</p>
+                    <p>Rent: {money(p.rent)}/mo</p>
+                    <p>Yield: {pct(p.rental_yield)}</p>
+                    <p>Cash on cash: {pct(p.cash_on_cash)}</p>
+                    <p>Views: {(p.app_view_count ?? 0).toLocaleString()}</p>
+                    <p title={p.added_at ? new Date(p.added_at).toLocaleString() : undefined}>
+                      Added: {formatAddedAt(p.added_at)}
+                    </p>
+                    <Link
+                      className="text-primary underline"
+                      to={propertySearchPath(p)}
+                    >
+                      Analyze
+                    </Link>
+                  </div>
+                </Popup>
+              </Marker>
+            ))}
+          </MapContainer>
+        </div>
+        <div className="pointer-events-none absolute top-3 right-3 z-[1100]">
+          <div className="pointer-events-auto">
+            <SortMenu sortBy={sortBy} onChange={setSortBy} />
+          </div>
+        </div>
       </div>
 
       <section>
@@ -491,31 +334,6 @@ export function HomePage() {
           <h2 className="font-display text-xl font-semibold">
             Properties ({filtered.length.toLocaleString()})
           </h2>
-          <div className="flex items-center gap-2 text-sm">
-            <span className="text-muted">Sort</span>
-            <button
-              type="button"
-              onClick={() => setSortBy('added')}
-              className={`rounded-lg border px-3 py-1.5 ${
-                sortBy === 'added'
-                  ? 'border-primary bg-primary/10 text-primary'
-                  : 'border-border hover:bg-surface'
-              }`}
-            >
-              Newest
-            </button>
-            <button
-              type="button"
-              onClick={() => setSortBy('views')}
-              className={`rounded-lg border px-3 py-1.5 ${
-                sortBy === 'views'
-                  ? 'border-primary bg-primary/10 text-primary'
-                  : 'border-border hover:bg-surface'
-              }`}
-            >
-              Most viewed
-            </button>
-          </div>
         </div>
         <div className="overflow-x-auto rounded-xl border border-border bg-white">
           <table className="min-w-full text-left text-sm">
@@ -528,6 +346,7 @@ export function HomePage() {
                 <th className="px-3 py-2 font-medium">Yield</th>
                 <th className="px-3 py-2 font-medium">Year built</th>
                 <th className="px-3 py-2 font-medium">Cash flow</th>
+                <th className="px-3 py-2 font-medium">Cash on cash</th>
                 <th className="px-3 py-2 font-medium">Score</th>
                 <th className="px-3 py-2 font-medium">Views</th>
               </tr>
@@ -556,6 +375,7 @@ export function HomePage() {
                     {p.year_built != null ? p.year_built : '—'}
                   </td>
                   <td className="px-3 py-2">{money(p.monthly_cash_flow)}</td>
+                  <td className="px-3 py-2">{pct(p.cash_on_cash)}</td>
                   <td className="px-3 py-2">
                     {p.location_score != null ? Number(p.location_score).toFixed(1) : '—'}
                   </td>
@@ -566,7 +386,7 @@ export function HomePage() {
               ))}
               {filtered.length === 0 && !isLoading && (
                 <tr>
-                  <td colSpan={9} className="px-3 py-6 text-center text-muted">
+                  <td colSpan={10} className="px-3 py-6 text-center text-muted">
                     No properties match the current filters. Widen a range or reset.
                   </td>
                 </tr>

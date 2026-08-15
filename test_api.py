@@ -30,6 +30,20 @@ def test_preview_login_rejects_unknown_username() -> None:
     assert "Unknown" in response.json()["detail"]
 
 
+def test_preview_login_unknown_username_when_database_unconfigured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CI has no SUPABASE_URL; allowlist lookup must still return 403, not 500."""
+
+    def missing_url() -> str:
+        raise EnvironmentError("SUPABASE_URL not set")
+
+    monkeypatch.setattr("api.preview_usernames.get_data_base_url", missing_url)
+    response = client.post("/api/auth/demo", json={"username": "notARealUser"})
+    assert response.status_code == 403
+    assert "Unknown" in response.json()["detail"]
+
+
 def test_preview_login_rejects_invalid_username() -> None:
     response = client.post("/api/auth/demo", json={"username": "bad name!"})
     assert response.status_code in {403, 422}
@@ -46,6 +60,24 @@ def test_preview_username_allowlist(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     assert resolve_preview_username("salifT") == "salifT"
     assert resolve_preview_username("salift") == "salifT"
+    assert resolve_preview_username("nope") is None
+
+
+def test_preview_username_map_falls_back_when_database_url_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api import preview_usernames
+
+    def missing_url() -> str:
+        raise EnvironmentError("SUPABASE_URL not set")
+
+    monkeypatch.setattr(preview_usernames, "get_data_base_url", missing_url)
+    monkeypatch.setattr(
+        preview_usernames,
+        "env_username_map",
+        lambda: {"salift": "salifT"},
+    )
+    assert resolve_preview_username("salifT") == "salifT"
     assert resolve_preview_username("nope") is None
 
 

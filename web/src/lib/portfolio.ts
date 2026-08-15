@@ -38,6 +38,17 @@ function computeRentalYield(rent: number | undefined, price: number | undefined)
   return (rent * 12 * 100) / price
 }
 
+/** Cash-on-cash using 25% down (same cash invested as one-year ROI). */
+function computeCashOnCash(
+  monthlyCashFlow: number | undefined,
+  price: number | undefined,
+): number | undefined {
+  if (monthlyCashFlow == null || price == null || price <= 0) return undefined
+  const downPayment = price * (DEFAULT_DOWN_PAYMENT_PCT / 100)
+  if (downPayment <= 0) return undefined
+  return ((monthlyCashFlow * 12) / downPayment) * 100
+}
+
 /**
  * One-year ROI aligned with finance.calculate_one_year_roi defaults
  * (25% down, stored cash flow + forecast appreciation).
@@ -77,6 +88,7 @@ function rowToItem(row: Record<string, unknown>): PortfolioItem {
     rent,
     year_built: yearBuilt,
     monthly_cash_flow: monthlyCashFlow,
+    cash_on_cash: computeCashOnCash(monthlyCashFlow, price),
     rental_yield: computeRentalYield(rent, price),
     one_year_roi: computeOneYearRoi(price, monthlyCashFlow, forecastRate),
     market_city: row.market_city != null ? String(row.market_city) : undefined,
@@ -329,6 +341,13 @@ export async function fetchPortfolio(): Promise<{
 export type RangeBounds = { min: number; max: number }
 export type RangeSpec = RangeBounds & { step: number }
 
+export const PRICE_SLIDER_MIN = 0
+export const PRICE_SLIDER_MAX = 400_000
+export const PRICE_SLIDER_STEP = 5_000
+export const YEAR_BUILT_MIN = 1900
+export const CASH_FLOW_STEP = 50
+export const CASH_ON_CASH_STEP = 0.5
+
 function stepDecimals(step: number): number {
   const text = String(step)
   const i = text.indexOf('.')
@@ -370,6 +389,21 @@ export function niceRange(
   const dataMax = Math.max(...nums)
   const span = dataMax - dataMin
   const step = niceStep(span > 0 ? span : Math.abs(dataMin) || 1)
+  const min = snap(dataMin, step, 'floor')
+  let max = snap(dataMax, step, 'ceil')
+  if (max <= min) max = Number((min + step).toFixed(Math.min(stepDecimals(step), 8)))
+  return { min, max, step }
+}
+
+/** Snap data (or fallback) endpoints to a caller-chosen slider step. */
+export function fixedStepRange(
+  values: Array<number | undefined>,
+  opts: { fallbackMin: number; fallbackMax: number; step: number },
+): RangeSpec {
+  const nums = values.filter((v): v is number => v != null && Number.isFinite(v))
+  const step = opts.step
+  const dataMin = nums.length > 0 ? Math.min(...nums) : opts.fallbackMin
+  const dataMax = nums.length > 0 ? Math.max(...nums) : opts.fallbackMax
   const min = snap(dataMin, step, 'floor')
   let max = snap(dataMax, step, 'ceil')
   if (max <= min) max = Number((min + step).toFixed(Math.min(stepDecimals(step), 8)))

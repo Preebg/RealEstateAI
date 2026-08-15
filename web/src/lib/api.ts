@@ -106,6 +106,7 @@ export type PortfolioItem = {
   rent?: number
   year_built?: number
   monthly_cash_flow?: number
+  cash_on_cash?: number
   rental_yield?: number
   one_year_roi?: number
   market_city?: string

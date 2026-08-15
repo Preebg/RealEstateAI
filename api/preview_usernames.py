@@ -126,13 +126,16 @@ def _fetch_table_rows() -> list[dict[str, Any]] | None:
                 "order": "created_at.asc",
             },
         )
-    except httpx.HTTPError as exc:
+        if response.status_code >= 400:
+            report_error(
+                log, "preview_usernames_list_failed", RuntimeError(response.text[:300])
+            )
+            return None
+        data = response.json()
+    except Exception as exc:  # noqa: BLE001
+        # Missing SUPABASE_URL (CI), connection errors, or non-JSON bodies.
         report_error(log, "preview_usernames_list_failed", exc)
         return None
-    if response.status_code >= 400:
-        report_error(log, "preview_usernames_list_failed", RuntimeError(response.text[:300]))
-        return None
-    data = response.json()
     return data if isinstance(data, list) else []
 
 
@@ -142,12 +145,12 @@ def _fetch_config_rows() -> list[dict[str, Any]]:
             "app_runtime_config",
             {"select": "value", "key": f"eq.{_CONFIG_KEY}"},
         )
-    except httpx.HTTPError as exc:
+        if response.status_code >= 400:
+            return []
+        data = response.json()
+    except Exception as exc:  # noqa: BLE001
         report_error(log, "preview_usernames_config_list_failed", exc)
         return []
-    if response.status_code >= 400:
-        return []
-    data = response.json()
     if not isinstance(data, list) or not data:
         return []
     raw = data[0].get("value") if isinstance(data[0], dict) else "[]"
@@ -219,11 +222,7 @@ def _event_stats() -> dict[str, dict[str, Any]]:
                 "limit": "2000",
             },
         )
-    except httpx.HTTPError as exc:
-        report_error(log, "preview_username_stats_failed", exc)
-        return stats
-    if response.status_code >= 400:
-        try:
+        if response.status_code >= 400:
             response = _rest_get(
                 "preview_events",
                 {
@@ -232,13 +231,15 @@ def _event_stats() -> dict[str, dict[str, Any]]:
                     "limit": "2000",
                 },
             )
-        except httpx.HTTPError as retry_exc:
-            report_error(log, "preview_username_stats_failed", retry_exc)
-            return stats
         if response.status_code >= 400:
-            report_error(log, "preview_username_stats_failed", RuntimeError(response.text[:300]))
+            report_error(
+                log, "preview_username_stats_failed", RuntimeError(response.text[:300])
+            )
             return stats
-    events = response.json()
+        events = response.json()
+    except Exception as exc:  # noqa: BLE001
+        report_error(log, "preview_username_stats_failed", exc)
+        return stats
     if not isinstance(events, list):
         return stats
 
