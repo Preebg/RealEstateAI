@@ -3,11 +3,13 @@
 ## Frontend (Cloudflare Pages)
 
 1. In [Cloudflare Dashboard](https://dash.cloudflare.com) → **Workers & Pages** → **Create** → **Pages** → **Connect to Git**. Select this repo.
-2. Build settings:
+2. Build settings (Workers Git integration — your live URL is `*.workers.dev`):
    - **Root directory:** `web`
    - **Build command:** `npm run build`
-   - **Build output directory:** `dist`
-   - Framework preset can stay **Vite** (or None). Node 20 is pinned in `web/.nvmrc`.
+   - **Deploy command:** `npm run deploy`
+   - Node 20 is pinned in `web/.nvmrc`.
+
+   `npm run deploy` runs `wrangler deploy --keep-vars` so dashboard secrets are not wiped. Do not leave the default `npx wrangler deploy` — that downloads Wrangler on every build and does not keep dashboard vars.
 3. Set environment variables for **Production** (and Preview if you use branch deploys). Mark `VITE_*` as available at **build time**. Mark function secrets as available to **Functions** (runtime):
 
    | Variable | When | Purpose |
