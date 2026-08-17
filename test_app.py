@@ -3541,6 +3541,59 @@ class TestSecurityHardening(unittest.TestCase):
         ):
             self.assertTrue(delete_canonical_property_by_id(property_id))
 
+    def test_delete_canonical_allowed_for_admin_email(self):
+        from unittest.mock import MagicMock, patch
+
+        from knowledge_base import delete_canonical_property_by_id
+
+        property_id = "11111111-1111-1111-1111-111111111111"
+        mock_supabase = MagicMock()
+        with (
+            patch(
+                "knowledge_base.get_logged_in_user",
+                return_value={
+                    "id": "22222222-2222-2222-2222-222222222222",
+                    "email": "preebg09@gmail.com",
+                },
+            ),
+            patch(
+                "knowledge_base.get_admin_uid",
+                return_value="33333333-3333-3333-3333-333333333333",
+            ),
+            patch("knowledge_base.get_client", return_value=mock_supabase),
+            patch("knowledge_base.invalidate_kb_cache"),
+            patch("knowledge_base.log", MagicMock()),
+        ):
+            self.assertTrue(delete_canonical_property_by_id(property_id))
+
+    def test_sanitize_admin_metric_patch_rounds_currency(self):
+        from knowledge_base import _sanitize_admin_metric_patch
+
+        patch = _sanitize_admin_metric_patch(
+            {"price": 250000.129, "rent": 1850.129, "year_built": 1998}
+        )
+        self.assertEqual(patch["price"], 250000.13)
+        self.assertEqual(patch["original_ai_rent"], 1850.13)
+        self.assertEqual(patch["rent"], 1850.13)
+        self.assertEqual(patch["year_built"], 1998)
+
+    def test_update_canonical_metrics_denied_for_non_admin(self):
+        from unittest.mock import MagicMock, patch
+
+        from knowledge_base import update_canonical_property_metrics
+
+        property_id = "11111111-1111-1111-1111-111111111111"
+        with (
+            patch("knowledge_base.get_logged_in_user", return_value={"id": "user-a"}),
+            patch("knowledge_base.get_admin_uid", return_value="admin-b"),
+            patch("knowledge_base._fetch_property_detail") as mock_fetch,
+            patch("knowledge_base.log", MagicMock()),
+        ):
+            self.assertIsNone(
+                update_canonical_property_metrics(property_id, {"price": 250000})
+            )
+            mock_fetch.assert_not_called()
+
 class TestOutreachAppUrls(unittest.TestCase):
     def test_replace_legacy_app_urls(self):
         from targeted_outreach_pipeline import (

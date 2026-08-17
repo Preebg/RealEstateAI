@@ -69,6 +69,9 @@ export function ActivityPage() {
   const [busy, setBusy] = useState(true)
   const [saving, setSaving] = useState(false)
   const [removing, setRemoving] = useState<string | null>(null)
+  const [deleteTarget, setDeleteTarget] = useState<string | null>(null)
+  const [deleteConfirm, setDeleteConfirm] = useState('')
+  const [purging, setPurging] = useState(false)
 
   async function load(username?: string) {
     setBusy(true)
@@ -154,10 +157,43 @@ export function ActivityPage() {
         body: JSON.stringify({ username }),
       })
       setAccounts(res.accounts || [])
+      if (deleteTarget?.toLowerCase() === username.toLowerCase()) {
+        setDeleteTarget(null)
+        setDeleteConfirm('')
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not restore username')
     } finally {
       setSaving(false)
+    }
+  }
+
+  function startPermanentDelete(username: string) {
+    setDeleteTarget(username)
+    setDeleteConfirm('')
+    setError(null)
+  }
+
+  async function onPermanentDelete(username: string) {
+    if (deleteConfirm.trim().toLowerCase() !== username.toLowerCase()) return
+    setPurging(true)
+    setError(null)
+    try {
+      const res = await apiFetch<{ accounts: PreviewAccount[] }>(
+        `/api/preview/accounts/${encodeURIComponent(username)}/permanent?confirm_username=${encodeURIComponent(deleteConfirm.trim())}`,
+        { method: 'DELETE' },
+      )
+      setAccounts(res.accounts || [])
+      setDeleteTarget(null)
+      setDeleteConfirm('')
+      if (filterUser.toLowerCase() === username.toLowerCase()) {
+        setFilterUser('')
+        await load()
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not permanently delete username')
+    } finally {
+      setPurging(false)
     }
   }
 
@@ -271,14 +307,51 @@ export function ActivityPage() {
                           {removing === account.username ? 'Removing…' : 'Remove'}
                         </button>
                       ) : (
-                        <button
-                          type="button"
-                          disabled={saving}
-                          onClick={() => void onRestore(account.username)}
-                          className="rounded-lg border border-border px-2 py-1 text-xs hover:bg-surface disabled:opacity-60"
-                        >
-                          Restore
-                        </button>
+                        <div className="flex flex-col gap-2">
+                          <div className="flex flex-wrap gap-2">
+                            <button
+                              type="button"
+                              disabled={saving}
+                              onClick={() => void onRestore(account.username)}
+                              className="rounded-lg border border-border px-2 py-1 text-xs hover:bg-surface disabled:opacity-60"
+                            >
+                              Restore
+                            </button>
+                            <button
+                              type="button"
+                              disabled={purging}
+                              onClick={() => startPermanentDelete(account.username)}
+                              className="rounded-lg border border-red-200 px-2 py-1 text-xs text-red-700 hover:bg-red-50 disabled:opacity-60"
+                            >
+                              Delete
+                            </button>
+                          </div>
+                          {deleteTarget === account.username && (
+                            <div className="min-w-[14rem] space-y-2 rounded-lg border border-red-200 bg-red-50/70 p-2">
+                              <label className="block text-xs text-red-800">
+                                Please enter the user name you would like to delete
+                                <input
+                                  value={deleteConfirm}
+                                  onChange={(e) => setDeleteConfirm(e.target.value)}
+                                  placeholder={account.username}
+                                  autoComplete="off"
+                                  className="mt-1 w-full rounded-md border border-red-200 bg-white px-2 py-1 text-sm text-text"
+                                />
+                              </label>
+                              {deleteConfirm.trim().toLowerCase() ===
+                                account.username.toLowerCase() && (
+                                <button
+                                  type="button"
+                                  disabled={purging}
+                                  onClick={() => void onPermanentDelete(account.username)}
+                                  className="rounded-lg bg-red-600 px-2 py-1 text-xs font-semibold text-white hover:bg-red-700 disabled:opacity-60"
+                                >
+                                  {purging ? 'Deleting…' : 'Permanently delete'}
+                                </button>
+                              )}
+                            </div>
+                          )}
+                        </div>
                       )}
                     </div>
                   </td>

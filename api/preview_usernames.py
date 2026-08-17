@@ -20,6 +20,7 @@ USERNAME_RE = re.compile(r"^[A-Za-z0-9_]{2,32}$")
 PREVIEW_EMAIL_DOMAIN = "demo.capeigen.app"
 _DEFAULT_USERNAMES = "salifT"
 _CONFIG_KEY = "preview_usernames"
+_PURGED_CONFIG_KEY = "preview_usernames_purged"
 
 
 def preview_email_for(username_key: str) -> str:
@@ -116,6 +117,23 @@ def _rest_upsert(path: str, row: dict[str, Any]) -> httpx.Response:
         )
 
 
+def _rest_delete(path: str, params: dict[str, str]) -> httpx.Response:
+    with httpx.Client(timeout=20.0) as client:
+        return client.delete(
+            _rest_url(path),
+            params=params,
+            headers=_rest_headers(prefer="return=minimal"),
+        )
+
+
+def is_demo_username_display(value: str) -> bool:
+    """True for allowlisted-style demo names; false for emails and regular users."""
+    cleaned = (value or "").strip()
+    if not cleaned or "@" in cleaned:
+        return False
+    return USERNAME_RE.fullmatch(cleaned) is not None
+
+
 def _fetch_table_rows() -> list[dict[str, Any]] | None:
     """Rows from preview_usernames, or None if the table is unavailable."""
     try:
@@ -168,6 +186,44 @@ def _save_config_rows(rows: list[dict[str, Any]]) -> None:
     )
     if response.status_code >= 400:
         raise RuntimeError(_rest_error_message(response, "save preview username"))
+
+
+def _purged_username_keys() -> set[str]:
+    try:
+        response = _rest_get(
+            "app_runtime_config",
+            {"select": "value", "key": f"eq.{_PURGED_CONFIG_KEY}"},
+        )
+        if response.status_code >= 400:
+            return set()
+        data = response.json()
+    except Exception as exc:  # noqa: BLE001
+        report_error(log, "preview_usernames_purged_list_failed", exc)
+        return set()
+    if not isinstance(data, list) or not data:
+        return set()
+    raw = data[0].get("value") if isinstance(data[0], dict) else "[]"
+    try:
+        parsed = json.loads(raw or "[]")
+    except json.JSONDecodeError:
+        return set()
+    if not isinstance(parsed, list):
+        return set()
+    keys: set[str] = set()
+    for item in parsed:
+        key = str(item or "").strip().lower()
+        if key:
+            keys.add(key)
+    return keys
+
+
+def _save_purged_username_keys(keys: set[str]) -> None:
+    response = _rest_upsert(
+        "app_runtime_config?on_conflict=key",
+        {"key": _PURGED_CONFIG_KEY, "value": json.dumps(sorted(keys))},
+    )
+    if response.status_code >= 400:
+        raise RuntimeError(_rest_error_message(response, "save purged demo usernames"))
 
 
 def env_username_map() -> dict[str, str]:
@@ -246,10 +302,10 @@ def _event_stats() -> dict[str, dict[str, Any]]:
     for event in events:
         if not isinstance(event, dict):
             continue
-        if event.get("is_preview") is False:
+        if event.get("is_preview") is not True:
             continue
         display = str(event.get("username") or "").strip()
-        if not display:
+        if not is_demo_username_display(display):
             continue
         key = display.lower()
         bucket = stats.get(key)
@@ -282,12 +338,22 @@ def _event_stats() -> dict[str, dict[str, Any]]:
 
 
 def list_preview_accounts() -> list[dict[str, Any]]:
-    """Union of dashboard rows, env allowlist, and usernames seen in activity."""
+    """Dashboard + env demo usernames only (never regular signed-in users)."""
     db_rows = {str(row.get("username_key") or "").lower(): row for row in _db_username_rows()}
     env_map = env_username_map()
     stats = _event_stats()
+    purged = _purged_username_keys()
 
-    keys = set(db_rows) | set(env_map) | set(stats)
+    keys: set[str] = set()
+    for key in set(db_rows) | set(env_map):
+        if key and key not in purged:
+            keys.add(key)
+    for key, usage in stats.items():
+        if not key or key in purged:
+            continue
+        display = str(usage.get("username") or key)
+        if is_demo_username_display(display):
+            keys.add(key)
     accounts: list[dict[str, Any]] = []
     for key in keys:
         if not key:
@@ -307,6 +373,8 @@ def list_preview_accounts() -> list[dict[str, Any]]:
             created_at = None
         else:
             display = str(usage.get("username") or key)
+            if not is_demo_username_display(display):
+                continue
             active = False
             source = "activity"
             created_at = None
@@ -380,11 +448,75 @@ def upsert_preview_username(username: str, *, active: bool, created_by: str | No
 
 
 def add_preview_username(username: str, *, created_by: str | None) -> str:
-    return upsert_preview_username(username, active=True, created_by=created_by)
+    display = upsert_preview_username(username, active=True, created_by=created_by)
+    purged = _purged_username_keys()
+    key = display.lower()
+    if key in purged:
+        purged.discard(key)
+        _save_purged_username_keys(purged)
+    return display
 
 
 def remove_preview_username(username: str, *, created_by: str | None) -> str:
     display = upsert_preview_username(username, active=False, created_by=created_by)
+    _revoke_preview_auth_user(display)
+    return display
+
+
+def _delete_preview_events_for_username(display: str) -> None:
+    key = display.lower()
+    values = {display, key, preview_email_for(key)}
+    for value in values:
+        try:
+            response = _rest_delete("preview_events", {"username": f"eq.{value}"})
+        except Exception as exc:  # noqa: BLE001
+            report_error(log, "preview_events_delete_failed", exc, username=value)
+            continue
+        if response.status_code >= 400 and not _table_missing(response):
+            report_error(
+                log,
+                "preview_events_delete_failed",
+                RuntimeError(response.text[:300]),
+                username=value,
+            )
+
+
+def permanently_delete_preview_username(username: str) -> str:
+    """Remove a demo username, its activity, and Auth user so it no longer appears."""
+    display = normalize_username(username)
+    if display is None:
+        raise ValueError("Usernames must be 2–32 letters, numbers, or underscores.")
+    key = display.lower()
+
+    table_rows = _fetch_table_rows()
+    if table_rows is not None:
+        try:
+            response = _rest_delete("preview_usernames", {"username_key": f"eq.{key}"})
+        except httpx.HTTPError as exc:
+            report_error(log, "preview_username_purge_failed", exc, username=display)
+            raise RuntimeError(
+                "Harvest API cannot reach local Postgres. Start Docker (postgres/postgrest/api)."
+            ) from exc
+        if response.status_code >= 400 and not _table_missing(response):
+            raise RuntimeError(_rest_error_message(response, "permanently delete demo username"))
+
+    rows = [
+        item
+        for item in _fetch_config_rows()
+        if isinstance(item, dict) and str(item.get("username_key") or "").lower() != key
+    ]
+    try:
+        _save_config_rows(rows)
+    except httpx.HTTPError as exc:
+        report_error(log, "preview_username_purge_failed", exc, username=display)
+        raise RuntimeError(
+            "Harvest API cannot reach local Postgres. Start Docker (postgres/postgrest/api)."
+        ) from exc
+
+    purged = _purged_username_keys()
+    purged.add(key)
+    _save_purged_username_keys(purged)
+    _delete_preview_events_for_username(display)
     _revoke_preview_auth_user(display)
     return display
 

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { MapContainer, TileLayer, Marker, Popup } from 'react-leaflet'
 import L from 'leaflet'
 import { Link } from 'react-router-dom'
@@ -18,7 +18,9 @@ import {
   propertySearchPath,
   YEAR_BUILT_MIN,
 } from '../lib/portfolio'
-import type { PortfolioItem } from '../lib/api'
+import { apiFetch, type PortfolioItem } from '../lib/api'
+import { isAdminUser } from '../lib/admin'
+import { useAuthStore } from '../lib/authStore'
 import {
   applyFilters,
   defaultFilters,
@@ -182,12 +184,39 @@ function SortMenu({
 }
 
 export function HomePage() {
+  const queryClient = useQueryClient()
+  const user = useAuthStore((s) => s.user)
+  const isAdmin = isAdminUser(user)
+  const [removingId, setRemovingId] = useState<string | null>(null)
   const { data, isLoading, error } = useQuery({
     queryKey: ['portfolio'],
     queryFn: fetchPortfolio,
   })
 
   const properties = data?.properties ?? []
+
+  async function removeCatalogProperty(item: PortfolioItem) {
+    const propertyId = item.id
+    if (!propertyId) return
+    if (
+      !window.confirm(
+        `Remove “${item.address || propertyId}” from the harvest Postgres catalog? End users will no longer see it.`,
+      )
+    ) {
+      return
+    }
+    setRemovingId(propertyId)
+    try {
+      await apiFetch(`/api/admin/properties/${encodeURIComponent(propertyId)}`, {
+        method: 'DELETE',
+      })
+      await queryClient.invalidateQueries({ queryKey: ['portfolio'] })
+    } catch (err) {
+      window.alert(err instanceof Error ? err.message : 'Could not remove property')
+    } finally {
+      setRemovingId(null)
+    }
+  }
 
   const filterBounds: FilterBounds = useMemo(() => {
     const currentYear = new Date().getFullYear()
@@ -316,6 +345,16 @@ export function HomePage() {
                     >
                       Analyze
                     </Link>
+                    {isAdmin && p.id && (
+                      <button
+                        type="button"
+                        disabled={removingId === p.id}
+                        onClick={() => void removeCatalogProperty(p)}
+                        className="block text-red-700 underline disabled:opacity-60"
+                      >
+                        {removingId === p.id ? 'Removing…' : 'Remove'}
+                      </button>
+                    )}
                   </div>
                 </Popup>
               </Marker>
@@ -349,6 +388,7 @@ export function HomePage() {
                 <th className="px-3 py-2 font-medium">Cash on cash</th>
                 <th className="px-3 py-2 font-medium">Score</th>
                 <th className="px-3 py-2 font-medium">Views</th>
+                {isAdmin && <th className="px-3 py-2 font-medium">Admin</th>}
               </tr>
             </thead>
             <tbody>
@@ -382,11 +422,27 @@ export function HomePage() {
                   <td className="px-3 py-2 tabular-nums">
                     {(p.app_view_count ?? 0).toLocaleString()}
                   </td>
+                  {isAdmin && (
+                    <td className="px-3 py-2">
+                      {p.id ? (
+                        <button
+                          type="button"
+                          disabled={removingId === p.id}
+                          onClick={() => void removeCatalogProperty(p)}
+                          className="rounded-lg border border-red-200 px-2 py-1 text-xs text-red-700 hover:bg-red-50 disabled:opacity-60"
+                        >
+                          {removingId === p.id ? 'Removing…' : 'Remove'}
+                        </button>
+                      ) : (
+                        '—'
+                      )}
+                    </td>
+                  )}
                 </tr>
               ))}
               {filtered.length === 0 && !isLoading && (
                 <tr>
-                  <td colSpan={10} className="px-3 py-6 text-center text-muted">
+                  <td colSpan={isAdmin ? 11 : 10} className="px-3 py-6 text-center text-muted">
                     No properties match the current filters. Widen a range or reset.
                   </td>
                 </tr>

@@ -18,6 +18,7 @@ from api.preview_activity import (
 from api.preview_usernames import (
     add_preview_username,
     list_preview_accounts,
+    permanently_delete_preview_username,
     remove_preview_username,
 )
 from api.schemas import (
@@ -123,6 +124,30 @@ def delete_preview_account(
             username,
             created_by=str(admin.get("email") or admin.get("id") or ""),
         )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    accounts = list_preview_accounts()
+    return PreviewAccountListResponse(accounts=accounts, count=len(accounts))
+
+
+@router.delete(
+    "/api/preview/accounts/{username}/permanent",
+    response_model=PreviewAccountListResponse,
+)
+def purge_preview_account(
+    username: str,
+    _admin: AdminUser,
+    confirm_username: str = Query(..., min_length=2, max_length=32),
+) -> PreviewAccountListResponse:
+    if confirm_username.strip().lower() != username.strip().lower():
+        raise HTTPException(
+            status_code=400,
+            detail="Typed username does not match the account to delete.",
+        )
+    try:
+        permanently_delete_preview_username(username)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:

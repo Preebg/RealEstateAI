@@ -1,10 +1,13 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
-import { useSearchParams } from 'react-router-dom'
-import { useQuery } from '@tanstack/react-query'
+import { useNavigate, useSearchParams } from 'react-router-dom'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { apiFetch, type AnalysisJob, type FinanceResult } from '../lib/api'
+import { AdminCatalogEditor } from '../components/AdminCatalogEditor'
 import { PropertyAnalysisView } from '../components/PropertyAnalysisView'
 import { firstCatalogUuid, fetchPropertyDetail, createPropertyShare, recordPropertyView } from '../lib/portfolio'
 import type { Assumptions } from '../lib/propertyAnalysis'
+import { isAdminUser } from '../lib/admin'
+import { useAuthStore } from '../lib/authStore'
 import { trackPreviewEvent } from '../lib/previewActivity'
 
 function addressesMatch(a?: unknown, b?: unknown): boolean {
@@ -13,6 +16,10 @@ function addressesMatch(a?: unknown, b?: unknown): boolean {
 
 export function SearchPage() {
   const [params] = useSearchParams()
+  const navigate = useNavigate()
+  const queryClient = useQueryClient()
+  const user = useAuthStore((s) => s.user)
+  const isAdmin = isAdminUser(user)
   const paramAddress = params.get('address') || ''
   const paramId = params.get('id') || ''
   const [query, setQuery] = useState(paramAddress)
@@ -335,6 +342,28 @@ export function SearchPage() {
                 />
               </div>
             </div>
+          )}
+          {isAdmin && catalogId && displayProperty && (
+            <AdminCatalogEditor
+              property={displayProperty}
+              propertyId={catalogId}
+              onSaved={(next) => {
+                void queryClient.invalidateQueries({ queryKey: ['kb-property'] })
+                void queryClient.invalidateQueries({ queryKey: ['portfolio'] })
+                if (jobId && next) {
+                  queryClient.setQueryData(['analysis', jobId], (current: AnalysisJob | undefined) =>
+                    current
+                      ? { ...current, property_data: { ...(current.property_data || {}), ...next } }
+                      : current,
+                  )
+                }
+              }}
+              onDeleted={() => {
+                void queryClient.invalidateQueries({ queryKey: ['kb-property'] })
+                void queryClient.invalidateQueries({ queryKey: ['portfolio'] })
+                navigate('/', { replace: true })
+              }}
+            />
           )}
         </>
       }

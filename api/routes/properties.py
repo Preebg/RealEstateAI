@@ -6,9 +6,10 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
 
-from api.deps import CurrentUser, UserClient
+from api.deps import AdminUser, CurrentUser, UserClient
 from api.schemas import (
     AddressSearchResponse,
+    AdminPropertyMetricsUpdate,
     BookmarkRequest,
     PropertyOfDayResponse,
     PropertyViewRequest,
@@ -16,6 +17,7 @@ from api.schemas import (
     SaveOverrideRequest,
 )
 from knowledge_base import (
+    delete_canonical_property_by_id,
     get_kb_raw_data,
     get_user_saved_properties,
     invalidate_kb_cache,
@@ -26,6 +28,7 @@ from knowledge_base import (
     save_user_property_override,
     search_kb_addresses,
     unsave_property_from_user_account,
+    update_canonical_property_metrics,
 )
 from property_popularity import claim_property_of_the_day, record_property_view
 
@@ -262,3 +265,38 @@ def property_of_the_day(
         property=shaped,
         reasons=list(payload.get("reasons") or []),
     )
+
+
+@router.patch("/api/admin/properties/{property_id}")
+def admin_update_property_metrics(
+    property_id: str,
+    body: AdminPropertyMetricsUpdate,
+    _admin: AdminUser,
+) -> dict[str, Any]:
+    if not is_valid_uuid(property_id):
+        raise HTTPException(status_code=400, detail="A valid property id is required")
+    updates = body.model_dump(exclude_unset=True)
+    recalculate = bool(updates.pop("recalculate_cash_flow", True))
+    if not updates:
+        raise HTTPException(status_code=400, detail="No metric values provided")
+    record = update_canonical_property_metrics(
+        property_id,
+        updates,
+        recalculate_cash_flow=recalculate,
+    )
+    if not record:
+        raise HTTPException(status_code=404, detail="Property not found or update failed")
+    return {"ok": True, "property": record}
+
+
+@router.delete("/api/admin/properties/{property_id}")
+def admin_delete_property(
+    property_id: str,
+    _admin: AdminUser,
+) -> dict[str, Any]:
+    if not is_valid_uuid(property_id):
+        raise HTTPException(status_code=400, detail="A valid property id is required")
+    ok = delete_canonical_property_by_id(property_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Property not found or could not be removed")
+    return {"ok": True, "property_id": property_id}

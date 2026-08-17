@@ -137,6 +137,80 @@ def test_preview_accounts_require_auth() -> None:
     assert response.status_code == 401
     response = client.delete("/api/preview/accounts/newDemo")
     assert response.status_code == 401
+    response = client.delete(
+        "/api/preview/accounts/newDemo/permanent",
+        params={"confirm_username": "newDemo"},
+    )
+    assert response.status_code == 401
+
+
+def test_admin_property_routes_require_auth() -> None:
+    property_id = "11111111-1111-1111-1111-111111111111"
+    response = client.patch(f"/api/admin/properties/{property_id}", json={"price": 250000})
+    assert response.status_code == 401
+    response = client.delete(f"/api/admin/properties/{property_id}")
+    assert response.status_code == 401
+
+
+def test_list_preview_accounts_excludes_registered_users(monkeypatch: pytest.MonkeyPatch) -> None:
+    from api import preview_usernames
+
+    monkeypatch.setattr(
+        preview_usernames,
+        "_db_username_rows",
+        lambda: [{"username_key": "salift", "username": "salifT", "active": True}],
+    )
+    monkeypatch.setattr(preview_usernames, "env_username_map", lambda: {})
+    monkeypatch.setattr(preview_usernames, "_purged_username_keys", lambda: set())
+    monkeypatch.setattr(
+        preview_usernames,
+        "_event_stats",
+        lambda: {
+            "investor@example.com": {
+                "username": "investor@example.com",
+                "event_count": 4,
+                "login_count": 2,
+                "analyze_count": 1,
+                "compare_count": 0,
+                "pdf_count": 0,
+                "last_seen": "2026-08-17T00:00:00Z",
+            },
+            "salift": {
+                "username": "salifT",
+                "event_count": 3,
+                "login_count": 1,
+                "analyze_count": 1,
+                "compare_count": 0,
+                "pdf_count": 0,
+                "last_seen": "2026-08-17T01:00:00Z",
+            },
+        },
+    )
+    accounts = preview_usernames.list_preview_accounts()
+    names = {account["username"] for account in accounts}
+    assert names == {"salifT"}
+
+
+def test_list_preview_accounts_hides_purged_names(monkeypatch: pytest.MonkeyPatch) -> None:
+    from api import preview_usernames
+
+    monkeypatch.setattr(preview_usernames, "_db_username_rows", lambda: [])
+    monkeypatch.setattr(
+        preview_usernames,
+        "env_username_map",
+        lambda: {"salift": "salifT"},
+    )
+    monkeypatch.setattr(preview_usernames, "_purged_username_keys", lambda: {"salift"})
+    monkeypatch.setattr(preview_usernames, "_event_stats", lambda: {})
+    assert preview_usernames.list_preview_accounts() == []
+
+
+def test_is_demo_username_display() -> None:
+    from api.preview_usernames import is_demo_username_display
+
+    assert is_demo_username_display("salifT") is True
+    assert is_demo_username_display("investor@example.com") is False
+    assert is_demo_username_display("preebg09@gmail.com") is False
 
 
 def test_removed_username_overrides_env(monkeypatch: pytest.MonkeyPatch) -> None:

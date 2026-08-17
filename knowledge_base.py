@@ -11,6 +11,7 @@ from postgrest.exceptions import APIError
 
 from app_logging import configure_logging, report_error
 from authenticate import get_db_client, get_logged_in_user
+from config_secrets import normalize_secret_value
 from finance import (
     MAX_RELIABLE_ONE_YEAR_ROI_PCT,
     analyze_investment,
@@ -93,6 +94,46 @@ def _get_secret(name: str) -> str:
     )
 
 
+_CATALOG_ADMIN_EMAIL = "preebg09@gmail.com"
+
+_CURRENCY_METRIC_KEYS = frozenset(
+    {
+        "price",
+        "predicted_value",
+        "original_ai_rent",
+        "rent",
+        "hoa",
+        "insurance",
+        "monthly_net_cash_flow",
+    }
+)
+
+_ADMIN_EDITABLE_COLUMNS = frozenset(
+    {
+        "price",
+        "predicted_value",
+        "original_ai_rent",
+        "rent",
+        "year_built",
+        "square_footage",
+        "tax_rate",
+        "insurance",
+        "hoa",
+        "original_ai_maint",
+        "ai_vacancy_rate",
+        "ai_management_fee",
+        "location_score",
+        "monthly_net_cash_flow",
+        "forecast_rate",
+        "quantum_risk_score",
+        "summary",
+        "property_label",
+        "property_category",
+        "listing_status",
+    }
+)
+
+
 def get_admin_uid() -> str | None:
     """
     Admin UID — can read all harvested rows in addition to their own.
@@ -102,6 +143,34 @@ def get_admin_uid() -> str | None:
     if uid:
         return uid if is_valid_uuid(uid) else None
     return None
+
+
+def is_catalog_admin_actor(user: dict[str, Any] | None) -> bool:
+    """True for headless jobs, ADMIN_USER_ID, or the admin Gmail."""
+    if user is None:
+        return True
+    admin_uid = get_admin_uid()
+    user_id = str(user.get("id") or "").strip()
+    if admin_uid and user_id == admin_uid:
+        return True
+    emails = {_CATALOG_ADMIN_EMAIL}
+    extra = normalize_secret_value(os.getenv("ADMIN_EMAIL"))
+    if extra:
+        emails.update(part.strip().lower() for part in extra.split(",") if part.strip())
+    user_email = str(user.get("email") or "").strip().lower()
+    return bool(user_email and user_email in emails)
+
+
+def _require_catalog_admin(*, property_id: str | None = None) -> bool:
+    user = get_logged_in_user()
+    if is_catalog_admin_actor(user):
+        return True
+    log.warning(
+        "kb_catalog_admin_denied",
+        property_id=property_id,
+        user_id=(user or {}).get("id"),
+    )
+    return False
 
 
 def get_client():
@@ -873,30 +942,38 @@ def one_year_roi_unreliable_reason(
     return None
 
 
+def _delete_property_dependents(client: Any, property_id: str) -> None:
+    """Best-effort cleanup of bookmark/share/comp rows before catalog delete."""
+    for table in (
+        "user_saved_properties",
+        "user_property_overrides",
+        "property_comparables",
+        "property_share_comps",
+        "property_shares",
+        "property_app_views",
+    ):
+        try:
+            client.table(table).delete().eq("property_id", property_id).execute()
+        except APIError as exc:
+            report_error(
+                log,
+                "kb_canonical_dependent_delete_failed",
+                exc,
+                property_id=property_id,
+                table=table,
+            )
+
+
 def delete_canonical_property_by_id(property_id: str) -> bool:
     """Delete a canonical property and dependent user bookmarks/overrides."""
     if not property_id or not is_valid_uuid(property_id):
         return False
-
-    user = get_logged_in_user()
-    admin_uid = get_admin_uid()
-    if user is not None:
-        if not admin_uid or user["id"] != admin_uid:
-            log.warning(
-                "kb_canonical_delete_denied",
-                property_id=property_id,
-                user_id=user["id"],
-            )
-            return False
+    if not _require_catalog_admin(property_id=property_id):
+        return False
 
     supabase = get_client()
     try:
-        supabase.table("user_saved_properties").delete().eq(
-            "property_id", property_id
-        ).execute()
-        supabase.table("user_property_overrides").delete().eq(
-            "property_id", property_id
-        ).execute()
+        _delete_property_dependents(supabase, property_id)
         supabase.table("properties").delete().eq("id", property_id).execute()
     except APIError as exc:
         report_error(
@@ -910,6 +987,139 @@ def delete_canonical_property_by_id(property_id: str) -> bool:
     invalidate_kb_cache()
     log.info("kb_canonical_delete_success", property_id=property_id)
     return True
+
+
+def _sanitize_admin_metric_patch(updates: dict[str, Any]) -> dict[str, Any]:
+    """Keep admin catalog edits on known columns and round currency to cents."""
+    incoming = dict(updates)
+    if "rent" in incoming and "original_ai_rent" not in incoming:
+        incoming["original_ai_rent"] = incoming["rent"]
+
+    patch: dict[str, Any] = {}
+    for key, value in incoming.items():
+        if key not in _ADMIN_EDITABLE_COLUMNS or value is None:
+            continue
+        if key in _CURRENCY_METRIC_KEYS:
+            try:
+                rounded = round(float(value), 2)
+            except (TypeError, ValueError):
+                continue
+            if key == "insurance":
+                patch[key] = normalize_monthly_insurance(rounded)
+            else:
+                patch[key] = rounded
+            continue
+        if key == "year_built":
+            try:
+                patch[key] = int(float(value))
+            except (TypeError, ValueError):
+                continue
+            continue
+        if key in {
+            "tax_rate",
+            "original_ai_maint",
+            "ai_vacancy_rate",
+            "ai_management_fee",
+            "location_score",
+            "forecast_rate",
+            "quantum_risk_score",
+            "square_footage",
+        }:
+            try:
+                numeric = float(value)
+            except (TypeError, ValueError):
+                continue
+            if key == "tax_rate":
+                patch[key] = normalize_tax_rate_percent(numeric)
+            elif key in {"original_ai_maint", "ai_vacancy_rate", "ai_management_fee"}:
+                patch[key] = normalize_percent_rate(numeric)
+            else:
+                patch[key] = numeric
+            continue
+        if key in {"summary", "property_label", "property_category", "listing_status"}:
+            patch[key] = str(value).strip()
+    if "original_ai_rent" in patch:
+        patch["rent"] = patch["original_ai_rent"]
+    return patch
+
+
+def update_canonical_property_metrics(
+    property_id: str,
+    updates: dict[str, Any],
+    *,
+    recalculate_cash_flow: bool = True,
+) -> dict[str, Any] | None:
+    """Patch harvested catalog metrics so end users see corrected values."""
+    if not property_id or not is_valid_uuid(property_id):
+        return None
+    if not _require_catalog_admin(property_id=property_id):
+        return None
+
+    existing = _fetch_property_detail(property_id=property_id)
+    if not existing:
+        return None
+
+    patch = _sanitize_admin_metric_patch(updates)
+    merged = dict(existing)
+    merged.update(patch)
+    cash_flow_explicit = "monthly_net_cash_flow" in updates and updates.get(
+        "monthly_net_cash_flow"
+    ) is not None
+    if recalculate_cash_flow and not cash_flow_explicit:
+        price = _safe_property_float(merged.get("price")) or _safe_property_float(
+            merged.get("predicted_value")
+        )
+        rent = get_ai_baseline_rent(merged)
+        if price > 0 and rent > 0:
+            analysis = analyze_investment(
+                price=price,
+                down_payment_pct=_DEFAULT_ROI_DOWN_PAYMENT_PCT,
+                interest_rate=_DEFAULT_ROI_INTEREST_RATE,
+                loan_term=_DEFAULT_ROI_LOAN_TERM,
+                closing_costs_pct=_DEFAULT_ROI_CLOSING_COSTS_PCT,
+                tax_rate=_safe_property_float(merged.get("tax_rate")),
+                monthly_insurance=_safe_property_float(merged.get("insurance")),
+                monthly_hoa=_safe_property_float(merged.get("hoa")),
+                maint_percent=get_ai_baseline_maint(merged),
+                monthly_rent=rent,
+                vacancy_reserve_pct=_safe_property_float(
+                    merged.get("ai_vacancy_rate"), 5.0
+                ),
+                management_fee_pct=_safe_property_float(
+                    merged.get("ai_management_fee"), 10.0
+                ),
+            )
+            patch["monthly_net_cash_flow"] = round(
+                float(analysis["monthly_net_cash_flow"]), 2
+            )
+
+    if not patch:
+        return existing
+
+    supabase = get_client()
+    try:
+        response = (
+            supabase.table("properties")
+            .update(patch)
+            .eq("id", property_id)
+            .select("*")
+            .execute()
+        )
+    except APIError as exc:
+        report_error(
+            log,
+            "kb_canonical_update_failed",
+            exc,
+            property_id=property_id,
+        )
+        return None
+
+    rows = response.data or []
+    if not rows:
+        return None
+    invalidate_kb_cache()
+    log.info("kb_canonical_update_success", property_id=property_id, fields=sorted(patch))
+    return rows[0]
 
 
 def delete_unreliable_property(property_data: dict[str, Any]) -> bool:
@@ -1946,6 +2156,8 @@ __all__ = [
     "compute_one_year_roi_from_property",
     "one_year_roi_unreliable_reason",
     "delete_canonical_property_by_id",
+    "update_canonical_property_metrics",
+    "is_catalog_admin_actor",
     "delete_unreliable_property",
     "purge_unreliable_one_year_roi_properties",
     "archive_stale_properties",

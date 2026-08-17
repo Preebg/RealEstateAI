@@ -164,6 +164,29 @@ class BookmarkRequest(BaseModel):
     property_data: dict[str, Any] | None = None
 
 
+class AdminPropertyMetricsUpdate(BaseModel):
+    price: float | None = None
+    predicted_value: float | None = None
+    rent: float | None = None
+    original_ai_rent: float | None = None
+    year_built: int | None = None
+    square_footage: float | None = None
+    tax_rate: float | None = None
+    insurance: float | None = None
+    hoa: float | None = None
+    original_ai_maint: float | None = None
+    ai_vacancy_rate: float | None = None
+    ai_management_fee: float | None = None
+    location_score: float | None = None
+    monthly_net_cash_flow: float | None = None
+    forecast_rate: float | None = None
+    quantum_risk_score: float | None = None
+    summary: str | None = Field(default=None, max_length=8000)
+    property_label: str | None = Field(default=None, max_length=80)
+    listing_status: str | None = Field(default=None, max_length=40)
+    recalculate_cash_flow: bool = True
+
+
 class PropertyViewRequest(BaseModel):
     property_id: str = Field(min_length=1, max_length=80)
 
