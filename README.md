@@ -6,6 +6,7 @@
 [![Qiskit](https://img.shields.io/badge/Qiskit-Aer-6929C4.svg)](https://qiskit.org/)
 [![FastAPI](https://img.shields.io/badge/API-FastAPI-009688.svg)](https://fastapi.tiangolo.com/)
 [![React](https://img.shields.io/badge/UI-React%20%2B%20Vite-61DAFB.svg)](https://vitejs.dev/)
+[![Cloudflare](https://img.shields.io/badge/edge-Workers-F38020.svg)](https://developers.cloudflare.com/workers/)
 [![PostgreSQL](https://img.shields.io/badge/data-Postgres%20%2B%20PostgREST-4169E1.svg)](https://www.postgresql.org/)
 [![Supabase](https://img.shields.io/badge/auth-Supabase-3FCF8E.svg)](https://supabase.com/)
 [![CI](https://img.shields.io/badge/CI-ruff%20%7C%20mypy%20%7C%20pytest-success.svg)](.github/workflows/ci.yml)
@@ -16,6 +17,8 @@
 </p>
 
 <p align="center"><em>Figure 1.</em> CapEigen hybrid stack: presentation → API → agentic / classical / quantum cores → local Postgres (Auth on Supabase).</p>
+
+> **For reviewers.** CapEigen is an end-to-end systems project: a production-shaped SPA, authenticated API, self-hosted data plane, agentic LLM research with rate limits and grounding, classical underwriting math, and a reproducible QAOA alignment engine—wired together with Docker, CI, and admin/product tooling rather than left as isolated notebooks.
 
 ---
 
@@ -48,7 +51,7 @@ Residential underwriting still leans on static rules of thumb—gross rent multi
 | **Classical underwriting** | `finance.py` | Debt service, OpEx, NOI, cap rate, cash-on-cash, rent resolution, tax/insurance normalization, 10-year Monte Carlo appreciation |
 | **Quantum alignment** | `quantum_portfolio.py` | Three-qubit QAOA on Qiskit Aer; SciPy COBYLA over (γ, β); histogram → success probabilities |
 
-The product surface is a **React (Vite) SPA** on Cloudflare Pages talking to a **FastAPI** backend on the harvest machine (Docker). Property data lives in **local Postgres** behind PostgREST; **login stays on hosted Supabase**. Domain logic lives in root Python modules.
+The product surface is a **React (Vite) SPA** on **Cloudflare Workers** (static assets + auth edge routes) talking to a **FastAPI** backend on the harvest machine (Docker). Property data lives in **local Postgres** behind PostgREST; **login stays on hosted Supabase**. Domain logic lives in root Python modules.
 
 ---
 
@@ -65,8 +68,8 @@ flowchart TB
     end
 
     subgraph CapEigen["CapEigen platform"]
-        SPA[React SPA · Cloudflare Pages]
-        NF[Pages Functions<br/>Google token · demo login]
+        SPA[React SPA · Cloudflare Workers]
+        NF[Worker auth edge<br/>Google token · demo login]
         API[FastAPI · Docker]
         CORE[engine · finance · QAOA · KB]
         PG[(Local Postgres)]
@@ -84,9 +87,10 @@ flowchart TB
     INV -->|Google sign-in| GOOG
     DEMO -->|Username login| NF
     SPA -->|OAuth callback| NF
+    NF -->|prefer FastAPI exchange| API
     SPA -->|CORS / VITE_API_URL| API
     INV -->|JWT session| AUTH
-    ADM -->|Harvest · archive| CORE
+    ADM -->|Harvest · archive · catalog| CORE
     API --> CORE
     API --> PGR --> PG
     CORE -->|generate_content| GEM
@@ -100,14 +104,14 @@ flowchart TB
 ```mermaid
 flowchart TB
     subgraph Presentation["Presentation"]
-        SPA["web/ — React + Vite SPA<br/>Cloudflare Pages · GIS Google login · demo usernames"]
-        NF["web/functions<br/>/api/auth/google/exchange · /api/auth/demo"]
+        SPA["web/ — React + Vite SPA<br/>Cloudflare Workers · GIS Google login · demo usernames"]
+        NF["web/worker.js + functions/<br/>/api/auth/google/exchange · /api/auth/demo"]
     end
 
     subgraph Edge["API Edge"]
         API["api/main.py — FastAPI<br/>JWT middleware · CORS · OpenAPI"]
         JOBS["api/jobs.py<br/>In-process job store + ThreadPoolExecutor"]
-        ROUTES["routes: health · auth · properties · analysis<br/>guest · compare_pdf · preview · validation"]
+        ROUTES["routes: health · auth · properties · analysis<br/>guest · compare · preview · usage · legal · validation"]
     end
 
     subgraph Domain["Domain Core"]
@@ -115,6 +119,7 @@ flowchart TB
         FIN["finance.py<br/>Cash flow · MC appreciation"]
         QAOA["quantum_portfolio.py<br/>QAOA · Aer · COBYLA"]
         KB["knowledge_base.py<br/>Catalog · overrides · context"]
+        POP["property_popularity.py<br/>views · Property of the Day"]
         COMPS["comps_analysis.py<br/>rent_comps_analysis.py"]
         SVC["services/<br/>property_analysis_flow<br/>deferred_analysis"]
     end
@@ -129,12 +134,14 @@ flowchart TB
 
     SPA -->|Bearer JWT / JSON| API
     SPA --> NF
+    NF -->|OAuth proxy / fallback| API
     API --> ROUTES --> JOBS
     JOBS --> SVC
     SVC --> ENG & FIN & QAOA & KB & COMPS
     ENG --> GEM
     ENG --> KB
     KB --> PGR --> PG
+    POP --> PGR
     ENG --> DISC
     API -.->|validate JWT| AUTH
 ```
@@ -143,10 +150,12 @@ flowchart TB
 
 ```mermaid
 flowchart LR
-    U[Browser] --> N[Cloudflare Pages SPA + Functions]
+    U[Browser] --> N[Cloudflare Worker<br/>SPA assets + /api/auth/*]
     U --> S[Supabase Auth]
     U --> GGL[Google Identity Services]
-    N -->|VITE_API_URL| F[FastAPI container<br/>:8000]
+    N -->|OAuth prefer FastAPI| F[FastAPI container<br/>:8000]
+    N -.->|OAuth fallback if API down| TOK[Google token endpoint]
+    U -->|VITE_API_URL · analysis /api/*| F
     F --> GW[REST gateway :3001]
     GW --> PR[PostgREST]
     PR --> P[(Postgres 16)]
@@ -161,7 +170,7 @@ flowchart LR
     style G fill:#f5f0e6,stroke:#7a5c2e
 ```
 
-Live product: SPA at the CapEigen domain (Cloudflare Pages); API and database on the harvest machine (`postgres`, `postgrest`, `rest-gateway`, `api` via `docker compose`). Public `/api/*` is reverse-proxied; Postgres and PostgREST stay on localhost.
+Live product: SPA + auth edge on Cloudflare Workers (`web/worker.js`, `wrangler deploy`); API and database on the harvest machine (`postgres`, `postgrest`, `rest-gateway`, `api` via `docker compose`). Google code exchange prefers FastAPI and falls back to Worker-local credentials if the API is unreachable. Public analysis `/api/*` hits the harvest origin; Postgres and PostgREST stay on localhost.
 
 > **Scale note.** Analysis / quantum jobs are **asynchronous** and stored **in-process** (`api/jobs.py`). Multi-replica API deployments require an external job store (Redis, DB, queue). Poll: `GET /api/analysis/{job_id}`.
 
@@ -431,7 +440,7 @@ Negative cash flow cannot inflate cash-flow success because *t*<sub>cf</sub> = 0
 
 ## Data Plane & Knowledge Base
 
-Auth stays on **hosted Supabase**. Catalog, overrides, shares, comps, and preview activity live in **local Postgres** on the harvest machine (PostgREST at `:3001`) when `DATABASE_REST_URL` is set. FastAPI validates the Supabase JWT, then reads/writes local data.
+Auth stays on **hosted Supabase**. Catalog, overrides, shares, comps, usage events, legal docs, and preview activity live in **local Postgres** on the harvest machine (PostgREST at `:3001`) when `DATABASE_REST_URL` is set. FastAPI validates the Supabase JWT, then reads/writes local data.
 
 ```mermaid
 erDiagram
@@ -439,18 +448,22 @@ erDiagram
     properties ||--o{ user_saved_properties : "bookmarks ≤20"
     properties ||--o{ property_comparables : "normalized comps"
     properties ||--o{ property_shares : "guest links"
+    properties ||--o{ property_app_views : "unique in-app views"
+    properties ||--o{ property_of_day_impressions : "daily highlight"
     properties ||--o| archived_properties : "age > 30d"
-    preview_usernames ||--o{ preview_events : "demo telemetry"
+    preview_usernames ||--o{ preview_events : "demo + signed-in telemetry"
 
     properties {
         uuid id PK
         text address UK
         float price
+        int year_built
         float original_ai_rent
         float monthly_net_cash_flow
         float forecast_rate
         float location_score
         float quantum_risk_score
+        int app_view_count
         jsonb comps_analysis
         timestamptz timestamp
     }
@@ -463,6 +476,13 @@ erDiagram
         float vacancy_rate
         float management_fee
         bool is_outlier
+    }
+
+    legal_documents {
+        text slug PK
+        text title
+        text body_markdown
+        timestamptz updated_at
     }
 
     preview_usernames {
@@ -478,6 +498,7 @@ flowchart LR
         L[lookup_property] --> C[Canonical row ≤30d]
         C --> M[Merge user overrides]
         M --> N[Normalize tax / insurance / rent]
+        POTD[property of the day] --> POP[property_popularity]
     end
 
     subgraph Writes
@@ -487,6 +508,8 @@ flowchart LR
         O[save_user_property_override] --> OV[user_property_overrides]
         H[save_harvest_property] --> UPSERT
         H --> RPC[save_property_comps RPC]
+        V[record_property_app_view] --> POP
+        ADM[admin catalog patch / delete] --> UPSERT
     end
 
     CTX[get_kb_context] --> PROMPT[LLM synthesis prompt]
@@ -501,15 +524,18 @@ Schema lives in `docker/postgres/init/` and is applied on first Postgres volume 
 | Path | Who | What |
 |------|-----|------|
 | `/login` | Anyone | Google Identity Services, or allowlisted preview username |
-| `/auth/google/callback` | Google OAuth | Token exchange via Pages Function `/api/auth/google/exchange` (secret stays off the browser) |
-| `/` Home | Signed-in | Portfolio map from `/api/portfolio` (harvest-machine catalog) |
-| `/search` | Signed-in | Individual address analysis |
-| `/compare` | Signed-in | Side-by-side underwriting + PDF |
+| `/auth/google/callback` | Google OAuth | PKCE callback; Worker proxies code exchange to FastAPI first, Worker-local secret only as fallback |
+| `/legal/:doc` | Anyone | Terms / privacy (DB-backed with code defaults) |
+| `/` Home | Signed-in | Portfolio map + filter/sort (price, cash flow, cash-on-cash, year built, views); Property of the Day modal |
+| `/search` | Signed-in | Individual address analysis; records unique in-app views |
+| `/compare` | Signed-in | Side-by-side underwriting + client-side PDF |
 | `/share/:token` | Guest | Read-only share (no login) |
 | `/validation` | Admin | Backtesting upload |
-| `/activity` | Admin | Preview-account telemetry; add/remove demo usernames |
+| `/activity` | Admin | Preview-account telemetry; add / permanently purge demo usernames |
+| `/usage` | Admin | Signed-in usage analytics (audience filter, summaries, CSV export) |
+| `/legal-admin` | Admin | Edit and publish legal documents |
 
-Google Web OAuth uses CapEigen redirect URIs (`/auth/google/callback`), not `supabase.co`. Preview usernames are stored in `preview_usernames` (dashboard-managed; fallback `DEMO_USERNAMES`).
+Google Web OAuth uses CapEigen redirect URIs (`/auth/google/callback`), not `supabase.co`. Preview usernames are stored in `preview_usernames` (dashboard-managed; fallback `DEMO_USERNAMES`; purged keys stay blocked). Admins can correct or remove harvested catalog rows via the in-app catalog editor.
 
 ---
 
@@ -517,20 +543,24 @@ Google Web OAuth uses CapEigen redirect URIs (`/auth/google/callback`), not `sup
 
 ```
 RealEstateAI/
-├── api/                      # FastAPI (health, auth, properties, analysis jobs, PDF, preview, validation)
-│   ├── main.py               # App, CORS, JWT middleware
+├── api/                      # FastAPI (health, auth, properties, analysis, PDF, usage, legal, validation)
+│   ├── main.py               # App, CORS (incl. *.workers.dev), JWT middleware
 │   ├── jobs.py               # In-memory async job store
-│   ├── preview_usernames.py  # Demo allowlist (DB + env fallback)
+│   ├── preview_usernames.py  # Demo allowlist + purge list (DB + env fallback)
+│   ├── legal_store.py        # Terms / privacy persistence
 │   └── routes/               # HTTP surface
-├── web/                      # React + Vite SPA (Cloudflare Pages)
-│   └── functions/            # /api/auth/google/exchange, /api/auth/demo
-├── docker/postgres/init/     # Local schema, roles, RPCs
+├── web/                      # React + Vite SPA
+│   ├── worker.js             # Cloudflare Worker: SPA assets + /api/auth/*
+│   ├── functions/            # Auth handlers reused by the Worker
+│   └── wrangler.jsonc        # Workers deploy (assets + run_worker_first)
+├── docker/postgres/init/     # Local schema, roles, RPCs, views / legal migrations
 ├── docker/rest/              # Caddy REST gateway for PostgREST
 ├── assets/                   # README figures (architecture, QAOA circuit)
 ├── engine.py                 # Gemini agents, rate limits, quantum risk wrappers
 ├── quantum_portfolio.py      # QAOA portfolio alignment (Aer + COBYLA)
 ├── finance.py                # Cash flow, appreciation MC, normalizers
-├── knowledge_base.py         # Catalog, overrides, KB context
+├── knowledge_base.py         # Catalog, overrides, KB context, admin catalog edits
+├── property_popularity.py    # In-app views + Property of the Day
 ├── comps_analysis.py         # Sale comps
 ├── rent_comps_analysis.py    # Rental comps + rent uplift
 ├── harvester.py              # Batch discovery CLI (harvest machine)
@@ -538,12 +568,12 @@ RealEstateAI/
 ├── discovery/                # Listing source adapters & parsers
 ├── services/                 # property_analysis_flow, deferred_analysis
 ├── validation/               # Backtesting helpers
+├── scripts/                  # e.g. migrate_supabase_to_local.py
 ├── docs/                     # DEPLOY, HARVESTER_SETUP, LOCAL_POSTGRES
 ├── test_app.py               # Domain / quantum / finance / KB tests
 ├── test_api.py               # API tests
 ├── docker-compose.yml        # postgres · postgrest · rest-gateway · api
 ├── Dockerfile
-├── web/wrangler.jsonc
 └── .env.example
 ```
 
@@ -595,12 +625,17 @@ With Aer seed `42` and COBYLA `maxiter=30`, “perfect” inputs `(1000, 10, 10)
 |------|------|
 | `GET /api/health` | Liveness; `data_backend` is `local-postgres` or `supabase` |
 | `GET /api/me` | Current user, admin / preview flags |
-| `POST /api/auth/google/exchange` | Google OAuth code → session (also a Cloudflare Pages Function) |
+| `POST /api/auth/google/exchange` | Google OAuth code → session (FastAPI primary; Worker edge can proxy / fall back) |
 | `POST /api/auth/demo` | Preview-username login |
-| Properties / portfolio | Catalog search, detail, bookmarks, overrides |
+| Properties / portfolio | Catalog search, detail, bookmarks, overrides, year built |
+| `POST /api/properties/view` | Record unique in-app property view |
+| `GET /api/property-of-the-day` | Deterministic daily highlight (timezone-aware) |
+| `PATCH` / `DELETE /api/admin/properties/{id}` | Admin catalog metric edit / remove |
 | `POST /api/analysis/start` | Auth underwriting job; poll `GET /api/analysis/{job_id}` |
 | Guest / compare PDF | Share links, export |
-| Preview activity | Admin telemetry + username allowlist |
+| `/api/usage/*` | Admin usage summary + activity feed |
+| Legal | Public read + admin update for terms / privacy |
+| Preview activity | Admin telemetry + username allowlist / purge |
 | Validation | Admin backtest upload |
 
 OpenAPI: `/docs` when the API is running.
@@ -622,8 +657,8 @@ flowchart LR
 
 | Layer | Location | Focus |
 |-------|----------|-------|
-| Domain / quantum | `test_app.py` | Goldens, bounds, determinism, finance MC, rent/tax normalizers, KB, discovery, deferred analysis |
-| API | `test_api.py` | FastAPI routes, preview usernames |
+| Domain / quantum | `test_app.py` | Goldens, bounds, determinism, finance MC, rent/tax normalizers, KB, discovery, deferred analysis, admin sanitization |
+| API | `test_api.py` | FastAPI routes, preview usernames / purge, property views, Property of the Day, usage / legal |
 | Lint / types | Ruff + mypy | Core modules |
 | Frontend | Vite production build | `web/` |
 
@@ -641,7 +676,7 @@ flowchart LR
 
 | Document | Contents |
 |----------|----------|
-| [`docs/DEPLOY.md`](docs/DEPLOY.md) | Cloudflare Pages SPA + harvest-machine API |
+| [`docs/DEPLOY.md`](docs/DEPLOY.md) | Cloudflare Workers SPA + harvest-machine API |
 | [`docs/LOCAL_POSTGRES.md`](docs/LOCAL_POSTGRES.md) | Self-hosted Postgres / PostgREST |
 | [`docs/HARVESTER_SETUP.md`](docs/HARVESTER_SETUP.md) | Batch harvester + Task Scheduler |
 
