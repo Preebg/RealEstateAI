@@ -266,47 +266,20 @@ def resolve_preview_username(username: str) -> str | None:
     return preview_username_map().get(cleaned.lower())
 
 
-def _event_stats() -> dict[str, dict[str, Any]]:
+def aggregate_demo_event_stats(events: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Roll up per-username counts for the demo-accounts dashboard table."""
     stats: dict[str, dict[str, Any]] = {}
-    try:
-        response = _rest_get(
-            "preview_events",
-            {
-                "select": "username,event_type,created_at,is_preview",
-                "is_preview": "eq.true",
-                "order": "created_at.desc",
-                "limit": "2000",
-            },
-        )
-        if response.status_code >= 400:
-            response = _rest_get(
-                "preview_events",
-                {
-                    "select": "username,event_type,created_at",
-                    "order": "created_at.desc",
-                    "limit": "2000",
-                },
-            )
-        if response.status_code >= 400:
-            report_error(
-                log, "preview_username_stats_failed", RuntimeError(response.text[:300])
-            )
-            return stats
-        events = response.json()
-    except Exception as exc:  # noqa: BLE001
-        report_error(log, "preview_username_stats_failed", exc)
-        return stats
-    if not isinstance(events, list):
-        return stats
-
     for event in events:
         if not isinstance(event, dict):
             continue
-        if event.get("is_preview") is not True:
+        # Explicit registered-user rows never count toward demo accounts.
+        if event.get("is_preview") is False:
             continue
         display = str(event.get("username") or "").strip()
         if not is_demo_username_display(display):
             continue
+        # Missing is_preview (older rows / column fallback) still counts when the
+        # username is a demo-style login — do not require is_preview is True.
         key = display.lower()
         bucket = stats.get(key)
         if bucket is None:
@@ -335,6 +308,62 @@ def _event_stats() -> dict[str, dict[str, Any]]:
         if created and (not last or str(created) > str(last)):
             bucket["last_seen"] = created
     return stats
+
+
+def _load_demo_events_for_stats(*, limit: int = 2000) -> list[dict[str, Any]]:
+    """
+    Load demo usage rows via the same Supabase/PostgREST client as activity feeds.
+
+    Raw REST aggregation previously dropped every row when the is_preview column
+    was absent from the select (fallback path), which zeroed dashboard counts
+    while Recent activity / Site usage still worked.
+    """
+    try:
+        from postgrest.exceptions import APIError
+
+        from authenticate import get_db_client, get_service_client
+    except Exception as exc:  # noqa: BLE001
+        report_error(log, "preview_username_stats_failed", exc)
+        return []
+
+    client = get_service_client() or get_db_client()
+    capped = max(1, min(limit, 5000))
+    try:
+        response = (
+            client.table("preview_events")
+            .select("username,event_type,created_at,is_preview")
+            .eq("is_preview", True)
+            .order("created_at", desc=True)
+            .limit(capped)
+            .execute()
+        )
+        return list(response.data or [])
+    except APIError:
+        try:
+            response = (
+                client.table("preview_events")
+                .select("username,event_type,created_at")
+                .order("created_at", desc=True)
+                .limit(capped)
+                .execute()
+            )
+            rows = response.data or []
+            return [
+                row
+                for row in rows
+                if isinstance(row, dict)
+                and is_demo_username_display(str(row.get("username") or ""))
+            ]
+        except APIError as retry_exc:
+            report_error(log, "preview_username_stats_failed", retry_exc)
+            return []
+    except Exception as exc:  # noqa: BLE001
+        report_error(log, "preview_username_stats_failed", exc)
+        return []
+
+
+def _event_stats() -> dict[str, dict[str, Any]]:
+    return aggregate_demo_event_stats(_load_demo_events_for_stats())
 
 
 def list_preview_accounts() -> list[dict[str, Any]]:

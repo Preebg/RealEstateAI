@@ -213,6 +213,72 @@ def test_is_demo_username_display() -> None:
     assert is_demo_username_display("preebg09@gmail.com") is False
 
 
+def test_aggregate_demo_event_stats_counts_without_is_preview_flag() -> None:
+    """Dashboard counts must work when events omit is_preview (fallback select)."""
+    from api.preview_usernames import aggregate_demo_event_stats
+
+    stats = aggregate_demo_event_stats(
+        [
+            {
+                "username": "salifT",
+                "event_type": "login",
+                "created_at": "2026-08-17T01:00:00Z",
+            },
+            {
+                "username": "salifT",
+                "event_type": "analyze",
+                "created_at": "2026-08-17T02:00:00Z",
+            },
+            {
+                "username": "salifT",
+                "event_type": "compare",
+                "created_at": "2026-08-17T03:00:00Z",
+            },
+            {
+                "username": "investor@example.com",
+                "event_type": "login",
+                "created_at": "2026-08-17T04:00:00Z",
+            },
+            {
+                "username": "otherDemo",
+                "event_type": "pdf",
+                "is_preview": False,
+                "created_at": "2026-08-17T05:00:00Z",
+            },
+        ]
+    )
+    assert set(stats) == {"salift"}
+    assert stats["salift"]["login_count"] == 1
+    assert stats["salift"]["analyze_count"] == 1
+    assert stats["salift"]["compare_count"] == 1
+    assert stats["salift"]["event_count"] == 3
+    assert stats["salift"]["last_seen"] == "2026-08-17T03:00:00Z"
+
+
+def test_aggregate_demo_event_stats_respects_is_preview_true() -> None:
+    from api.preview_usernames import aggregate_demo_event_stats
+
+    stats = aggregate_demo_event_stats(
+        [
+            {
+                "username": "salifT",
+                "event_type": "login",
+                "is_preview": True,
+                "created_at": "2026-08-17T01:00:00Z",
+            },
+            {
+                "username": "salifT",
+                "event_type": "analyze",
+                "is_preview": True,
+                "created_at": "2026-08-17T02:00:00Z",
+            },
+        ]
+    )
+    assert stats["salift"]["login_count"] == 1
+    assert stats["salift"]["analyze_count"] == 1
+    assert stats["salift"]["event_count"] == 2
+
+
 def test_removed_username_overrides_env(monkeypatch: pytest.MonkeyPatch) -> None:
     from api import preview_usernames
 

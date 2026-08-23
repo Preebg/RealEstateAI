@@ -19,6 +19,7 @@ export function LoginPage() {
   const [info, setInfo] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [accepted, setAccepted] = useState(false)
+  const [previewAccepted, setPreviewAccepted] = useState(false)
   const [previewUsername, setPreviewUsername] = useState('')
   const [showPreview, setShowPreview] = useState(false)
   const googleConfigured = Boolean(getGoogleClientId())
@@ -77,6 +78,9 @@ export function LoginPage() {
     setInfo(null)
     setBusy(true)
     try {
+      if (!previewAccepted) {
+        throw new Error('Accept the Terms and Privacy Policy to continue.')
+      }
       await signInWithPreviewUsername(previewUsername)
       navigate('/')
     } catch (err) {
@@ -131,9 +135,28 @@ export function LoginPage() {
                 className="mt-1 w-full rounded-lg border border-border px-3 py-2 outline-none focus:border-primary"
               />
             </label>
+            <label className="mb-3 flex items-start gap-2 text-sm text-muted">
+              <input
+                type="checkbox"
+                checked={previewAccepted}
+                onChange={(e) => setPreviewAccepted(e.target.checked)}
+                className="mt-1"
+              />
+              <span>
+                I agree to the{' '}
+                <Link className="text-primary underline" to="/legal/terms">
+                  Terms
+                </Link>{' '}
+                and{' '}
+                <Link className="text-primary underline" to="/legal/privacy">
+                  Privacy Policy
+                </Link>
+                .
+              </span>
+            </label>
             <button
               type="submit"
-              disabled={busy || previewUsername.trim().length < 2}
+              disabled={busy || !previewAccepted || previewUsername.trim().length < 2}
               className="w-full rounded-lg bg-primary py-2.5 text-sm font-semibold text-white hover:bg-primary-hover disabled:opacity-60"
             >
               {busy ? 'Please wait…' : 'Continue with username'}
