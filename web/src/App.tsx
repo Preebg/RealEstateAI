@@ -5,6 +5,7 @@ import { useAuthStore } from './lib/authStore'
 import { AppLayout } from './components/AppLayout'
 import { IdleSessionGuard } from './components/IdleSessionGuard'
 import { PreviewActivityTracker } from './components/PreviewActivityTracker'
+import { LandingPage } from './pages/LandingPage'
 import { LoginPage } from './pages/LoginPage'
 import { GoogleCallbackPage } from './pages/GoogleCallbackPage'
 import { SearchPage } from './pages/SearchPage'
@@ -28,28 +29,33 @@ function HomeFallback() {
   )
 }
 
-function RequireAuth() {
+function AuthLoading() {
+  return (
+    <div className="flex min-h-screen items-center justify-center text-muted">
+      Loading CapEigen…
+    </div>
+  )
+}
+
+/**
+ * Guests on `/` see the marketing landing.
+ * Other app routes require a session (redirect to login).
+ * Signed-in users continue into the app shell.
+ */
+function GuestOrApp() {
   const { session, loading } = useAuthStore()
-  if (loading) {
-    return (
-      <div className="flex min-h-screen items-center justify-center text-muted">
-        Loading CapEigen…
-      </div>
-    )
+  const location = useLocation()
+  if (loading) return <AuthLoading />
+  if (!session) {
+    if (location.pathname === '/') return <LandingPage />
+    return <Navigate to="/login" replace />
   }
-  if (!session) return <Navigate to="/login" replace />
   return <Outlet />
 }
 
 function RequireAdmin() {
   const { user, loading } = useAuthStore()
-  if (loading) {
-    return (
-      <div className="flex min-h-screen items-center justify-center text-muted">
-        Loading CapEigen…
-      </div>
-    )
-  }
+  if (loading) return <AuthLoading />
   if (!isAdminUser(user)) return <Navigate to="/" replace />
   return <Outlet />
 }
@@ -82,7 +88,7 @@ export default function App() {
         <Route path="/auth/google/callback" element={<GoogleCallbackPage />} />
         <Route path="/legal/:doc" element={<LegalPage />} />
         <Route path="/share/:token" element={<GuestSharePage />} />
-        <Route element={<RequireAuth />}>
+        <Route element={<GuestOrApp />}>
           <Route element={<AppLayout />}>
             <Route
               index

@@ -1,6 +1,6 @@
-import { useRef, useState } from 'react'
+import { useRef, useState, useEffect } from 'react'
 import type { FormEvent } from 'react'
-import { Link, Navigate, useNavigate } from 'react-router-dom'
+import { Link, Navigate, useNavigate, useSearchParams } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import { supabase } from '../lib/supabase'
 import { useAuthStore } from '../lib/authStore'
@@ -18,20 +18,32 @@ export function LoginPage() {
   const { session, loading } = useAuthStore()
   const navigate = useNavigate()
   const queryClient = useQueryClient()
+  const [searchParams] = useSearchParams()
   const homePrefetched = useRef(false)
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')
-  const [mode, setMode] = useState<'signin' | 'signup'>('signin')
+  const [mode, setMode] = useState<'signin' | 'signup'>(() =>
+    searchParams.get('mode') === 'signup' ? 'signup' : 'signin',
+  )
   const [error, setError] = useState<string | null>(null)
   const [info, setInfo] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [accepted, setAccepted] = useState(false)
   const [previewAccepted, setPreviewAccepted] = useState(false)
   const [previewUsername, setPreviewUsername] = useState('')
-  const [showPreview, setShowPreview] = useState(false)
+  const [showPreview, setShowPreview] = useState(
+    () => searchParams.get('preview') === '1' || searchParams.get('demo') === '1',
+  )
   const [idleNotice, setIdleNotice] = useState(() => consumeIdleLogoutNotice())
   const googleConfigured = Boolean(getGoogleClientId())
+
+  useEffect(() => {
+    if (searchParams.get('mode') === 'signup') setMode('signup')
+    if (searchParams.get('preview') === '1' || searchParams.get('demo') === '1') {
+      setShowPreview(true)
+    }
+  }, [searchParams])
 
   function warmHomeChunk(): void {
     if (homePrefetched.current) return
@@ -207,7 +219,9 @@ export function LoginPage() {
 
       <div className="mx-auto flex min-h-screen max-w-md flex-col justify-center px-4 py-12">
       <div className="mb-10 text-center">
-        <h1 className="font-display text-4xl font-semibold text-primary">CapEigen</h1>
+        <Link to="/" className="font-display text-4xl font-semibold text-primary hover:opacity-90">
+          CapEigen
+        </Link>
         <p className="mt-2 text-muted">AI rental underwriting with QAOA portfolio alignment.</p>
       </div>
 

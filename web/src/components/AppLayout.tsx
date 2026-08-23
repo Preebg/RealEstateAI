@@ -78,7 +78,7 @@ export function AppLayout() {
               onClick={async () => {
                 trackPreviewEvent('sign_out', { path: '/login', label: 'Signed out' })
                 await signOut()
-                navigate('/login')
+                navigate('/')
               }}
             >
               <LogOut size={16} />
