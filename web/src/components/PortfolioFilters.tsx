@@ -238,6 +238,61 @@ function PriceHistogram({
   )
 }
 
+/** Draft text while typing; round/clamp only on blur or Enter so large steps don't fight keystrokes. */
+function RangeNumberField({
+  value,
+  disabled,
+  ariaLabel,
+  onCommit,
+}: {
+  value: number
+  disabled?: boolean
+  ariaLabel: string
+  onCommit: (n: number) => void
+}) {
+  const [draft, setDraft] = useState<string | null>(null)
+  const display = draft ?? String(value)
+
+  function commit(raw: string) {
+    const trimmed = raw.trim()
+    if (trimmed === '' || trimmed === '-' || trimmed === '.' || trimmed === '-.') {
+      setDraft(null)
+      return
+    }
+    const n = Number(trimmed)
+    if (Number.isFinite(n)) onCommit(n)
+    setDraft(null)
+  }
+
+  return (
+    <input
+      type="text"
+      inputMode="decimal"
+      className="mt-1 w-full rounded-lg border border-border bg-white px-2 py-1.5 text-sm text-text outline-none focus:border-primary"
+      disabled={disabled}
+      value={display}
+      aria-label={ariaLabel}
+      onFocus={() => setDraft(String(value))}
+      onChange={(e) => {
+        const next = e.target.value
+        if (next === '' || /^-?\d*\.?\d*$/.test(next)) setDraft(next)
+      }}
+      onBlur={() => {
+        if (draft != null) commit(draft)
+      }}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault()
+          ;(e.target as HTMLInputElement).blur()
+        } else if (e.key === 'Escape') {
+          setDraft(null)
+          ;(e.target as HTMLInputElement).blur()
+        }
+      }}
+    />
+  )
+}
+
 function RangeFilter({
   label,
   bounds,
@@ -339,28 +394,20 @@ function RangeFilter({
       <div className="grid grid-cols-2 gap-2">
         <label className="block text-xs text-muted">
           Min
-          <input
-            type="number"
-            className="mt-1 w-full rounded-lg border border-border bg-white px-2 py-1.5 text-sm text-text outline-none focus:border-primary"
-            min={bounds.min}
-            max={value.max}
-            step={step}
-            disabled={disabled}
+          <RangeNumberField
             value={value.min}
-            onChange={(e) => setMin(Number(e.target.value))}
+            disabled={disabled}
+            ariaLabel={`${label} minimum value`}
+            onCommit={setMin}
           />
         </label>
         <label className="block text-xs text-muted">
           Max
-          <input
-            type="number"
-            className="mt-1 w-full rounded-lg border border-border bg-white px-2 py-1.5 text-sm text-text outline-none focus:border-primary"
-            min={value.min}
-            max={bounds.max}
-            step={step}
-            disabled={disabled}
+          <RangeNumberField
             value={value.max}
-            onChange={(e) => setMax(Number(e.target.value))}
+            disabled={disabled}
+            ariaLabel={`${label} maximum value`}
+            onCommit={setMax}
           />
         </label>
       </div>

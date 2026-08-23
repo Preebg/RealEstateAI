@@ -68,6 +68,95 @@ const SORT_OPTIONS = [
 
 type SortId = (typeof SORT_OPTIONS)[number]['id']
 
+const HOME_VIEW_STORAGE_PREFIX = 'capeigen.homeView.'
+
+type HomeViewPersisted = {
+  filters: Filters
+  sortBy: SortId
+}
+
+function homeViewStorageKey(userId: string): string {
+  return `${HOME_VIEW_STORAGE_PREFIX}${userId}`
+}
+
+function isRangeBounds(v: unknown): v is { min: number; max: number } {
+  if (v == null || typeof v !== 'object') return false
+  const r = v as { min?: unknown; max?: unknown }
+  return typeof r.min === 'number' && Number.isFinite(r.min) && typeof r.max === 'number' && Number.isFinite(r.max)
+}
+
+function isFiltersShape(v: unknown): v is Filters {
+  if (v == null || typeof v !== 'object') return false
+  const f = v as Filters
+  return (
+    Array.isArray(f.states) &&
+    Array.isArray(f.cities) &&
+    f.states.every((s) => typeof s === 'string') &&
+    f.cities.every((c) => typeof c === 'string') &&
+    isRangeBounds(f.price) &&
+    isRangeBounds(f.yearBuilt) &&
+    isRangeBounds(f.rentalYield) &&
+    isRangeBounds(f.cashFlow) &&
+    isRangeBounds(f.cashOnCash) &&
+    isRangeBounds(f.locationScore)
+  )
+}
+
+function isSortId(v: unknown): v is SortId {
+  return typeof v === 'string' && SORT_OPTIONS.some((o) => o.id === v)
+}
+
+function clampRange(
+  selected: { min: number; max: number },
+  bounds: { min: number; max: number },
+): { min: number; max: number } {
+  let min = Math.min(Math.max(selected.min, bounds.min), bounds.max)
+  let max = Math.min(Math.max(selected.max, bounds.min), bounds.max)
+  if (min > max) {
+    min = bounds.min
+    max = bounds.max
+  }
+  return { min, max }
+}
+
+function sanitizeFilters(raw: Filters, bounds: FilterBounds): Filters {
+  return {
+    states: raw.states,
+    cities: raw.cities,
+    price: clampRange(raw.price, bounds.price),
+    yearBuilt: clampRange(raw.yearBuilt, bounds.yearBuilt),
+    rentalYield: clampRange(raw.rentalYield, bounds.rentalYield),
+    cashFlow: clampRange(raw.cashFlow, bounds.cashFlow),
+    cashOnCash: clampRange(raw.cashOnCash, bounds.cashOnCash),
+    locationScore: clampRange(raw.locationScore, bounds.locationScore),
+  }
+}
+
+function loadHomeView(userId: string | undefined): HomeViewPersisted | null {
+  if (!userId || typeof window === 'undefined') return null
+  try {
+    const raw = window.localStorage.getItem(homeViewStorageKey(userId))
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as { filters?: unknown; sortBy?: unknown }
+    if (!isFiltersShape(parsed.filters)) return null
+    return {
+      filters: parsed.filters,
+      sortBy: isSortId(parsed.sortBy) ? parsed.sortBy : 'added_desc',
+    }
+  } catch {
+    return null
+  }
+}
+
+function saveHomeView(userId: string | undefined, state: HomeViewPersisted): void {
+  if (!userId || typeof window === 'undefined') return
+  try {
+    window.localStorage.setItem(homeViewStorageKey(userId), JSON.stringify(state))
+  } catch {
+    // Quota / private mode — ignore
+  }
+}
+
 function compareNullable(
   a: number | undefined,
   b: number | undefined,
@@ -250,13 +339,32 @@ export function HomePage() {
     }
   }, [properties])
 
-  const [filters, setFilters] = useState<Filters | null>(null)
-  const [sortBy, setSortBy] = useState<SortId>('added_desc')
+  const [filters, setFilters] = useState<Filters | null>(() => null)
+  const [sortBy, setSortBy] = useState<SortId>(() => loadHomeView(user?.id)?.sortBy ?? 'added_desc')
+  const userId = user?.id
+  const [viewUserId, setViewUserId] = useState<string | undefined>(userId)
+
+  // Keep home view scoped to the signed-in user (React “adjust state when prop changes”).
+  if (userId !== viewUserId) {
+    setViewUserId(userId)
+    setFilters(null)
+    setSortBy(loadHomeView(userId)?.sortBy ?? 'added_desc')
+  }
 
   useEffect(() => {
     if (filters != null || properties.length === 0) return
-    setFilters(defaultFilters(filterBounds))
-  }, [filterBounds, filters, properties.length])
+    const saved = loadHomeView(userId)
+    if (saved) {
+      setFilters(sanitizeFilters(saved.filters, filterBounds))
+    } else {
+      setFilters(defaultFilters(filterBounds))
+    }
+  }, [filterBounds, filters, properties.length, userId])
+
+  useEffect(() => {
+    if (filters == null || !userId) return
+    saveHomeView(userId, { filters, sortBy })
+  }, [filters, sortBy, userId])
 
   const activeFilters = filters ?? defaultFilters(filterBounds)
 
