@@ -1,12 +1,12 @@
 import { Navigate, Outlet, Route, Routes, useLocation, useSearchParams } from 'react-router-dom'
-import { useEffect } from 'react'
+import { lazy, Suspense, useEffect } from 'react'
 import { isAdminUser } from './lib/admin'
 import { useAuthStore } from './lib/authStore'
 import { AppLayout } from './components/AppLayout'
+import { IdleSessionGuard } from './components/IdleSessionGuard'
 import { PreviewActivityTracker } from './components/PreviewActivityTracker'
 import { LoginPage } from './pages/LoginPage'
 import { GoogleCallbackPage } from './pages/GoogleCallbackPage'
-import { HomePage } from './pages/HomePage'
 import { SearchPage } from './pages/SearchPage'
 import { ComparePage } from './pages/ComparePage'
 import { ValidationPage } from './pages/ValidationPage'
@@ -15,6 +15,18 @@ import { GuestSharePage } from './pages/GuestSharePage'
 import { ActivityPage } from './pages/ActivityPage'
 import { UsagePage } from './pages/UsagePage'
 import { LegalAdminPage } from './pages/LegalAdminPage'
+
+const HomePage = lazy(() =>
+  import('./pages/HomePage').then((m) => ({ default: m.HomePage })),
+)
+
+function HomeFallback() {
+  return (
+    <div className="flex min-h-[40vh] items-center justify-center text-muted">
+      Loading portfolio…
+    </div>
+  )
+}
 
 function RequireAuth() {
   const { session, loading } = useAuthStore()
@@ -64,6 +76,7 @@ export default function App() {
     <>
       <ShareQueryRedirect />
       <PreviewActivityTracker />
+      <IdleSessionGuard />
       <Routes>
         <Route path="/login" element={<LoginPage />} />
         <Route path="/auth/google/callback" element={<GoogleCallbackPage />} />
@@ -71,7 +84,14 @@ export default function App() {
         <Route path="/share/:token" element={<GuestSharePage />} />
         <Route element={<RequireAuth />}>
           <Route element={<AppLayout />}>
-            <Route index element={<HomePage />} />
+            <Route
+              index
+              element={
+                <Suspense fallback={<HomeFallback />}>
+                  <HomePage />
+                </Suspense>
+              }
+            />
             <Route path="search" element={<SearchPage />} />
             <Route path="compare" element={<ComparePage />} />
             <Route element={<RequireAdmin />}>

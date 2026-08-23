@@ -1,15 +1,19 @@
 import { useEffect, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
+import { useQueryClient } from '@tanstack/react-query'
 import { supabase } from '../lib/supabase'
 import { exchangeGoogleAuthCode, readGoogleOAuthCallback } from '../lib/googleOAuth'
 import { trackPreviewEvent } from '../lib/previewActivity'
+import { prefetchHome, prefetchHomeChunk } from '../lib/prefetchHome'
 
 export function GoogleCallbackPage() {
   const navigate = useNavigate()
+  const queryClient = useQueryClient()
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
+    prefetchHomeChunk()
 
     async function finish() {
       try {
@@ -23,7 +27,10 @@ export function GoogleCallbackPage() {
         if (err) throw err
         trackPreviewEvent('login', { path: '/login', label: 'Google sign-in' })
         window.history.replaceState(null, '', '/auth/google/callback')
-        if (!cancelled) navigate('/', { replace: true })
+        if (!cancelled) {
+          prefetchHome(queryClient)
+          navigate('/', { replace: true })
+        }
       } catch (err) {
         if (!cancelled) {
           setError(err instanceof Error ? err.message : 'Google sign-in failed')
@@ -35,7 +42,7 @@ export function GoogleCallbackPage() {
     return () => {
       cancelled = true
     }
-  }, [navigate])
+  }, [navigate, queryClient])
 
   if (error) {
     return (

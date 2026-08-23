@@ -1,16 +1,24 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import { Link, Navigate, useNavigate } from 'react-router-dom'
+import { useQueryClient } from '@tanstack/react-query'
 import { supabase } from '../lib/supabase'
 import { useAuthStore } from '../lib/authStore'
 import { signInWithPreviewUsername } from '../lib/demoLogin'
 import { getGoogleClientId } from '../lib/googleGis'
 import { startGoogleOAuthRedirect } from '../lib/googleOAuth'
 import { trackPreviewEvent } from '../lib/previewActivity'
+import { prefetchHome, prefetchHomeChunk } from '../lib/prefetchHome'
+import {
+  consumeIdleLogoutNotice,
+  IDLE_LOGOUT_MESSAGE,
+} from '../lib/idleSession'
 
 export function LoginPage() {
   const { session, loading } = useAuthStore()
   const navigate = useNavigate()
+  const queryClient = useQueryClient()
+  const homePrefetched = useRef(false)
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')
@@ -22,7 +30,19 @@ export function LoginPage() {
   const [previewAccepted, setPreviewAccepted] = useState(false)
   const [previewUsername, setPreviewUsername] = useState('')
   const [showPreview, setShowPreview] = useState(false)
+  const [idleNotice, setIdleNotice] = useState(() => consumeIdleLogoutNotice())
   const googleConfigured = Boolean(getGoogleClientId())
+
+  function warmHomeChunk(): void {
+    if (homePrefetched.current) return
+    homePrefetched.current = true
+    prefetchHomeChunk()
+  }
+
+  function goHomeAfterAuth(): void {
+    prefetchHome(queryClient)
+    navigate('/')
+  }
 
   if (!loading && session) return <Navigate to="/" replace />
 
@@ -36,7 +56,7 @@ export function LoginPage() {
         const { error: err } = await supabase.auth.signInWithPassword({ email, password })
         if (err) throw err
         trackPreviewEvent('login', { path: '/login', label: 'Email sign-in' })
-        navigate('/')
+        goHomeAfterAuth()
         return
       }
 
@@ -52,7 +72,7 @@ export function LoginPage() {
 
       if (data.session) {
         trackPreviewEvent('login', { path: '/login', label: 'Email sign-up' })
-        navigate('/')
+        goHomeAfterAuth()
         return
       }
 
@@ -64,7 +84,7 @@ export function LoginPage() {
         return
       }
       trackPreviewEvent('login', { path: '/login', label: 'Email sign-up' })
-      navigate('/')
+      goHomeAfterAuth()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Authentication failed')
     } finally {
@@ -82,7 +102,7 @@ export function LoginPage() {
         throw new Error('Accept the Terms and Privacy Policy to continue.')
       }
       await signInWithPreviewUsername(previewUsername)
-      navigate('/')
+      goHomeAfterAuth()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Preview login failed')
     } finally {
@@ -94,6 +114,7 @@ export function LoginPage() {
     setError(null)
     setInfo(null)
     setBusy(true)
+    warmHomeChunk()
     try {
       await startGoogleOAuthRedirect()
     } catch (err) {
@@ -104,6 +125,24 @@ export function LoginPage() {
 
   return (
     <div className="relative min-h-screen">
+      {idleNotice && (
+        <div
+          className="fixed inset-x-0 top-0 z-20 border-b border-amber-200 bg-amber-50 px-4 py-3 text-center text-sm text-amber-950 shadow-sm"
+          role="status"
+        >
+          <div className="mx-auto flex max-w-2xl items-start justify-center gap-3">
+            <p className="flex-1 pt-0.5">{IDLE_LOGOUT_MESSAGE}</p>
+            <button
+              type="button"
+              aria-label="Dismiss"
+              className="shrink-0 rounded px-2 py-0.5 text-amber-800/70 hover:bg-amber-100 hover:text-amber-950"
+              onClick={() => setIdleNotice(false)}
+            >
+              ×
+            </button>
+          </div>
+        </div>
+      )}
       <div className="absolute right-4 top-4 z-10">
         <button
           type="button"
@@ -215,7 +254,11 @@ export function LoginPage() {
             minLength={6}
             autoComplete={mode === 'signup' ? 'new-password' : 'current-password'}
             value={password}
-            onChange={(e) => setPassword(e.target.value)}
+            onFocus={warmHomeChunk}
+            onChange={(e) => {
+              warmHomeChunk()
+              setPassword(e.target.value)
+            }}
             className="mt-1 w-full rounded-lg border border-border px-3 py-2 outline-none focus:border-primary"
           />
         </label>
