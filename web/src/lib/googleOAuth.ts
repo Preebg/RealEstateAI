@@ -3,9 +3,27 @@ import { getGoogleClientId, generateGoogleNonce } from './googleGis'
 const NONCE_KEY = 'capeigen_google_oauth_nonce'
 const STATE_KEY = 'capeigen_google_oauth_state'
 const VERIFIER_KEY = 'capeigen_google_oauth_verifier'
+const LINK_MODE_KEY = 'capeigen_google_oauth_link'
+const OPEN_SETTINGS_KEY = 'capeigen_open_account_settings'
 
 export function googleOAuthRedirectUri(): string {
   return `${window.location.origin}/auth/google/callback`
+}
+
+export function markOpenAccountSettings(): void {
+  sessionStorage.setItem(OPEN_SETTINGS_KEY, '1')
+}
+
+export function consumeOpenAccountSettings(): boolean {
+  const open = sessionStorage.getItem(OPEN_SETTINGS_KEY) === '1'
+  sessionStorage.removeItem(OPEN_SETTINGS_KEY)
+  return open
+}
+
+export function consumeGoogleOAuthLinkMode(): boolean {
+  const linking = sessionStorage.getItem(LINK_MODE_KEY) === '1'
+  sessionStorage.removeItem(LINK_MODE_KEY)
+  return linking
 }
 
 function base64UrlEncode(buffer: ArrayBuffer): string {
@@ -27,7 +45,7 @@ async function generateCodeChallenge(verifier: string): Promise<string> {
 }
 
 /** Start Google OAuth on CapEigen (authorization code + PKCE). No Supabase redirect URI. */
-export async function startGoogleOAuthRedirect(): Promise<void> {
+export async function startGoogleOAuthRedirect(options?: { link?: boolean }): Promise<void> {
   const clientId = getGoogleClientId()
   if (!clientId) {
     throw new Error('Set VITE_GOOGLE_CLIENT_ID to your Google Web client ID.')
@@ -43,6 +61,11 @@ export async function startGoogleOAuthRedirect(): Promise<void> {
   sessionStorage.setItem(NONCE_KEY, nonce)
   sessionStorage.setItem(STATE_KEY, state)
   sessionStorage.setItem(VERIFIER_KEY, verifier)
+  if (options?.link) {
+    sessionStorage.setItem(LINK_MODE_KEY, '1')
+  } else {
+    sessionStorage.removeItem(LINK_MODE_KEY)
+  }
 
   const params = new URLSearchParams({
     client_id: clientId,

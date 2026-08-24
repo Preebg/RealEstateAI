@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from api.deps import data_client_for_request, user_from_token
 from api.routes import (
+    account,
     analysis,
     auth_demo,
     auth_google,
@@ -92,6 +93,7 @@ async def bind_supabase_jwt(request: Request, call_next):  # type: ignore[no-unt
 
 
 app.include_router(health.router)
+app.include_router(account.router)
 app.include_router(auth_demo.router)
 app.include_router(auth_google.router)
 app.include_router(preview_activity.router)

@@ -1,10 +1,12 @@
+import { useEffect, useRef, useState } from 'react'
 import { NavLink, Outlet, useNavigate } from 'react-router-dom'
 import { Map, Search, GitCompare, FlaskConical, Users, BarChart3, ScrollText, LogOut, Menu, X } from 'lucide-react'
-import { useState } from 'react'
 import { useAuthStore } from '../lib/authStore'
 import { isAdminUser } from '../lib/admin'
 import { trackPreviewEvent } from '../lib/previewActivity'
+import { consumeOpenAccountSettings } from '../lib/googleOAuth'
 import { PropertyOfTheDayModal } from './PropertyOfTheDayModal'
+import { AccountSettingsModal } from './AccountSettingsModal'
 import { ThemeToggle } from './ThemeToggle'
 import { clsx } from 'clsx'
 
@@ -30,8 +32,40 @@ export function AppLayout() {
   const { user, signOut } = useAuthStore()
   const navigate = useNavigate()
   const [open, setOpen] = useState(false)
+  const [accountMenuOpen, setAccountMenuOpen] = useState(false)
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const accountMenuRef = useRef<HTMLDivElement>(null)
   const isAdmin = isAdminUser(user)
   const navItems = isAdmin ? [...nav, ...adminNav] : nav
+  const displayName =
+    (typeof user?.app_metadata?.username === 'string' && user.app_metadata.username) ||
+    (typeof user?.user_metadata?.username === 'string' && user.user_metadata.username) ||
+    user?.email ||
+    'Account'
+
+  useEffect(() => {
+    if (consumeOpenAccountSettings()) {
+      setSettingsOpen(true)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!accountMenuOpen) return
+    function onPointerDown(event: MouseEvent) {
+      if (!accountMenuRef.current?.contains(event.target as Node)) {
+        setAccountMenuOpen(false)
+      }
+    }
+    function onKey(event: KeyboardEvent) {
+      if (event.key === 'Escape') setAccountMenuOpen(false)
+    }
+    document.addEventListener('mousedown', onPointerDown)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onPointerDown)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [accountMenuOpen])
 
   return (
     <div className="min-h-screen lg:grid lg:grid-cols-[260px_1fr]">
@@ -68,11 +102,35 @@ export function AppLayout() {
             ))}
           </nav>
           <div className="mt-6 border-t border-border pt-4">
-            <p className="truncate text-xs text-muted">
-              {(typeof user?.app_metadata?.username === 'string' && user.app_metadata.username) ||
-                (typeof user?.user_metadata?.username === 'string' && user.user_metadata.username) ||
-                user?.email}
-            </p>
+            <div className="relative" ref={accountMenuRef}>
+              <button
+                type="button"
+                className="w-full truncate rounded-lg px-2 py-1.5 text-left text-xs text-muted hover:bg-surface hover:text-text"
+                aria-haspopup="menu"
+                aria-expanded={accountMenuOpen}
+                onClick={() => setAccountMenuOpen((v) => !v)}
+              >
+                {displayName}
+              </button>
+              {accountMenuOpen && (
+                <div
+                  role="menu"
+                  className="absolute bottom-full left-0 z-30 mb-2 w-full min-w-[12rem] rounded-xl border border-border bg-card p-1.5 shadow-lg"
+                >
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="w-full rounded-lg px-3 py-2 text-left text-sm font-medium text-text hover:bg-surface"
+                    onClick={() => {
+                      setAccountMenuOpen(false)
+                      setSettingsOpen(true)
+                    }}
+                  >
+                    Account settings
+                  </button>
+                </div>
+              )}
+            </div>
             <div className="mt-3 flex items-center gap-2">
               <ThemeToggle />
               <button
@@ -137,6 +195,7 @@ export function AppLayout() {
           <Outlet />
         </main>
         <PropertyOfTheDayModal />
+        <AccountSettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
       </div>
     </div>
   )
