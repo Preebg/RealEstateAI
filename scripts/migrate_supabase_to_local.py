@@ -51,6 +51,9 @@ from services.supabase_local_migration import (  # noqa: E402
 
 GUEST_SQL = ROOT / "docker" / "postgres" / "init" / "04_guest_share_functions.sql"
 PREVIEW_USERNAMES_SQL = ROOT / "docker" / "postgres" / "init" / "05_preview_usernames.sql"
+USAGE_AND_LEGAL_SQL = ROOT / "docker" / "postgres" / "init" / "06_usage_and_legal.sql"
+PROPERTY_VIEWS_SQL = ROOT / "docker" / "postgres" / "init" / "07_property_views.sql"
+LEGAL_ACCEPTANCES_SQL = ROOT / "docker" / "postgres" / "init" / "08_legal_acceptances.sql"
 
 
 def _env(name: str) -> str | None:
@@ -157,6 +160,9 @@ def apply_sql_file(path: Path, label: str) -> None:
 def apply_guest_functions() -> None:
     apply_sql_file(GUEST_SQL, "guest share SQL functions")
     apply_sql_file(PREVIEW_USERNAMES_SQL, "preview usernames table")
+    apply_sql_file(USAGE_AND_LEGAL_SQL, "usage events + legal documents")
+    apply_sql_file(PROPERTY_VIEWS_SQL, "property viewership tables")
+    apply_sql_file(LEGAL_ACCEPTANCES_SQL, "legal acceptances table")
 
 
 def build_plans(source: Client, dest: Client) -> tuple[list[CopyPlan], set[str]]:

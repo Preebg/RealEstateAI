@@ -196,5 +196,21 @@ def save_legal_acceptance(user_id: str) -> dict[str, Any]:
         )
     except APIError as exc:
         report_error(log, "legal_acceptance_save_failed", exc, user_id=uid)
+        detail = str(getattr(exc, "message", None) or exc)
+        lower = detail.lower()
+        if (
+            "legal_acceptances" in lower
+            or "pgrst205" in lower
+            or "schema cache" in lower
+            or "does not exist" in lower
+        ):
+            raise RuntimeError(
+                "Legal acceptance storage is not set up on this database. "
+                "Apply docker/postgres/init/08_legal_acceptances.sql to local Postgres "
+                "(existing volumes do not re-run init), then reload PostgREST."
+            ) from exc
+        raise RuntimeError("Could not save legal acceptance.") from exc
+    except Exception as exc:  # noqa: BLE001
+        report_error(log, "legal_acceptance_save_failed", exc, user_id=uid)
         raise RuntimeError("Could not save legal acceptance.") from exc
     return get_legal_acceptance_status(uid)

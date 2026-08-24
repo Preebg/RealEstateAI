@@ -69,10 +69,12 @@ Expect ~905 properties and ~3760 comparables from hosted, plus your local harves
 
 Guest share SQL functions are applied from `docker/postgres/init/04_guest_share_functions.sql` during the migrate (existing volumes do not re-run init). Demo-account usernames use `docker/postgres/init/05_preview_usernames.sql` the same way.
 
-Schema lives in `docker/postgres/init/` and runs **only on first volume create**. To apply `05_preview_usernames.sql` on an existing volume without a full migrate:
+Schema lives in `docker/postgres/init/` and runs **only on first volume create**. To apply newer init scripts on an existing volume without a full migrate:
 
 ```powershell
 Get-Content -Raw .\docker\postgres\init\05_preview_usernames.sql | docker compose exec -T postgres psql -U capeigen -d capeigen -v ON_ERROR_STOP=1
+Get-Content -Raw .\docker\postgres\init\08_legal_acceptances.sql | docker compose exec -T postgres psql -U capeigen -d capeigen -v ON_ERROR_STOP=1
+docker compose restart postgrest
 ```
 
 To reset:
