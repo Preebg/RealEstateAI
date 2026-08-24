@@ -1,14 +1,42 @@
 @import "tailwindcss";
 @import "leaflet/dist/leaflet.css";
 
+/* Semantic tokens — overridden on html.dark for theme switching. */
+:root {
+  --ce-primary: #4f46e5;
+  --ce-primary-hover: #4338ca;
+  --ce-text: #1a1a2e;
+  --ce-muted: rgba(26, 26, 46, 0.62);
+  --ce-border: #e0e4ef;
+  --ce-surface: #f0f2f8;
+  --ce-bg: #fafbfe;
+  --ce-card: #ffffff;
+  --ce-glow-a: rgba(79, 70, 229, 0.08);
+  --ce-glow-b: rgba(67, 56, 202, 0.06);
+}
+
+html.dark {
+  --ce-primary: #818cf8;
+  --ce-primary-hover: #a5b4fc;
+  --ce-text: #e8eaf4;
+  --ce-muted: rgba(232, 234, 244, 0.58);
+  --ce-border: #2a2f42;
+  --ce-surface: #161a28;
+  --ce-bg: #0c0e16;
+  --ce-card: #12151f;
+  --ce-glow-a: rgba(129, 140, 248, 0.12);
+  --ce-glow-b: rgba(99, 102, 241, 0.08);
+}
+
 @theme {
-  --color-primary: #4f46e5;
-  --color-primary-hover: #4338ca;
-  --color-text: #1a1a2e;
-  --color-muted: rgba(26, 26, 46, 0.62);
-  --color-border: #e0e4ef;
-  --color-surface: #f0f2f8;
-  --color-bg: #fafbfe;
+  --color-primary: var(--ce-primary);
+  --color-primary-hover: var(--ce-primary-hover);
+  --color-text: var(--ce-text);
+  --color-muted: var(--ce-muted);
+  --color-border: var(--ce-border);
+  --color-surface: var(--ce-surface);
+  --color-bg: var(--ce-bg);
+  --color-card: var(--ce-card);
   --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
   --font-display: "Space Grotesk", "Inter", ui-sans-serif, sans-serif;
 }
@@ -29,9 +57,16 @@
     font-family: var(--font-sans);
     color: var(--color-text);
     background:
-      radial-gradient(ellipse 80% 50% at 10% -10%, rgba(79, 70, 229, 0.08), transparent),
-      radial-gradient(ellipse 60% 40% at 100% 0%, rgba(67, 56, 202, 0.06), transparent),
+      radial-gradient(ellipse 80% 50% at 10% -10%, var(--ce-glow-a), transparent),
+      radial-gradient(ellipse 60% 40% at 100% 0%, var(--ce-glow-b), transparent),
       var(--color-bg);
+  }
+
+  input:not([type='checkbox']):not([type='radio']):not([type='range']),
+  textarea,
+  select {
+    background-color: var(--color-card);
+    color: var(--color-text);
   }
 
   h1,
@@ -66,7 +101,7 @@
     margin-top: 0;
     border-radius: 9999px;
     background: var(--color-primary);
-    border: 2px solid #fff;
+    border: 2px solid var(--color-card);
     box-shadow: 0 1px 2px rgb(0 0 0 / 0.25);
     cursor: pointer;
   }
@@ -81,7 +116,7 @@
     pointer-events: auto;
     width: 1rem;
     height: 1rem;
-    border: 2px solid #fff;
+    border: 2px solid var(--color-card);
     border-radius: 9999px;
     background: var(--color-primary);
     box-shadow: 0 1px 2px rgb(0 0 0 / 0.25);

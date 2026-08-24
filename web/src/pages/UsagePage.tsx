@@ -205,7 +205,7 @@ export function UsagePage() {
               setAudience(next)
               void load(days, next)
             }}
-            className="rounded-lg border border-border bg-white px-3 py-1.5 text-sm"
+            className="rounded-lg border border-border bg-card px-3 py-1.5 text-sm"
           >
             <option value="all">All accounts</option>
             <option value="registered">Registered only</option>
@@ -218,7 +218,7 @@ export function UsagePage() {
               setDays(next)
               void load(next, audience)
             }}
-            className="rounded-lg border border-border bg-white px-3 py-1.5 text-sm"
+            className="rounded-lg border border-border bg-card px-3 py-1.5 text-sm"
           >
             <option value={7}>Last 7 days</option>
             <option value={30}>Last 30 days</option>
@@ -258,7 +258,7 @@ export function UsagePage() {
             ['Share links', totals.shares],
             ['Saved properties', totals.bookmarks],
           ].map(([label, value]) => (
-            <div key={String(label)} className="rounded-2xl border border-border bg-white p-4 shadow-sm">
+            <div key={String(label)} className="rounded-2xl border border-border bg-card p-4 shadow-sm">
               <p className="text-xs uppercase tracking-wide text-muted">{label}</p>
               <p className="mt-1 font-display text-2xl font-semibold">{value}</p>
             </div>
@@ -267,7 +267,7 @@ export function UsagePage() {
       )}
 
       <div className="grid gap-6 lg:grid-cols-2">
-        <section className="rounded-2xl border border-border bg-white p-4 shadow-sm">
+        <section className="rounded-2xl border border-border bg-card p-4 shadow-sm">
           <h2 className="font-display text-xl font-semibold">Most used actions</h2>
           <div className="mt-3 space-y-3">
             {(summary?.actions || []).map((item) => (
@@ -287,7 +287,7 @@ export function UsagePage() {
           </div>
         </section>
 
-        <section className="rounded-2xl border border-border bg-white p-4 shadow-sm">
+        <section className="rounded-2xl border border-border bg-card p-4 shadow-sm">
           <h2 className="font-display text-xl font-semibold">Most opened pages</h2>
           <div className="mt-3 space-y-3">
             {(summary?.pages || []).map((item) => (
@@ -309,7 +309,7 @@ export function UsagePage() {
 
       <section className="space-y-3">
         <h2 className="font-display text-xl font-semibold">People</h2>
-        <div className="overflow-x-auto rounded-xl border border-border bg-white">
+        <div className="overflow-x-auto rounded-xl border border-border bg-card">
           <table className="min-w-full text-left text-sm">
             <thead className="bg-surface text-muted">
               <tr>
@@ -352,7 +352,7 @@ export function UsagePage() {
 
       <section className="space-y-3">
         <h2 className="font-display text-xl font-semibold">Recent activity</h2>
-        <div className="overflow-x-auto rounded-xl border border-border bg-white">
+        <div className="overflow-x-auto rounded-xl border border-border bg-card">
           <table className="min-w-full text-left text-sm">
             <thead className="bg-surface text-muted">
               <tr>

@@ -160,7 +160,7 @@ export function ComparePage() {
         </p>
       </header>
 
-      <div className="rounded-2xl border border-border bg-white p-4 shadow-sm">
+      <div className="rounded-2xl border border-border bg-card p-4 shadow-sm">
         <input
           value={query}
           onChange={(e) => setQuery(e.target.value)}
@@ -247,7 +247,7 @@ export function ComparePage() {
       </div>
 
       {metrics.length > 0 && (
-        <div className="overflow-x-auto rounded-2xl border border-border bg-white shadow-sm">
+        <div className="overflow-x-auto rounded-2xl border border-border bg-card shadow-sm">
           <table className="min-w-full text-left text-sm">
             <thead className="bg-surface text-muted">
               <tr>

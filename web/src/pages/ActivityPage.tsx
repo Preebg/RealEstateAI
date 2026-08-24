@@ -224,7 +224,7 @@ export function ActivityPage() {
 
       <form
         onSubmit={(e) => void onAdd(e)}
-        className="flex flex-wrap items-end gap-3 rounded-2xl border border-border bg-white p-4 shadow-sm"
+        className="flex flex-wrap items-end gap-3 rounded-2xl border border-border bg-card p-4 shadow-sm"
       >
         <label className="min-w-[16rem] flex-1 text-sm">
           <span className="mb-1 block font-medium">Add preview username</span>
@@ -255,7 +255,7 @@ export function ActivityPage() {
       {busy && <p className="text-muted">Loading demo dashboard…</p>}
 
       {!busy && (
-        <div className="overflow-x-auto rounded-xl border border-border bg-white">
+        <div className="overflow-x-auto rounded-xl border border-border bg-card">
           <table className="min-w-full text-left text-sm">
             <thead className="bg-surface text-muted">
               <tr>
@@ -335,7 +335,7 @@ export function ActivityPage() {
                                   onChange={(e) => setDeleteConfirm(e.target.value)}
                                   placeholder={account.username}
                                   autoComplete="off"
-                                  className="mt-1 w-full rounded-md border border-red-200 bg-white px-2 py-1 text-sm text-text"
+                                  className="mt-1 w-full rounded-md border border-red-200 bg-card px-2 py-1 text-sm text-text"
                                 />
                               </label>
                               {deleteConfirm.trim().toLowerCase() ===
@@ -374,7 +374,7 @@ export function ActivityPage() {
         <h2 className="font-display text-xl font-semibold">
           {filterUser ? `Activity · ${filterUser}` : 'Recent activity'}
         </h2>
-        <div className="overflow-x-auto rounded-xl border border-border bg-white">
+        <div className="overflow-x-auto rounded-xl border border-border bg-card">
           <table className="min-w-full text-left text-sm">
             <thead className="bg-surface text-muted">
               <tr>

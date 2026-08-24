@@ -19,10 +19,12 @@ import {
   X,
   LineChart,
   Building2,
+  Search,
 } from 'lucide-react'
 import { clsx } from 'clsx'
 import { signInWithPreviewUsername } from '../lib/demoLogin'
 import { prefetchHome, prefetchHomeChunk } from '../lib/prefetchHome'
+import { ThemeToggle } from '../components/ThemeToggle'
 
 const WHY = [
   {
@@ -111,67 +113,148 @@ function SectionReveal({
   )
 }
 
+const MOCK_PROPERTIES = [
+  {
+    address: '214 Oak Ridge Dr, Austin, TX',
+    price: '$425,000',
+    rent: '$2,450',
+    yield: '5.8%',
+    cashFlow: '+$312',
+    coc: '7.2%',
+  },
+  {
+    address: '88 Maple Ave, Columbus, OH',
+    price: '$198,500',
+    rent: '$1,375',
+    yield: '6.9%',
+    cashFlow: '+$241',
+    coc: '9.1%',
+  },
+  {
+    address: '1201 Pine St, Raleigh, NC',
+    price: '$356,000',
+    rent: '$2,100',
+    yield: '5.4%',
+    cashFlow: '+$188',
+    coc: '6.4%',
+  },
+] as const
+
 function DashboardMockup() {
   return (
     <div
-      className="relative w-full overflow-hidden rounded-t-2xl border border-white/10 bg-[#0c1020] shadow-[0_-20px_80px_rgba(15,23,42,0.35)]"
+      className="relative w-full overflow-hidden rounded-t-2xl border border-border bg-bg shadow-[0_-16px_60px_rgba(26,26,46,0.1)]"
       aria-hidden
     >
-      <div className="flex items-center gap-2 border-b border-white/8 px-4 py-3">
-        <span className="size-2.5 rounded-full bg-rose-400/80" />
-        <span className="size-2.5 rounded-full bg-amber-400/80" />
-        <span className="size-2.5 rounded-full bg-emerald-400/80" />
-        <span className="ml-3 font-display text-xs tracking-wide text-white/45">
-          CapEigen · Portfolio
-        </span>
-      </div>
-      <div className="grid gap-4 p-4 sm:grid-cols-[1fr_1.15fr] sm:p-5">
-        <div className="space-y-3">
-          <div className="rounded-xl border border-white/8 bg-white/[0.04] p-4">
-            <p className="text-[11px] uppercase tracking-[0.14em] text-white/40">Cash flow</p>
-            <p className="mt-1 font-display text-2xl font-semibold text-white">+$1,842</p>
-            <p className="mt-1 text-xs text-emerald-400/90">+6.2% vs last month</p>
-            <div className="mt-4 flex h-16 items-end gap-1.5">
-              {[40, 55, 48, 62, 58, 72, 68, 80, 76, 88, 84, 95].map((h, i) => (
-                <div
-                  key={i}
-                  className="flex-1 rounded-sm bg-gradient-to-t from-indigo-500/30 to-indigo-400/80"
-                  style={{ height: `${h}%` }}
-                />
-              ))}
-            </div>
-          </div>
-          <div className="grid grid-cols-2 gap-3">
+      <div className="flex min-h-[320px] sm:min-h-[380px]">
+        {/* Sidebar — mirrors AppLayout */}
+        <aside className="hidden w-[200px] shrink-0 border-r border-border bg-card/80 p-4 sm:block">
+          <p className="font-display text-lg font-semibold text-primary">CapEigen</p>
+          <p className="mt-0.5 text-[11px] text-muted">AI rental underwriting</p>
+          <nav className="mt-6 space-y-1">
             {[
-              { label: 'Avg. CoC', value: '8.4%' },
-              { label: 'QAOA fit', value: '91%' },
-            ].map((stat) => (
+              { label: 'Home', active: true, Icon: Map },
+              { label: 'Individual Search', active: false, Icon: Search },
+              { label: 'Compare', active: false, Icon: GitCompare },
+            ].map(({ label, active, Icon }) => (
               <div
-                key={stat.label}
-                className="rounded-xl border border-white/8 bg-white/[0.04] p-3"
+                key={label}
+                className={clsx(
+                  'flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-xs font-medium',
+                  active ? 'bg-primary/10 text-primary' : 'text-text/70',
+                )}
               >
-                <p className="text-[11px] text-white/40">{stat.label}</p>
-                <p className="mt-1 font-display text-lg font-semibold text-white">{stat.value}</p>
+                <Icon className="size-3.5 shrink-0" />
+                {label}
               </div>
             ))}
+          </nav>
+        </aside>
+
+        {/* Main — mirrors Portfolio map home */}
+        <div className="min-w-0 flex-1 space-y-3 p-3 sm:p-4">
+          <div>
+            <p className="font-display text-lg font-semibold sm:text-xl">Portfolio map</p>
+            <p className="mt-0.5 text-[11px] text-muted sm:text-xs">
+              Browse researched properties. Click a pin to open Individual Search.
+            </p>
           </div>
-        </div>
-        <div className="relative min-h-[200px] overflow-hidden rounded-xl border border-white/8 bg-gradient-to-br from-slate-800/80 to-slate-950">
-          <div
-            className="absolute inset-0 opacity-40"
-            style={{
-              backgroundImage:
-                'linear-gradient(rgba(99,102,241,0.25) 1px, transparent 1px), linear-gradient(90deg, rgba(99,102,241,0.25) 1px, transparent 1px)',
-              backgroundSize: '28px 28px',
-            }}
-          />
-          <div className="absolute left-[18%] top-[28%] size-3 rounded-full bg-indigo-400 shadow-[0_0_20px_rgba(129,140,248,0.8)]" />
-          <div className="absolute left-[42%] top-[48%] size-2.5 rounded-full bg-emerald-400/90" />
-          <div className="absolute left-[62%] top-[36%] size-2.5 rounded-full bg-sky-400/90" />
-          <div className="absolute left-[74%] top-[58%] size-2 rounded-full bg-amber-400/80" />
-          <div className="absolute bottom-3 left-3 right-3 rounded-lg border border-white/10 bg-[#0c1020]/90 p-3 backdrop-blur">
-            <p className="text-xs font-medium text-white/90">214 Oak Ridge · Austin, TX</p>
-            <p className="mt-1 text-[11px] text-white/50">Cap rate 5.8% · Risk score 87%</p>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="rounded-lg border border-border bg-card px-2.5 py-1 text-[11px] font-medium text-text/80">
+              Filters
+            </span>
+            <span className="text-[11px] text-muted">Showing 3 of 3 properties</span>
+          </div>
+
+          <div className="relative h-[140px] overflow-hidden rounded-2xl border border-border shadow-sm sm:h-[160px]">
+            <div
+              className="absolute inset-0"
+              style={{
+                background:
+                  'linear-gradient(160deg, #dce8d4 0%, #c5d9c0 35%, #b8cfc8 60%, #d4e0ea 100%)',
+              }}
+            />
+            <div
+              className="absolute inset-0 opacity-30"
+              style={{
+                backgroundImage:
+                  'linear-gradient(rgba(26,26,46,0.12) 1px, transparent 1px), linear-gradient(90deg, rgba(26,26,46,0.12) 1px, transparent 1px)',
+                backgroundSize: '24px 24px',
+              }}
+            />
+            {/* Leaflet-style pins */}
+            <div className="absolute left-[22%] top-[38%] flex flex-col items-center">
+              <span className="size-3 rounded-full border-2 border-white bg-[#2a81cb] shadow" />
+              <span className="-mt-0.5 h-2 w-px bg-[#2a81cb]/80" />
+            </div>
+            <div className="absolute left-[48%] top-[52%] flex flex-col items-center">
+              <span className="size-3 rounded-full border-2 border-white bg-[#2a81cb] shadow" />
+              <span className="-mt-0.5 h-2 w-px bg-[#2a81cb]/80" />
+            </div>
+            <div className="absolute left-[68%] top-[30%] flex flex-col items-center">
+              <span className="size-3 rounded-full border-2 border-white bg-[#2a81cb] shadow" />
+              <span className="-mt-0.5 h-2 w-px bg-[#2a81cb]/80" />
+            </div>
+            <div className="absolute bottom-2 left-2 rounded bg-card/90 px-1.5 py-0.5 text-[9px] text-muted shadow-sm">
+              © OSM
+            </div>
+          </div>
+
+          <div>
+            <p className="mb-2 font-display text-sm font-semibold">Properties (3)</p>
+            <div className="overflow-hidden rounded-xl border border-border bg-card">
+              <table className="w-full text-left text-[10px] sm:text-xs">
+                <thead className="bg-surface text-muted">
+                  <tr>
+                    <th className="px-2 py-1.5 font-medium sm:px-3">Address</th>
+                    <th className="hidden px-2 py-1.5 font-medium sm:table-cell sm:px-3">Price</th>
+                    <th className="px-2 py-1.5 font-medium sm:px-3">Rent</th>
+                    <th className="px-2 py-1.5 font-medium sm:px-3">Yield</th>
+                    <th className="hidden px-2 py-1.5 font-medium md:table-cell md:px-3">
+                      Cash flow
+                    </th>
+                    <th className="hidden px-2 py-1.5 font-medium lg:table-cell lg:px-3">
+                      Cash on cash
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {MOCK_PROPERTIES.map((p) => (
+                    <tr key={p.address} className="border-t border-border">
+                      <td className="max-w-[9rem] truncate px-2 py-1.5 text-primary sm:max-w-none sm:px-3">
+                        {p.address}
+                      </td>
+                      <td className="hidden px-2 py-1.5 sm:table-cell sm:px-3">{p.price}</td>
+                      <td className="px-2 py-1.5 sm:px-3">{p.rent}</td>
+                      <td className="px-2 py-1.5 sm:px-3">{p.yield}</td>
+                      <td className="hidden px-2 py-1.5 md:table-cell md:px-3">{p.cashFlow}</td>
+                      <td className="hidden px-2 py-1.5 lg:table-cell lg:px-3">{p.coc}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </div>
         </div>
       </div>
@@ -208,7 +291,7 @@ function DemoLoginForm({ className }: { className?: string }) {
     <form
       onSubmit={(e) => void onSubmit(e)}
       className={clsx(
-        'rounded-2xl border border-border bg-white p-5 shadow-sm',
+        'rounded-2xl border border-border bg-card p-5 shadow-sm',
         className,
       )}
     >
@@ -303,6 +386,7 @@ export function LandingPage() {
             </a>
           </nav>
           <div className="hidden items-center gap-3 md:flex">
+            <ThemeToggle />
             <Link
               to="/login"
               className="rounded-lg px-3.5 py-2 text-sm font-medium text-text/80 transition hover:bg-surface hover:text-text"
@@ -316,14 +400,17 @@ export function LandingPage() {
               Get Started
             </a>
           </div>
-          <button
-            type="button"
-            className="rounded-lg p-2 text-text/80 hover:bg-surface md:hidden"
-            aria-label={navOpen ? 'Close menu' : 'Open menu'}
-            onClick={() => setNavOpen((o) => !o)}
-          >
-            {navOpen ? <X size={22} /> : <Menu size={22} />}
-          </button>
+          <div className="flex items-center gap-2 md:hidden">
+            <ThemeToggle />
+            <button
+              type="button"
+              className="rounded-lg p-2 text-text/80 hover:bg-surface"
+              aria-label={navOpen ? 'Close menu' : 'Open menu'}
+              onClick={() => setNavOpen((o) => !o)}
+            >
+              {navOpen ? <X size={22} /> : <Menu size={22} />}
+            </button>
+          </div>
         </div>
         {navOpen && (
           <div className="border-t border-border bg-bg/95 px-4 py-4 backdrop-blur-md md:hidden">
@@ -396,7 +483,7 @@ export function LandingPage() {
                 </a>
                 <Link
                   to="/login"
-                  className="inline-flex items-center rounded-lg border border-border bg-white/80 px-5 py-3 text-sm font-semibold text-text transition hover:bg-surface"
+                  className="inline-flex items-center rounded-lg border border-border bg-card/80 px-5 py-3 text-sm font-semibold text-text transition hover:bg-surface"
                 >
                   Log In
                 </Link>
@@ -430,7 +517,7 @@ export function LandingPage() {
                 key={title}
                 variants={fadeUp}
                 whileHover={reduce ? undefined : { y: -4 }}
-                className="group rounded-2xl border border-transparent bg-transparent p-1 transition hover:border-border hover:bg-white/70"
+                className="group rounded-2xl border border-transparent bg-transparent p-1 transition hover:border-border hover:bg-card/70"
               >
                 <div className="p-5">
                   <div className="flex size-11 items-center justify-center rounded-xl bg-primary/10 text-primary transition group-hover:bg-primary group-hover:text-white">
@@ -447,7 +534,7 @@ export function LandingPage() {
         {/* Features */}
         <SectionReveal
           id="features"
-          className="border-y border-border/70 bg-white/50 py-20 sm:py-28"
+          className="border-y border-border/70 bg-card/50 py-20 sm:py-28"
         >
           <div className="mx-auto max-w-6xl px-4 sm:px-6">
             <motion.div variants={fadeUp} className="mx-auto max-w-2xl text-center">
@@ -463,11 +550,7 @@ export function LandingPage() {
                 <motion.article
                   key={id}
                   variants={fadeUp}
-                  whileHover={reduce ? undefined : { scale: 1.01 }}
-                  className={clsx(
-                    'group relative overflow-hidden rounded-2xl border border-border bg-white transition',
-                    'hover:border-primary/25 hover:shadow-[0_12px_40px_rgba(26,26,46,0.06)]',
-                  )}
+                  className="relative overflow-hidden rounded-2xl border border-border bg-card"
                 >
                   <div
                     className={clsx(
@@ -476,7 +559,7 @@ export function LandingPage() {
                     )}
                   />
                   <div className="relative flex flex-col gap-4 p-6 sm:flex-row sm:items-center sm:gap-8 sm:p-8">
-                    <div className="flex size-12 shrink-0 items-center justify-center rounded-xl bg-white text-primary shadow-sm ring-1 ring-border">
+                    <div className="flex size-12 shrink-0 items-center justify-center rounded-xl bg-card text-primary shadow-sm ring-1 ring-border">
                       <Icon className="size-5" aria-hidden />
                     </div>
                     <div className="min-w-0 flex-1">
@@ -488,10 +571,6 @@ export function LandingPage() {
                         {body}
                       </p>
                     </div>
-                    <ArrowRight
-                      className="hidden size-5 shrink-0 text-primary/40 transition group-hover:translate-x-1 group-hover:text-primary sm:block"
-                      aria-hidden
-                    />
                   </div>
                 </motion.article>
               ))}
@@ -520,7 +599,7 @@ export function LandingPage() {
                 </Link>
                 <Link
                   to="/login"
-                  className="inline-flex items-center rounded-lg border border-border bg-white px-5 py-3 text-sm font-semibold transition hover:bg-surface"
+                  className="inline-flex items-center rounded-lg border border-border bg-card px-5 py-3 text-sm font-semibold transition hover:bg-surface"
                 >
                   Log In
                 </Link>
@@ -533,7 +612,7 @@ export function LandingPage() {
         </SectionReveal>
       </main>
 
-      <footer className="border-t border-border bg-white/60">
+      <footer className="border-t border-border bg-card/60">
         <div className="mx-auto flex max-w-6xl flex-col gap-6 px-4 py-10 sm:flex-row sm:items-center sm:justify-between sm:px-6">
           <div>
             <p className="font-display text-lg font-semibold text-primary">CapEigen</p>
@@ -558,9 +637,6 @@ export function LandingPage() {
               Log In
             </Link>
           </div>
-        </div>
-        <div className="border-t border-border/70 py-4 text-center text-xs text-muted">
-          © {new Date().getFullYear()} CapEigen. All rights reserved.
         </div>
       </footer>
     </div>

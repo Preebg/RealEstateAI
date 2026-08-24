@@ -57,10 +57,10 @@ export function PropertyOfTheDayModal() {
       aria-modal="true"
       aria-labelledby="property-of-the-day-title"
     >
-      <div className="relative w-full max-w-lg overflow-hidden rounded-2xl border border-border bg-white shadow-xl">
+      <div className="relative w-full max-w-lg overflow-hidden rounded-2xl border border-border bg-card shadow-xl">
         <button
           type="button"
-          className="absolute right-3 top-3 z-10 rounded-lg border border-border bg-white/90 p-1.5 text-muted hover:bg-surface"
+          className="absolute right-3 top-3 z-10 rounded-lg border border-border bg-card/90 p-1.5 text-muted hover:bg-surface"
           onClick={() => setOpen(false)}
           aria-label="Dismiss property of the day"
         >

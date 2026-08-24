@@ -111,7 +111,7 @@ export function PropertyAnalysisView({
 
   return (
     <div className="grid gap-6 lg:grid-cols-[300px_1fr]">
-      <aside className="space-y-4 rounded-2xl border border-border bg-white/90 p-4 shadow-sm">
+      <aside className="space-y-4 rounded-2xl border border-border bg-card/90 p-4 shadow-sm">
         <h2 className="font-display text-lg font-semibold">Assumptions</h2>
         {assumptions ? (
           <div className="space-y-3 text-sm">
@@ -169,7 +169,7 @@ export function PropertyAnalysisView({
         {error && <p className="text-sm text-red-600">{error}</p>}
 
         {property && (
-          <section className="space-y-4 rounded-2xl border border-border bg-white p-5 shadow-sm">
+          <section className="space-y-4 rounded-2xl border border-border bg-card p-5 shadow-sm">
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div>
                 <h2 className="font-display text-xl font-semibold">

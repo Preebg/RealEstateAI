@@ -141,7 +141,7 @@ export function AdminCatalogEditor({
           type="button"
           disabled={busy}
           onClick={() => void onDelete()}
-          className="rounded-lg border border-red-200 bg-white px-3 py-1.5 text-sm font-medium text-red-700 hover:bg-red-50 disabled:opacity-60"
+          className="rounded-lg border border-red-200 bg-card px-3 py-1.5 text-sm font-medium text-red-700 hover:bg-red-50 disabled:opacity-60"
         >
           Remove from catalog
         </button>
@@ -155,7 +155,7 @@ export function AdminCatalogEditor({
               step={field.step}
               value={values[field.key] ?? ''}
               onChange={(e) => setValues((prev) => ({ ...prev, [field.key]: e.target.value }))}
-              className="w-full rounded-lg border border-border bg-white px-3 py-2"
+              className="w-full rounded-lg border border-border bg-card px-3 py-2"
             />
           </label>
         ))}
@@ -166,7 +166,7 @@ export function AdminCatalogEditor({
           value={summary}
           onChange={(e) => setSummary(e.target.value)}
           rows={4}
-          className="w-full rounded-lg border border-border bg-white px-3 py-2"
+          className="w-full rounded-lg border border-border bg-card px-3 py-2"
         />
       </label>
       {error && <p className="text-sm text-red-600">{error}</p>}

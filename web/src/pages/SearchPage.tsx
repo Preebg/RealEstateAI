@@ -282,7 +282,7 @@ export function SearchPage() {
             </p>
           </header>
 
-          <form className="relative rounded-2xl border border-border bg-white p-4 shadow-sm" onSubmit={onSearchSubmit}>
+          <form className="relative rounded-2xl border border-border bg-card p-4 shadow-sm" onSubmit={onSearchSubmit}>
             <div className="flex flex-col gap-3 sm:flex-row">
               <input
                 value={query}
@@ -301,7 +301,7 @@ export function SearchPage() {
               </button>
             </div>
             {suggestions.length > 0 && (
-              <ul className="absolute left-4 right-4 top-full z-10 mt-1 max-h-48 overflow-auto rounded-lg border border-border bg-white shadow-lg">
+              <ul className="absolute left-4 right-4 top-full z-10 mt-1 max-h-48 overflow-auto rounded-lg border border-border bg-card shadow-lg">
                 {suggestions.map((addr) => (
                   <li key={addr}>
                     <button
@@ -331,7 +331,7 @@ export function SearchPage() {
           )}
 
           {jobId && deferred.length > 0 && (
-            <div className="rounded-xl border border-border bg-white p-3 text-sm">
+            <div className="rounded-xl border border-border bg-card p-3 text-sm">
               <p className="mb-2 text-muted">
                 Background: {deferred[0]} ({done}/{total})
               </p>

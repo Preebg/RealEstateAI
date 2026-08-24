@@ -268,7 +268,7 @@ function RangeNumberField({
     <input
       type="text"
       inputMode="decimal"
-      className="mt-1 w-full rounded-lg border border-border bg-white px-2 py-1.5 text-sm text-text outline-none focus:border-primary"
+      className="mt-1 w-full rounded-lg border border-border bg-card px-2 py-1.5 text-sm text-text outline-none focus:border-primary"
       disabled={disabled}
       value={display}
       aria-label={ariaLabel}
@@ -456,7 +456,7 @@ function MultiCheckList({
         value={query}
         onChange={(e) => setQuery(e.target.value)}
         placeholder={`Search ${label.toLowerCase()}…`}
-        className="w-full rounded-lg border border-border bg-white px-2.5 py-1.5 text-sm outline-none focus:border-primary"
+        className="w-full rounded-lg border border-border bg-card px-2.5 py-1.5 text-sm outline-none focus:border-primary"
       />
       <div className="max-h-36 overflow-y-auto rounded-lg border border-border">
         {filtered.length === 0 && (
@@ -536,7 +536,7 @@ export function PortfolioFilters({
             'inline-flex items-center gap-2 rounded-lg border px-3.5 py-2 text-sm font-medium shadow-sm transition',
             activeCount > 0
               ? 'border-primary bg-primary/10 text-primary'
-              : 'border-border bg-white hover:bg-surface',
+              : 'border-border bg-card hover:bg-surface',
           )}
           aria-expanded={open}
           aria-haspopup="dialog"
@@ -566,7 +566,7 @@ export function PortfolioFilters({
             role="dialog"
             aria-modal="true"
             aria-labelledby="portfolio-filters-title"
-            className="absolute inset-y-0 right-0 flex w-full max-w-lg flex-col bg-white shadow-2xl"
+            className="absolute inset-y-0 right-0 flex w-full max-w-lg flex-col bg-card shadow-2xl"
           >
             <header className="flex items-center justify-between gap-3 border-b border-border px-5 py-4">
               <div>

@@ -57,7 +57,7 @@ export function ValidationPage() {
 
       <form
         onSubmit={onSubmit}
-        className="rounded-2xl border border-border bg-white p-5 shadow-sm"
+        className="rounded-2xl border border-border bg-card p-5 shadow-sm"
       >
         <input
           name="csv"
@@ -77,7 +77,7 @@ export function ValidationPage() {
       </form>
 
       {result && (
-        <section className="space-y-4 rounded-2xl border border-border bg-white p-5 shadow-sm">
+        <section className="space-y-4 rounded-2xl border border-border bg-card p-5 shadow-sm">
           <pre className="whitespace-pre-wrap text-sm">{result.report_text}</pre>
           {result.calibration_png_base64 && (
             <img

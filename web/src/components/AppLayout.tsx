@@ -5,6 +5,7 @@ import { useAuthStore } from '../lib/authStore'
 import { isAdminUser } from '../lib/admin'
 import { trackPreviewEvent } from '../lib/previewActivity'
 import { PropertyOfTheDayModal } from './PropertyOfTheDayModal'
+import { ThemeToggle } from './ThemeToggle'
 import { clsx } from 'clsx'
 
 const nav: Array<{
@@ -36,7 +37,7 @@ export function AppLayout() {
     <div className="min-h-screen lg:grid lg:grid-cols-[260px_1fr]">
       <aside
         className={clsx(
-          'border-r border-border bg-white/80 backdrop-blur-sm lg:sticky lg:top-0 lg:h-screen',
+          'border-r border-border bg-card/80 backdrop-blur-sm lg:sticky lg:top-0 lg:h-screen',
           open ? 'block' : 'hidden lg:block',
         )}
       >
@@ -72,18 +73,21 @@ export function AppLayout() {
                 (typeof user?.user_metadata?.username === 'string' && user.user_metadata.username) ||
                 user?.email}
             </p>
-            <button
-              type="button"
-              className="mt-3 flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-text/80 hover:bg-surface"
-              onClick={async () => {
-                trackPreviewEvent('sign_out', { path: '/login', label: 'Signed out' })
-                await signOut()
-                navigate('/')
-              }}
-            >
-              <LogOut size={16} />
-              Sign out
-            </button>
+            <div className="mt-3 flex items-center gap-2">
+              <ThemeToggle />
+              <button
+                type="button"
+                className="flex flex-1 items-center gap-2 rounded-lg px-3 py-2 text-sm text-text/80 hover:bg-surface"
+                onClick={async () => {
+                  trackPreviewEvent('sign_out', { path: '/login', label: 'Signed out' })
+                  await signOut()
+                  navigate('/')
+                }}
+              >
+                <LogOut size={16} />
+                Sign out
+              </button>
+            </div>
           </div>
         </div>
       </aside>
@@ -108,21 +112,26 @@ export function AppLayout() {
               CapEigen
             </span>
           </div>
-          {isAdmin && (
-            <NavLink
-              to="/usage"
-              className={({ isActive }) =>
-                clsx(
-                  'rounded-lg border px-3 py-1.5 text-sm font-medium',
-                  isActive
-                    ? 'border-primary bg-primary/10 text-primary'
-                    : 'border-border bg-white/80 text-text hover:bg-surface',
-                )
-              }
-            >
-              Usage
-            </NavLink>
-          )}
+          <div className="flex items-center gap-2">
+            <div className="lg:hidden">
+              <ThemeToggle />
+            </div>
+            {isAdmin && (
+              <NavLink
+                to="/usage"
+                className={({ isActive }) =>
+                  clsx(
+                    'rounded-lg border px-3 py-1.5 text-sm font-medium',
+                    isActive
+                      ? 'border-primary bg-primary/10 text-primary'
+                      : 'border-border bg-card/80 text-text hover:bg-surface',
+                  )
+                }
+              >
+                Usage
+              </NavLink>
+            )}
+          </div>
         </header>
         <main className="px-4 py-6 sm:px-8">
           <Outlet />

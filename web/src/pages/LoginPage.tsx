@@ -13,6 +13,7 @@ import {
   consumeIdleLogoutNotice,
   IDLE_LOGOUT_MESSAGE,
 } from '../lib/idleSession'
+import { ThemeToggle } from '../components/ThemeToggle'
 
 export function LoginPage() {
   const { session, loading } = useAuthStore()
@@ -155,21 +156,23 @@ export function LoginPage() {
           </div>
         </div>
       )}
-      <div className="absolute right-4 top-4 z-10">
+      <div className="absolute right-4 top-4 z-10 flex items-center gap-2">
+        <ThemeToggle />
+        <div className="relative">
         <button
           type="button"
           onClick={() => {
             setShowPreview((open) => !open)
             setError(null)
           }}
-          className="rounded-lg border border-border bg-white/90 px-3 py-1.5 text-sm font-medium text-text shadow-sm hover:bg-surface"
+          className="rounded-lg border border-border bg-card/90 px-3 py-1.5 text-sm font-medium text-text shadow-sm hover:bg-surface"
         >
           Preview
         </button>
         {showPreview && (
           <form
             onSubmit={(e) => void previewSignIn(e)}
-            className="absolute right-0 mt-2 w-80 rounded-2xl border border-primary/30 bg-white p-5 shadow-lg"
+            className="absolute right-0 mt-2 w-80 rounded-2xl border border-primary/30 bg-card p-5 shadow-lg"
           >
             <h2 className="text-sm font-semibold text-primary">Preview access</h2>
             <p className="mt-2 mb-3 text-sm text-muted">Enter your username. No password.</p>
@@ -215,6 +218,7 @@ export function LoginPage() {
             {error && <p className="mt-3 text-sm text-red-600">{error}</p>}
           </form>
         )}
+        </div>
       </div>
 
       <div className="mx-auto flex min-h-screen max-w-md flex-col justify-center px-4 py-12">
@@ -227,7 +231,7 @@ export function LoginPage() {
 
       <form
         onSubmit={onSubmit}
-        className="rounded-2xl border border-border bg-white/90 p-6 shadow-sm"
+        className="rounded-2xl border border-border bg-card/90 p-6 shadow-sm"
       >
         <div className="mb-4 flex gap-2 rounded-lg bg-surface p-1">
           {(['signin', 'signup'] as const).map((m) => (
@@ -235,7 +239,7 @@ export function LoginPage() {
               key={m}
               type="button"
               className={`flex-1 rounded-md py-2 text-sm font-medium ${
-                mode === m ? 'bg-white text-primary shadow-sm' : 'text-muted'
+                mode === m ? 'bg-card text-primary shadow-sm' : 'text-muted'
               }`}
               onClick={() => {
                 setMode(m)
@@ -336,7 +340,7 @@ export function LoginPage() {
             type="button"
             onClick={() => void googleSignIn()}
             disabled={busy}
-            className="w-full rounded-lg border border-border bg-white py-2.5 text-sm font-medium hover:bg-surface disabled:opacity-60"
+            className="w-full rounded-lg border border-border bg-card py-2.5 text-sm font-medium hover:bg-surface disabled:opacity-60"
           >
             Continue with Google
           </button>

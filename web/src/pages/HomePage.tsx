@@ -233,7 +233,7 @@ function SortMenu({
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="inline-flex items-center gap-2 rounded-lg border border-border bg-white/95 px-3 py-2 text-sm font-medium shadow-sm backdrop-blur hover:bg-white"
+        className="inline-flex items-center gap-2 rounded-lg border border-border bg-card/95 px-3 py-2 text-sm font-medium shadow-sm backdrop-blur hover:bg-card"
         aria-expanded={open}
         aria-haspopup="listbox"
       >
@@ -244,7 +244,7 @@ function SortMenu({
       {open && (
         <ul
           role="listbox"
-          className="absolute right-0 z-[1200] mt-1.5 max-h-80 w-64 overflow-y-auto rounded-xl border border-border bg-white py-1 shadow-lg"
+          className="absolute right-0 z-[1200] mt-1.5 max-h-80 w-64 overflow-y-auto rounded-xl border border-border bg-card py-1 shadow-lg"
         >
           {SORT_OPTIONS.map((option) => (
             <li key={option.id}>
@@ -482,7 +482,7 @@ export function HomePage() {
             Properties ({filtered.length.toLocaleString()})
           </h2>
         </div>
-        <div className="overflow-x-auto rounded-xl border border-border bg-white">
+        <div className="overflow-x-auto rounded-xl border border-border bg-card">
           <table className="min-w-full text-left text-sm">
             <thead className="bg-surface text-muted">
               <tr>
