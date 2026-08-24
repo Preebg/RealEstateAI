@@ -291,6 +291,16 @@ CREATE TABLE IF NOT EXISTS public.legal_documents (
   updated_by text
 );
 
+CREATE TABLE IF NOT EXISTS public.legal_acceptances (
+  user_id uuid PRIMARY KEY,
+  privacy_effective_date date NOT NULL,
+  terms_effective_date date NOT NULL,
+  accepted_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS legal_acceptances_accepted_at_idx
+  ON public.legal_acceptances (accepted_at DESC);
+
 CREATE TABLE IF NOT EXISTS public.preview_usernames (
   username_key text PRIMARY KEY,
   username text NOT NULL,

@@ -58,6 +58,21 @@ class LegalDocumentUpdateRequest(BaseModel):
     effective_date: str | None = Field(default=None, max_length=10)
 
 
+class LegalAcceptanceStatusResponse(BaseModel):
+    needs_acceptance: bool
+    privacy_effective_date: str
+    terms_effective_date: str
+    accepted_privacy_effective_date: str | None = None
+    accepted_terms_effective_date: str | None = None
+    accepted_at: str | None = None
+    privacy_title: str = "Privacy Policy"
+    terms_title: str = "Terms of Service"
+
+
+class LegalAcceptanceRequest(BaseModel):
+    accepted: bool = True
+
+
 class PreviewAccountCreateRequest(BaseModel):
     username: str = Field(min_length=2, max_length=32)
 

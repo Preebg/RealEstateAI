@@ -13,6 +13,7 @@ import {
   consumeIdleLogoutNotice,
   IDLE_LOGOUT_MESSAGE,
 } from '../lib/idleSession'
+import { recordLegalAcceptanceQuietly } from '../lib/legalAcceptance'
 import { ThemeToggle } from '../components/ThemeToggle'
 
 export function LoginPage() {
@@ -85,6 +86,7 @@ export function LoginPage() {
 
       if (data.session) {
         trackPreviewEvent('login', { path: '/login', label: 'Email sign-up' })
+        await recordLegalAcceptanceQuietly()
         goHomeAfterAuth()
         return
       }
@@ -97,6 +99,7 @@ export function LoginPage() {
         return
       }
       trackPreviewEvent('login', { path: '/login', label: 'Email sign-up' })
+      await recordLegalAcceptanceQuietly()
       goHomeAfterAuth()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Authentication failed')
@@ -115,6 +118,7 @@ export function LoginPage() {
         throw new Error('Accept the Terms and Privacy Policy to continue.')
       }
       await signInWithPreviewUsername(previewUsername)
+      await recordLegalAcceptanceQuietly()
       goHomeAfterAuth()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Preview login failed')

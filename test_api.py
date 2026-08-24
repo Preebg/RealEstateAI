@@ -348,11 +348,24 @@ def test_property_of_the_day_requires_auth() -> None:
 def test_legal_document_mentions_property_of_the_day() -> None:
     privacy = client.get("/api/legal/privacy")
     assert privacy.status_code == 200
-    assert "Property of the Day" in privacy.json()["body"]
-    assert "viewership" in privacy.json()["body"].lower()
+    privacy_body = privacy.json()["body"]
+    assert "Property of the Day" in privacy_body
+    assert "viewership" in privacy_body.lower()
+    assert "Account settings" in privacy_body
+    assert "do not need to contact the operator" in privacy_body
+    assert "If you want your data removed, contact the operator" not in privacy_body
     terms = client.get("/api/legal/terms")
     assert terms.status_code == 200
-    assert "Property of the Day" in terms.json()["body"]
+    terms_body = terms.json()["body"]
+    assert "Property of the Day" in terms_body
+    assert "Account settings" in terms_body
+
+
+def test_legal_acceptance_requires_auth() -> None:
+    response = client.get("/api/legal/acceptance")
+    assert response.status_code in (401, 403)
+    response = client.post("/api/legal/acceptance", json={"accepted": True})
+    assert response.status_code in (401, 403)
 
 
 def test_select_property_of_the_day_prefers_cashflow_low_risk_neighborhood() -> None:

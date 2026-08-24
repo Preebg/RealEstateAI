@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { ArrowLeft } from 'lucide-react'
 import { clsx } from 'clsx'
 import { apiFetch } from '../lib/api'
 import { ThemeToggle } from '../components/ThemeToggle'
+import { LegalDocumentPreview } from '../components/LegalMarkdown'
 
 type LegalDocument = {
   title: string
@@ -20,140 +21,6 @@ const FALLBACK: Record<string, LegalDocument> = {
     title: 'Privacy Policy',
     body: 'Privacy Policy could not be loaded. Please try again shortly.',
   },
-}
-
-function formatEffectiveDate(iso?: string) {
-  if (!iso) return null
-  const d = new Date(`${iso}T00:00:00`)
-  if (Number.isNaN(d.getTime())) return iso
-  return d.toLocaleDateString(undefined, {
-    year: 'numeric',
-    month: 'long',
-    day: 'numeric',
-  })
-}
-
-function renderInline(text: string): ReactNode[] {
-  const parts: ReactNode[] = []
-  const re = /\*\*(.+?)\*\*/g
-  let last = 0
-  let match: RegExpExecArray | null
-  let key = 0
-  while ((match = re.exec(text)) !== null) {
-    if (match.index > last) {
-      parts.push(text.slice(last, match.index))
-    }
-    parts.push(
-      <strong key={key++} className="font-semibold text-text">
-        {match[1]}
-      </strong>,
-    )
-    last = match.index + match[0].length
-  }
-  if (last < text.length) parts.push(text.slice(last))
-  return parts
-}
-
-function stripDuplicateTitle(markdown: string, title: string): string {
-  const trimmed = markdown.trim()
-  const escaped = title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  return trimmed
-    .replace(new RegExp(`^#{1,6}\\s*${escaped}\\s*\\n+`, 'i'), '')
-    .replace(new RegExp(`^\\*\\*Effective date:\\*\\*[^\\n]*\\n+`, 'i'), '')
-    .trim()
-}
-
-function LegalBody({ markdown }: { markdown: string }) {
-  const blocks = useMemo(() => {
-    const lines = markdown.replace(/\r\n/g, '\n').split('\n')
-    const nodes: ReactNode[] = []
-    let i = 0
-    let key = 0
-
-    while (i < lines.length) {
-      const line = lines[i]
-      const trimmed = line.trim()
-
-      if (!trimmed) {
-        i += 1
-        continue
-      }
-
-      if (trimmed === '---') {
-        nodes.push(<hr key={key++} className="my-8 border-border" />)
-        i += 1
-        continue
-      }
-
-      const heading = /^(#{1,6})\s+(.+)$/.exec(trimmed)
-      if (heading) {
-        const level = heading[1].length
-        const content = renderInline(heading[2].trim())
-        if (level <= 3) {
-          nodes.push(
-            <h2
-              key={key++}
-              className="mt-10 font-display text-xl font-semibold tracking-tight text-text first:mt-0"
-            >
-              {content}
-            </h2>,
-          )
-        } else {
-          nodes.push(
-            <h3
-              key={key++}
-              className="mt-8 font-display text-base font-semibold tracking-tight text-text first:mt-0"
-            >
-              {content}
-            </h3>,
-          )
-        }
-        i += 1
-        continue
-      }
-
-      if (trimmed.startsWith('- ')) {
-        const items: string[] = []
-        while (i < lines.length && lines[i].trim().startsWith('- ')) {
-          items.push(lines[i].trim().slice(2))
-          i += 1
-        }
-        nodes.push(
-          <ul key={key++} className="mt-3 list-disc space-y-2 pl-5 text-[15px] leading-relaxed text-muted">
-            {items.map((item, idx) => (
-              <li key={idx}>{renderInline(item)}</li>
-            ))}
-          </ul>,
-        )
-        continue
-      }
-
-      const para: string[] = [trimmed]
-      i += 1
-      while (i < lines.length) {
-        const next = lines[i].trim()
-        if (
-          !next ||
-          next === '---' ||
-          next.startsWith('#') ||
-          next.startsWith('- ')
-        ) {
-          break
-        }
-        para.push(next)
-        i += 1
-      }
-      nodes.push(
-        <p key={key++} className="mt-3 text-[15px] leading-relaxed text-muted first:mt-0">
-          {renderInline(para.join(' '))}
-        </p>,
-      )
-    }
-
-    return nodes
-  }, [markdown])
-
-  return <div className="legal-body">{blocks}</div>
 }
 
 export function LegalPage() {
@@ -190,11 +57,6 @@ export function LegalPage() {
   }, [slug])
 
   const title = legalDoc?.title || (slug === 'privacy' ? 'Privacy Policy' : 'Terms of Service')
-  const effectiveLabel = formatEffectiveDate(legalDoc?.effective_date)
-  const bodyMarkdown = useMemo(
-    () => stripDuplicateTitle(legalDoc?.body || '', title),
-    [legalDoc?.body, title],
-  )
 
   return (
     <div className="min-h-screen overflow-x-hidden bg-bg text-text">
@@ -255,15 +117,6 @@ export function LegalPage() {
             </Link>
           </nav>
 
-          <header className="mt-10">
-            <h1 className="font-display text-3xl font-semibold tracking-tight sm:text-4xl">
-              {title}
-            </h1>
-            {effectiveLabel && (
-              <p className="mt-3 text-sm text-muted">Effective {effectiveLabel}</p>
-            )}
-          </header>
-
           {error && (
             <p className="mt-6 rounded-lg border border-red-500/30 bg-red-500/5 px-4 py-3 text-sm text-red-700 dark:text-red-300">
               {error}
@@ -273,9 +126,12 @@ export function LegalPage() {
           {loading && !legalDoc ? (
             <p className="mt-10 text-sm text-muted">Loading…</p>
           ) : (
-            <article className="mt-8">
-              <LegalBody markdown={bodyMarkdown} />
-            </article>
+            <LegalDocumentPreview
+              className="mt-10"
+              title={title}
+              effectiveDate={legalDoc?.effective_date}
+              body={legalDoc?.body || ''}
+            />
           )}
         </div>
       </main>

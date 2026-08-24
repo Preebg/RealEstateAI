@@ -106,3 +106,95 @@ def save_legal_document(
         report_error(log, "legal_document_save_failed", exc, slug=key)
         raise RuntimeError("Could not save legal document.") from exc
     return get_legal_document(key)
+
+
+def _normalize_date(value: Any) -> str | None:
+    if value is None:
+        return None
+    if hasattr(value, "isoformat"):
+        return str(value.isoformat())
+    text = str(value).strip()
+    return text[:10] if text else None
+
+
+def get_legal_acceptance(user_id: str) -> dict[str, Any] | None:
+    """Return the user's latest acceptance row, or None."""
+    uid = (user_id or "").strip()
+    if not uid:
+        return None
+    try:
+        response = (
+            _data_client()
+            .table("legal_acceptances")
+            .select("user_id,privacy_effective_date,terms_effective_date,accepted_at")
+            .eq("user_id", uid)
+            .limit(1)
+            .execute()
+        )
+    except Exception as exc:  # noqa: BLE001
+        report_error(log, "legal_acceptance_read_failed", exc, user_id=uid)
+        return None
+    rows = response.data or []
+    if not rows:
+        return None
+    row = rows[0]
+    accepted_at = row.get("accepted_at")
+    if hasattr(accepted_at, "isoformat"):
+        accepted_at = accepted_at.isoformat()
+    return {
+        "user_id": uid,
+        "privacy_effective_date": _normalize_date(row.get("privacy_effective_date")),
+        "terms_effective_date": _normalize_date(row.get("terms_effective_date")),
+        "accepted_at": str(accepted_at) if accepted_at else None,
+    }
+
+
+def get_legal_acceptance_status(user_id: str) -> dict[str, Any]:
+    """Compare stored acceptance to the current published Terms + Privacy dates."""
+    privacy = get_legal_document("privacy")
+    terms = get_legal_document("terms")
+    current_privacy = str(privacy["effective_date"])
+    current_terms = str(terms["effective_date"])
+    acceptance = get_legal_acceptance(user_id)
+    accepted_privacy = acceptance.get("privacy_effective_date") if acceptance else None
+    accepted_terms = acceptance.get("terms_effective_date") if acceptance else None
+    needs_acceptance = (
+        accepted_privacy != current_privacy or accepted_terms != current_terms
+    )
+    return {
+        "needs_acceptance": needs_acceptance,
+        "privacy_effective_date": current_privacy,
+        "terms_effective_date": current_terms,
+        "accepted_privacy_effective_date": accepted_privacy,
+        "accepted_terms_effective_date": accepted_terms,
+        "accepted_at": acceptance.get("accepted_at") if acceptance else None,
+        "privacy_title": privacy["title"],
+        "terms_title": terms["title"],
+    }
+
+
+def save_legal_acceptance(user_id: str) -> dict[str, Any]:
+    """Record acceptance of the currently published Terms + Privacy effective dates."""
+    uid = (user_id or "").strip()
+    if not uid:
+        raise ValueError("user_id is required")
+    privacy = get_legal_document("privacy")
+    terms = get_legal_document("terms")
+    now = datetime.now(timezone.utc).isoformat()
+    row = {
+        "user_id": uid,
+        "privacy_effective_date": str(privacy["effective_date"]),
+        "terms_effective_date": str(terms["effective_date"]),
+        "accepted_at": now,
+    }
+    try:
+        (
+            _data_client()
+            .table("legal_acceptances")
+            .upsert(row, on_conflict="user_id")
+            .execute()
+        )
+    except APIError as exc:
+        report_error(log, "legal_acceptance_save_failed", exc, user_id=uid)
+        raise RuntimeError("Could not save legal acceptance.") from exc
+    return get_legal_acceptance_status(uid)

@@ -6,6 +6,7 @@ import { isAdminUser } from '../lib/admin'
 import { trackPreviewEvent } from '../lib/previewActivity'
 import { consumeOpenAccountSettings } from '../lib/googleOAuth'
 import { PropertyOfTheDayModal } from './PropertyOfTheDayModal'
+import { LegalAcceptanceModal } from './LegalAcceptanceModal'
 import { AccountSettingsModal } from './AccountSettingsModal'
 import { ThemeToggle } from './ThemeToggle'
 import { clsx } from 'clsx'
@@ -194,6 +195,7 @@ export function AppLayout() {
         <main className="px-4 py-6 sm:px-8">
           <Outlet />
         </main>
+        <LegalAcceptanceModal />
         <PropertyOfTheDayModal />
         <AccountSettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
       </div>

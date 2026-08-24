@@ -7,7 +7,12 @@ from typing import Any, Literal
 from fastapi import APIRouter, HTTPException, Query
 
 from api.deps import AdminUser, CurrentUser
-from api.legal_store import get_legal_document, save_legal_document
+from api.legal_store import (
+    get_legal_acceptance_status,
+    get_legal_document,
+    save_legal_acceptance,
+    save_legal_document,
+)
 from api.preview_activity import (
     ALLOWED_EVENT_TYPES,
     actor_for_user,
@@ -22,6 +27,8 @@ from api.preview_usernames import (
     remove_preview_username,
 )
 from api.schemas import (
+    LegalAcceptanceRequest,
+    LegalAcceptanceStatusResponse,
     LegalDocumentResponse,
     LegalDocumentUpdateRequest,
     PreviewAccountCreateRequest,
@@ -154,6 +161,26 @@ def purge_preview_account(
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     accounts = list_preview_accounts()
     return PreviewAccountListResponse(accounts=accounts, count=len(accounts))
+
+
+@router.get("/api/legal/acceptance", response_model=LegalAcceptanceStatusResponse)
+def read_legal_acceptance(user: CurrentUser) -> LegalAcceptanceStatusResponse:
+    status = get_legal_acceptance_status(str(user["id"]))
+    return LegalAcceptanceStatusResponse(**status)
+
+
+@router.post("/api/legal/acceptance", response_model=LegalAcceptanceStatusResponse)
+def accept_current_legal(
+    body: LegalAcceptanceRequest,
+    user: CurrentUser,
+) -> LegalAcceptanceStatusResponse:
+    if not body.accepted:
+        raise HTTPException(status_code=400, detail="You must accept the updated legal documents.")
+    try:
+        status = save_legal_acceptance(str(user["id"]))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return LegalAcceptanceStatusResponse(**status)
 
 
 @router.get("/api/legal/{slug}", response_model=LegalDocumentResponse)

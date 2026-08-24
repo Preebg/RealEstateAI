@@ -24,6 +24,7 @@ import {
 import { clsx } from 'clsx'
 import { signInWithPreviewUsername } from '../lib/demoLogin'
 import { prefetchHome, prefetchHomeChunk } from '../lib/prefetchHome'
+import { recordLegalAcceptanceQuietly } from '../lib/legalAcceptance'
 import { ThemeToggle } from '../components/ThemeToggle'
 
 const WHY = [
@@ -278,6 +279,7 @@ function DemoLoginForm({ className }: { className?: string }) {
       if (!accepted) throw new Error('Accept the Terms and Privacy Policy to continue.')
       prefetchHomeChunk()
       await signInWithPreviewUsername(username)
+      await recordLegalAcceptanceQuietly()
       prefetchHome(queryClient)
       navigate('/')
     } catch (err) {

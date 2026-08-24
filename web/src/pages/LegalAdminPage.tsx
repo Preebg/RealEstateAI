@@ -1,6 +1,9 @@
 import { useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
+import { Link } from 'react-router-dom'
+import { clsx } from 'clsx'
 import { apiFetch } from '../lib/api'
+import { LegalDocumentPreview } from '../components/LegalMarkdown'
 
 type LegalSlug = 'terms' | 'privacy'
 
@@ -38,6 +41,7 @@ export function LegalAdminPage() {
   const [info, setInfo] = useState<string | null>(null)
   const [busy, setBusy] = useState(true)
   const [saving, setSaving] = useState(false)
+  const [mode, setMode] = useState<'edit' | 'preview'>('edit')
 
   async function load(next: LegalSlug) {
     setBusy(true)
@@ -88,7 +92,9 @@ export function LegalAdminPage() {
         updated_by: doc.updated_by,
         is_default: doc.is_default,
       })
-      setInfo('Published. The public legal page now shows this copy.')
+      setInfo(
+        'Published. Signed-in users who accepted an older version will be asked to agree again before using the app.',
+      )
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not save')
     } finally {
@@ -102,7 +108,11 @@ export function LegalAdminPage() {
         <h1 className="font-display text-3xl font-semibold">Legal</h1>
         <p className="mt-1 text-muted">
           Update the Privacy Policy and Terms of Service shown on the public legal pages and at
-          sign-up.
+          sign-up. Preview matches what users see at{' '}
+          <Link className="text-primary underline" to={`/legal/${slug}`} target="_blank">
+            /legal/{slug}
+          </Link>
+          .
         </p>
       </header>
 
@@ -111,7 +121,10 @@ export function LegalAdminPage() {
           <button
             key={doc.slug}
             type="button"
-            onClick={() => setSlug(doc.slug)}
+            onClick={() => {
+              setSlug(doc.slug)
+              setMode('edit')
+            }}
             className={
               slug === doc.slug
                 ? 'rounded-lg bg-primary px-3 py-1.5 text-sm font-medium text-white'
@@ -128,56 +141,104 @@ export function LegalAdminPage() {
       {busy && <p className="text-muted">Loading…</p>}
 
       {!busy && (
-        <form onSubmit={(e) => void onSave(e)} className="space-y-4">
-          <p className="text-sm text-muted">
-            {meta?.is_default
-              ? 'Showing built-in copy. Save to publish an edited version.'
-              : `Last published ${formatWhen(meta?.updated_at)}${
-                  meta?.updated_by ? ` by ${meta.updated_by}` : ''
-                }.`}{' '}
-            Public URL:{' '}
-            <a className="text-primary underline" href={`/legal/${slug}`} target="_blank" rel="noreferrer">
-              /legal/{slug}
-            </a>
-          </p>
-          <label className="block text-sm">
-            <span className="mb-1 block font-medium">Title</span>
-            <input
-              value={title}
-              onChange={(e) => setTitle(e.target.value)}
-              required
-              className="w-full rounded-lg border border-border px-3 py-2"
-            />
-          </label>
-          <label className="block text-sm">
-            <span className="mb-1 block font-medium">Effective date</span>
-            <input
-              type="date"
-              value={effectiveDate}
-              onChange={(e) => setEffectiveDate(e.target.value)}
-              required
-              className="rounded-lg border border-border px-3 py-2"
-            />
-          </label>
-          <label className="block text-sm">
-            <span className="mb-1 block font-medium">Document (Markdown)</span>
-            <textarea
-              value={body}
-              onChange={(e) => setBody(e.target.value)}
-              required
-              minLength={40}
-              rows={22}
-              className="w-full rounded-lg border border-border px-3 py-2 font-mono text-sm"
-            />
-          </label>
-          <button
-            type="submit"
-            disabled={saving}
-            className="rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-white hover:bg-primary-hover disabled:opacity-60"
-          >
-            {saving ? 'Publishing…' : 'Publish'}
-          </button>
-        </form>
+        <>
+          <div className="flex gap-6 border-b border-border/80" role="tablist" aria-label="Editor mode">
+            {(
+              [
+                { id: 'edit', label: 'Edit' },
+                { id: 'preview', label: 'Preview' },
+              ] as const
+            ).map((tab) => (
+              <button
+                key={tab.id}
+                type="button"
+                role="tab"
+                aria-selected={mode === tab.id}
+                onClick={() => setMode(tab.id)}
+                className={clsx(
+                  '-mb-px border-b-2 pb-3 text-sm font-medium transition',
+                  mode === tab.id
+                    ? 'border-primary text-primary'
+                    : 'border-transparent text-muted hover:text-text',
+                )}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </div>
+
+          {mode === 'preview' ? (
+            <div className="relative overflow-hidden rounded-2xl border border-border bg-bg">
+              <div className="pointer-events-none absolute inset-0 -z-10 overflow-hidden">
+                <div className="absolute -left-1/4 top-0 h-[40vh] w-[70vw] rounded-full bg-primary/[0.07] blur-3xl" />
+                <div className="absolute -right-1/4 top-16 h-[30vh] w-[50vw] rounded-full bg-sky-400/[0.06] blur-3xl" />
+              </div>
+              <div className="mx-auto max-w-3xl px-4 py-10 sm:px-8 sm:py-12">
+                <LegalDocumentPreview title={title} effectiveDate={effectiveDate} body={body} />
+              </div>
+            </div>
+          ) : (
+            <form onSubmit={(e) => void onSave(e)} className="space-y-4">
+              <p className="text-sm text-muted">
+                {meta?.is_default
+                  ? 'Showing built-in copy. Save to publish an edited version.'
+                  : `Last published ${formatWhen(meta?.updated_at)}${
+                      meta?.updated_by ? ` by ${meta.updated_by}` : ''
+                    }.`}{' '}
+                Public URL:{' '}
+                <a
+                  className="text-primary underline"
+                  href={`/legal/${slug}`}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  /legal/{slug}
+                </a>
+              </p>
+              <label className="block text-sm">
+                <span className="mb-1 block font-medium">Title</span>
+                <input
+                  value={title}
+                  onChange={(e) => setTitle(e.target.value)}
+                  required
+                  className="w-full rounded-lg border border-border px-3 py-2"
+                />
+              </label>
+              <label className="block text-sm">
+                <span className="mb-1 block font-medium">Effective date</span>
+                <input
+                  type="date"
+                  value={effectiveDate}
+                  onChange={(e) => setEffectiveDate(e.target.value)}
+                  required
+                  className="rounded-lg border border-border px-3 py-2"
+                />
+                <span className="mt-1 block text-xs text-muted">
+                  Bumping this date requires every signed-in user to accept the updated documents
+                  again.
+                </span>
+              </label>
+              <label className="block text-sm">
+                <span className="mb-1 block font-medium">Document (Markdown)</span>
+                <textarea
+                  value={body}
+                  onChange={(e) => setBody(e.target.value)}
+                  required
+                  minLength={40}
+                  rows={22}
+                  className="w-full rounded-lg border border-border px-3 py-2 font-mono text-sm"
+                />
+              </label>
+              <button
+                type="submit"
+                disabled={saving}
+                className="rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-white hover:bg-primary-hover disabled:opacity-60"
+              >
+                {saving ? 'Publishing…' : 'Publish'}
+              </button>
+            </form>
+          )}
+        </>
       )}
     </div>
   )

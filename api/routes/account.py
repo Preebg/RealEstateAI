@@ -44,6 +44,7 @@ def _purge_user_rows(user_id: str) -> None:
         "recommendation_feedback",
         "property_app_views",
         "property_of_day_impressions",
+        "legal_acceptances",
     ):
         try:
             service.table(table).delete().eq("user_id", user_id).execute()
