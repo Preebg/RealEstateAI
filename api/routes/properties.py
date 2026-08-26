@@ -18,6 +18,7 @@ from api.schemas import (
 )
 from knowledge_base import (
     delete_canonical_property_by_id,
+    enrich_property_for_ui,
     get_kb_raw_data,
     get_user_saved_properties,
     invalidate_kb_cache,
@@ -135,17 +136,18 @@ def property_detail(
     if not record:
         raise HTTPException(status_code=404, detail="Property not found")
     rent = record.get("rent") or record.get("original_ai_rent")
+    enriched = enrich_property_for_ui(dict(record))
     return {
-        **record,
+        **enriched,
         "from_kb": True,
-        "property_id": record.get("id"),
-        "rent": rent if rent is not None else record.get("rent"),
-        "sqft": record.get("square_footage") or record.get("sqft"),
+        "property_id": enriched.get("id"),
+        "rent": rent if rent is not None else enriched.get("rent"),
+        "sqft": enriched.get("square_footage") or enriched.get("sqft"),
         "strategy": (
-            record.get("strategy_tag")
-            or record.get("property_label")
-            or record.get("property_category")
-            or record.get("strategy")
+            enriched.get("strategy_tag")
+            or enriched.get("property_label")
+            or enriched.get("property_category")
+            or enriched.get("strategy")
         ),
     }
 

@@ -50,7 +50,7 @@ export function GuestSharePage() {
           variant="guest"
           property={property}
           addressLabel={address}
-          sourceLabel="Shared analysis · sliders update locally"
+          sourceLabel="Shared analysis · assumptions shown read-only"
           emptyHint="Loading assumptions…"
           header={
             <header>
@@ -59,7 +59,7 @@ export function GuestSharePage() {
               </p>
               <h1 className="font-display text-3xl font-semibold">Shared analysis</h1>
               <p className="mt-1 text-muted">
-                Move the sliders to recast cash flow, then download a PDF. Searching
+                AI vs displayed underwriting assumptions are shown read-only. Searching
                 new addresses and comparing listings require a CapEigen account.
               </p>
             </header>

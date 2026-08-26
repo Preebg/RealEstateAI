@@ -10,19 +10,27 @@ import {
 } from 'recharts'
 import type { FinanceMetrics } from '../lib/finance'
 import {
-  ASSUMPTION_SLIDERS,
+  CRITICAL_ASSUMPTION_SLIDERS,
+  FINANCING_ASSUMPTION_SLIDERS,
+  assumptionMetaFromProperty,
   assumptionsFromProperty,
   cashFlowRows,
   downloadPropertyPdf,
   financeFromProperty,
   forecastYearlyValues,
+  formatAssumptionDelta,
   formatYearBuilt,
+  hasCriticalAssumptionChanges,
   hydrateProperty,
   money,
   num,
+  type AssumptionMeta,
   type Assumptions,
+  type CriticalAssumptionKey,
 } from '../lib/propertyAnalysis'
 import { trackPreviewEvent, trackPreviewEventDebounced } from '../lib/previewActivity'
+
+type AssumptionPersistState = 'idle' | 'unsaved' | 'saving' | 'saved'
 
 type PropertyAnalysisViewProps = {
   property: Record<string, unknown> | null
@@ -37,7 +45,105 @@ type PropertyAnalysisViewProps = {
   shareCopied?: boolean
   onShare?: () => void
   onBookmark?: () => void
-  onAssumptionsChange?: (assumptions: Assumptions, finance: FinanceMetrics) => void
+  onAssumptionsChange?: (
+    assumptions: Assumptions,
+    finance: FinanceMetrics,
+    overrideNotes: string,
+  ) => void
+  assumptionPersistState?: AssumptionPersistState
+}
+
+const CRITICAL_LABELS: Record<CriticalAssumptionKey, string> = {
+  monthly_rent: 'Monthly rent',
+  vacancy_reserve_pct: 'Vacancy %',
+  maint_percent: 'Maint %',
+  management_fee_pct: 'Mgmt fee %',
+}
+
+function formatAiBaseline(key: CriticalAssumptionKey, value: number): string {
+  if (key === 'monthly_rent') return money(value)
+  return `${value.toFixed(1)}%`
+}
+
+function formatSourceLabel(source?: string): string {
+  if (!source) return ''
+  return source.replace(/_/g, ' ')
+}
+
+type AssumptionRowProps = {
+  fieldKey: CriticalAssumptionKey
+  label: string
+  min: number
+  max: number
+  step: number
+  value: number
+  meta: AssumptionMeta
+  onChange: (value: number) => void
+  readOnly?: boolean
+}
+
+function AssumptionRow({
+  fieldKey,
+  label,
+  min,
+  max,
+  step,
+  value,
+  meta,
+  onChange,
+  readOnly = false,
+}: AssumptionRowProps) {
+  const delta = formatAssumptionDelta(fieldKey, meta)
+  return (
+    <div className="rounded-xl border border-border bg-surface/40 p-3">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div>
+          <p className="font-medium text-text">
+            {label}:{' '}
+            <span className="tabular-nums">
+              {fieldKey === 'monthly_rent' ? money(value) : `${value}%`}
+            </span>
+          </p>
+          <p className="mt-0.5 text-xs text-muted">
+            AI baseline: {formatAiBaseline(fieldKey, meta.aiValue)}
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center gap-1.5">
+          {delta && (
+            <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-xs font-medium text-amber-800 dark:text-amber-200">
+              {delta}
+            </span>
+          )}
+          {meta.confidenceLabel && (
+            <span className="rounded-full border border-border px-2 py-0.5 text-xs text-muted">
+              {meta.confidenceLabel} confidence
+            </span>
+          )}
+        </div>
+      </div>
+      {(meta.source || meta.rationale) && (
+        <p className="mt-1.5 text-xs text-muted">
+          {meta.source && (
+            <span className="capitalize">{formatSourceLabel(meta.source)}</span>
+          )}
+          {meta.source && meta.rationale ? ' · ' : ''}
+          {meta.rationale}
+        </p>
+      )}
+      {!readOnly && (
+        <input
+          type="range"
+          min={min}
+          max={max}
+          step={step}
+          value={value}
+          onChange={(e) => onChange(Number(e.target.value))}
+          className="mt-2 w-full accent-primary"
+          aria-label={label}
+        />
+      )}
+    </div>
+  )
 }
 
 export function PropertyAnalysisView({
@@ -54,12 +160,15 @@ export function PropertyAnalysisView({
   onShare,
   onBookmark,
   onAssumptionsChange,
+  assumptionPersistState = 'idle',
 }: PropertyAnalysisViewProps) {
   const property = useMemo(
     () => (rawProperty ? hydrateProperty(rawProperty) : null),
     [rawProperty],
   )
   const [assumptions, setAssumptions] = useState<Assumptions | null>(null)
+  const [overrideNotes, setOverrideNotes] = useState('')
+  const [financingOpen, setFinancingOpen] = useState(false)
   const [pdfBusy, setPdfBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const propertyKey = `${String(property?.id || '')}|${String(property?.address || '')}`
@@ -68,13 +177,22 @@ export function PropertyAnalysisView({
   useEffect(() => {
     if (!property) {
       setAssumptions(null)
+      setOverrideNotes('')
       lastKey.current = ''
       return
     }
     if (lastKey.current === propertyKey) return
     lastKey.current = propertyKey
     setAssumptions(assumptionsFromProperty(property))
+    setOverrideNotes(
+      typeof property.override_notes === 'string' ? property.override_notes : '',
+    )
   }, [property, propertyKey])
+
+  const assumptionMeta = useMemo(() => {
+    if (!property || !assumptions) return null
+    return assumptionMetaFromProperty(property, assumptions)
+  }, [property, assumptions])
 
   const finance = useMemo(() => {
     if (!property || !assumptions) return null
@@ -85,6 +203,35 @@ export function PropertyAnalysisView({
     if (!property) return []
     return forecastYearlyValues(property).map((v, i) => ({ year: `Y${i}`, value: v }))
   }, [property])
+
+  const showUnsaved =
+    assumptionMeta &&
+    hasCriticalAssumptionChanges(assumptionMeta) &&
+    (assumptionPersistState === 'unsaved' || assumptionPersistState === 'saving')
+
+  function applyAssumptionChange(key: keyof Assumptions, value: number) {
+    if (!assumptions || !property) return
+    const next = { ...assumptions, [key]: value }
+    setAssumptions(next)
+    const nextFinance = financeFromProperty(property, next)
+    onAssumptionsChange?.(next, nextFinance, overrideNotes)
+    trackPreviewEventDebounced(
+      `assumptions:${String(property.address || addressLabel || '')}`,
+      'assumption_change',
+      {
+        path: window.location.pathname,
+        label: String(property.address || addressLabel || ''),
+        payload: { address: property.address, [key]: value },
+      },
+    )
+  }
+
+  function handleOverrideNotesChange(notes: string) {
+    setOverrideNotes(notes)
+    if (assumptions && property && onAssumptionsChange) {
+      onAssumptionsChange(assumptions, financeFromProperty(property, assumptions), notes)
+    }
+  }
 
   async function handlePdf() {
     if (!property || !finance || !assumptions) return
@@ -109,43 +256,99 @@ export function PropertyAnalysisView({
     }
   }
 
+  const isGuest = variant === 'guest'
+
   return (
     <div className="grid gap-6 lg:grid-cols-[300px_1fr]">
       <aside className="space-y-4 rounded-2xl border border-border bg-card/90 p-4 shadow-sm">
-        <h2 className="font-display text-lg font-semibold">Assumptions</h2>
-        {assumptions ? (
+        <div>
+          <h2 className="font-display text-lg font-semibold">Assumptions</h2>
+          <p className="mt-1 text-xs leading-relaxed text-muted">
+            {isGuest
+              ? 'AI-proposed assumptions vs values used in this share (read-only).'
+              : 'AI proposes assumptions — adjust before you trust cash flow.'}
+          </p>
+        </div>
+        {assumptions && assumptionMeta ? (
           <div className="space-y-3 text-sm">
-            {ASSUMPTION_SLIDERS.map(([key, label, min, max, step]) => (
-              <label key={key} className="block">
-                <span className="text-muted">
-                  {label}: {assumptions[key]}
-                </span>
-                <input
-                  type="range"
+            {(showUnsaved || assumptionPersistState === 'saving') && !isGuest && (
+              <p className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-2.5 py-1.5 text-xs text-amber-900 dark:text-amber-100">
+                {assumptionPersistState === 'saving'
+                  ? 'Saving assumption changes…'
+                  : 'Unsaved assumption changes'}
+              </p>
+            )}
+            {assumptionPersistState === 'saved' &&
+              !isGuest &&
+              hasCriticalAssumptionChanges(assumptionMeta) && (
+              <p className="text-xs text-emerald-700 dark:text-emerald-300">Assumptions saved</p>
+            )}
+            <div className="space-y-2">
+              {CRITICAL_ASSUMPTION_SLIDERS.map(([key, label, min, max, step]) => (
+                <AssumptionRow
+                  key={key}
+                  fieldKey={key as CriticalAssumptionKey}
+                  label={CRITICAL_LABELS[key as CriticalAssumptionKey] || label}
                   min={min}
                   max={max}
                   step={step}
-                  value={assumptions[key]}
-                  onChange={(e) => {
-                    const next = { ...assumptions, [key]: Number(e.target.value) }
-                    setAssumptions(next)
-                    if (property && onAssumptionsChange) {
-                      onAssumptionsChange(next, financeFromProperty(property, next))
-                    }
-                    trackPreviewEventDebounced(
-                      `assumptions:${String(property?.address || addressLabel || '')}`,
-                      'assumption_change',
-                      {
-                        path: window.location.pathname,
-                        label: String(property?.address || addressLabel || ''),
-                        payload: { address: property?.address, [key]: Number(e.target.value) },
-                      },
-                    )
-                  }}
-                  className="mt-1 w-full accent-primary"
+                  value={assumptions[key as keyof Assumptions]}
+                  meta={assumptionMeta[key as CriticalAssumptionKey]}
+                  onChange={(value) => applyAssumptionChange(key as keyof Assumptions, value)}
+                  readOnly={isGuest}
+                />
+              ))}
+            </div>
+
+            {variant === 'account' && (
+              <label className="block">
+                <span className="text-xs font-medium text-muted">Why I changed this</span>
+                <textarea
+                  value={overrideNotes}
+                  onChange={(e) => handleOverrideNotesChange(e.target.value)}
+                  rows={2}
+                  placeholder="Optional — helps refine future AI estimates"
+                  className="mt-1 w-full resize-y rounded-lg border border-border bg-card px-2.5 py-2 text-sm outline-none focus:border-primary"
                 />
               </label>
-            ))}
+            )}
+
+            {!isGuest && (
+              <div>
+                <button
+                  type="button"
+                  onClick={() => setFinancingOpen((open) => !open)}
+                  className="flex w-full items-center justify-between rounded-lg border border-border px-2.5 py-2 text-left text-xs font-medium text-muted hover:bg-surface"
+                  aria-expanded={financingOpen}
+                >
+                  Financing &amp; carrying costs
+                  <span aria-hidden>{financingOpen ? '−' : '+'}</span>
+                </button>
+                {financingOpen && (
+                  <div className="mt-2 space-y-3 border-l-2 border-border pl-2">
+                    {FINANCING_ASSUMPTION_SLIDERS.map(([key, label, min, max, step]) => (
+                      <label key={key} className="block">
+                        <span className="text-muted">
+                          {label}: {assumptions[key]}
+                        </span>
+                        <input
+                          type="range"
+                          min={min}
+                          max={max}
+                          step={step}
+                          value={assumptions[key]}
+                          onChange={(e) =>
+                            applyAssumptionChange(key as keyof Assumptions, Number(e.target.value))
+                          }
+                          className="mt-1 w-full accent-primary"
+                        />
+                      </label>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
             {variant === 'account' && onBookmark && (
               <button
                 type="button"

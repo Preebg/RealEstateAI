@@ -6,6 +6,13 @@ import { AdminCatalogEditor } from '../components/AdminCatalogEditor'
 import { PropertyAnalysisView } from '../components/PropertyAnalysisView'
 import { firstCatalogUuid, fetchPropertyDetail, createPropertyShare, recordPropertyView } from '../lib/portfolio'
 import type { Assumptions } from '../lib/propertyAnalysis'
+import {
+  assumptionPersistSignature,
+  assumptionsFromProperty,
+  buildOverridePayload,
+  hasCriticalAssumptionChanges,
+  assumptionMetaFromProperty,
+} from '../lib/propertyAnalysis'
 import { isAdminUser } from '../lib/admin'
 import { useAuthStore } from '../lib/authStore'
 import { trackPreviewEvent } from '../lib/previewActivity'
@@ -33,6 +40,15 @@ export function SearchPage() {
   const [viewCount, setViewCount] = useState<number | null>(null)
   const autoStartedKey = useRef<string | null>(null)
   const lastRecalcSig = useRef<string>('')
+  const lastPersistedSig = useRef<string>('')
+  const overrideDebounceRef = useRef<number | null>(null)
+  const pendingOverrideRef = useRef<{
+    assumptions: Assumptions
+    overrideNotes: string
+  } | null>(null)
+  const [assumptionPersistState, setAssumptionPersistState] = useState<
+    'idle' | 'unsaved' | 'saving' | 'saved'
+  >('idle')
 
   const jobQuery = useQuery({
     queryKey: ['analysis', jobId],
@@ -89,6 +105,18 @@ export function SearchPage() {
   }, [property, viewCount])
 
   useEffect(() => {
+    if (!property) {
+      lastPersistedSig.current = ''
+      setAssumptionPersistState('idle')
+      return
+    }
+    const baselineAssumptions = assumptionsFromProperty(property)
+    const notes = typeof property.override_notes === 'string' ? property.override_notes : ''
+    lastPersistedSig.current = assumptionPersistSignature(baselineAssumptions, notes)
+    setAssumptionPersistState('idle')
+  }, [catalogId, property])
+
+  useEffect(() => {
     setViewCount(null)
     if (!catalogId) return
     let cancelled = false
@@ -135,6 +163,8 @@ export function SearchPage() {
     setError(null)
     setShareUrl(null)
     lastRecalcSig.current = ''
+    lastPersistedSig.current = ''
+    setAssumptionPersistState('idle')
     try {
       const res = await apiFetch<{ job_id: string }>('/api/analysis/start', {
         method: 'POST',
@@ -224,9 +254,105 @@ export function SearchPage() {
     })
   }
 
-  function persistFinance(next: Assumptions) {
-    if (!property || !jobId) return
-    const price = Number(property.price ?? property.predicted_value) || 0
+  async function persistAssumptionOverrides(
+    next: Assumptions,
+    overrideNotes: string,
+    propertySnapshot: Record<string, unknown>,
+  ) {
+    const propertyId = firstCatalogUuid(
+      propertySnapshot.id,
+      propertySnapshot.property_id,
+      kbMatch?.id,
+      kbMatch?.property_id,
+      paramId,
+    )
+    if (!propertyId) {
+      pendingOverrideRef.current = { assumptions: next, overrideNotes }
+      const meta = assumptionMetaFromProperty(propertySnapshot, next)
+      if (hasCriticalAssumptionChanges(meta) || overrideNotes.trim()) {
+        setAssumptionPersistState('unsaved')
+      }
+      return
+    }
+
+    const { body, hasChanges } = buildOverridePayload(propertySnapshot, next, overrideNotes)
+    if (!hasChanges) {
+      setAssumptionPersistState('idle')
+      return
+    }
+
+    const sig = assumptionPersistSignature(next, overrideNotes)
+    if (lastPersistedSig.current === sig) {
+      setAssumptionPersistState('saved')
+      return
+    }
+
+    setAssumptionPersistState('saving')
+    try {
+      await apiFetch('/api/properties/override', {
+        method: 'POST',
+        body: JSON.stringify({
+          property_id: propertyId,
+          address: String(propertySnapshot.address || query || ''),
+          ...body,
+        }),
+      })
+      lastPersistedSig.current = sig
+      setAssumptionPersistState('saved')
+      pendingOverrideRef.current = null
+    } catch {
+      setAssumptionPersistState('unsaved')
+    }
+  }
+
+  function scheduleAssumptionPersist(
+    next: Assumptions,
+    overrideNotes: string,
+    propertySnapshot: Record<string, unknown>,
+  ) {
+    const meta = assumptionMetaFromProperty(propertySnapshot, next)
+    if (hasCriticalAssumptionChanges(meta) || overrideNotes.trim()) {
+      setAssumptionPersistState((state) => (state === 'saving' ? state : 'unsaved'))
+    } else {
+      setAssumptionPersistState('idle')
+    }
+
+    if (overrideDebounceRef.current) {
+      window.clearTimeout(overrideDebounceRef.current)
+    }
+    overrideDebounceRef.current = window.setTimeout(() => {
+      overrideDebounceRef.current = null
+      void persistAssumptionOverrides(next, overrideNotes, propertySnapshot)
+    }, 800)
+  }
+
+  useEffect(() => {
+    if (!property || !pendingOverrideRef.current) return
+    const propertyId = firstCatalogUuid(
+      property.id,
+      property.property_id,
+      kbMatch?.id,
+      kbMatch?.property_id,
+      paramId,
+    )
+    if (!propertyId) return
+    const pending = pendingOverrideRef.current
+    pendingOverrideRef.current = null
+    void persistAssumptionOverrides(pending.assumptions, pending.overrideNotes, property)
+  }, [property, kbMatch, paramId])
+
+  function persistFinance(
+    next: Assumptions,
+    overrideNotes = '',
+    propertySnapshot?: Record<string, unknown>,
+  ) {
+    const activeProperty = propertySnapshot || property
+    if (!activeProperty) return
+    if (propertySnapshot || property) {
+      scheduleAssumptionPersist(next, overrideNotes, activeProperty)
+    }
+    if (!jobId) return
+    const price = Number(activeProperty.price ?? activeProperty.predicted_value) || 0
     const sig = `${jobId}|${next.monthly_rent}|${next.down_payment_pct}|${next.interest_rate}|${next.loan_term}|${next.closing_costs_pct}|${next.tax_rate}|${next.monthly_insurance}|${next.monthly_hoa}|${next.maint_percent}|${next.vacancy_reserve_pct}|${next.management_fee_pct}`
     if (lastRecalcSig.current === sig) return
     lastRecalcSig.current = sig
@@ -236,8 +362,8 @@ export function SearchPage() {
         ...next,
         price,
         job_id: jobId,
-        location_score: Number(property.location_score) || 5,
-        forecast_rate: Number(property.forecast_rate) || 0,
+        location_score: Number(activeProperty.location_score) || 5,
+        forecast_rate: Number(activeProperty.forecast_rate) || 0,
       }),
     }).catch(() => {
       // Client-side breakdown is already on screen.
@@ -272,7 +398,10 @@ export function SearchPage() {
       shareCopied={shareCopied}
       onShare={() => void createShare()}
       onBookmark={() => void bookmark()}
-      onAssumptionsChange={(next) => persistFinance(next)}
+      onAssumptionsChange={(next, _finance, overrideNotes) =>
+        persistFinance(next, overrideNotes)
+      }
+      assumptionPersistState={assumptionPersistState}
       header={
         <>
           <header>

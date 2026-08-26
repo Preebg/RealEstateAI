@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import re
 from datetime import datetime, timedelta, timezone
+from statistics import median
 from typing import Any
 from uuid import UUID
 
@@ -472,7 +473,7 @@ def lookup_property(address: str, user_id: str | None = None) -> dict[str, Any] 
                 record, overrides.get(str(record["id"]))
             )
             record["from_kb"] = True
-        return record
+        return enrich_property_for_ui(record)
 
     # Fallback: normalized-key match against the active catalog index.
     data = get_kb_raw_data(user_id)
@@ -486,11 +487,11 @@ def lookup_property(address: str, user_id: str | None = None) -> dict[str, Any] 
         if detail:
             record = _normalize_record_numerics(detail)
             record["from_kb"] = True
-            return record
+            return enrich_property_for_ui(record)
 
     record = _normalize_record_numerics(hit)
     record["from_kb"] = True
-    return record
+    return enrich_property_for_ui(record)
 
 
 def lookup_catalog_property(
@@ -513,7 +514,7 @@ def lookup_catalog_property(
                     record, overrides.get(str(record["id"]))
                 )
                 record["from_kb"] = True
-            return record
+            return enrich_property_for_ui(record)
     addr = str(address or "").strip()
     if addr:
         return lookup_property(addr, user_id=user_id)
@@ -1964,6 +1965,365 @@ def save_harvest_property(
     return response
 
 
+def enrich_property_for_ui(property_data: dict[str, Any]) -> dict[str, Any]:
+    """Attach provenance, confidence, and assumption source metadata for the UI."""
+    from data_provenance import build_assumption_sources, ensure_data_provenance
+
+    ensure_data_provenance(property_data)
+    property_data["assumption_sources"] = build_assumption_sources(property_data)
+    return property_data
+
+
+ASSUMPTION_CALIBRATION_MIN_SAMPLES = 3
+ASSUMPTION_CALIBRATION_MAX_CHARS = 1500
+
+CALIBRATION_FIELD_SPECS: tuple[dict[str, Any], ...] = (
+    {
+        "field": "rent",
+        "ai_key": "original_ai_rent",
+        "user_key": "rent",
+        "label": "rent",
+        "is_money": True,
+    },
+    {
+        "field": "vacancy_rate",
+        "ai_key": "ai_vacancy_rate",
+        "user_key": "vacancy_rate",
+        "label": "vacancy",
+        "is_money": False,
+    },
+    {
+        "field": "maint_percent",
+        "ai_key": "original_ai_maint",
+        "user_key": "maint_percent",
+        "label": "maint",
+        "is_money": False,
+    },
+    {
+        "field": "management_fee",
+        "ai_key": "ai_management_fee",
+        "user_key": "management_fee",
+        "label": "mgmt fee",
+        "is_money": False,
+    },
+)
+
+
+def _safe_median(values: list[float]) -> float | None:
+    if not values:
+        return None
+    return float(median(values))
+
+
+def _fetch_calibration_records() -> list[dict[str, Any]]:
+    """Non-outlier overrides joined with canonical property AI baselines."""
+    from authenticate import get_service_client
+
+    client = get_service_client() or get_client()
+    try:
+        response = client.table("user_property_overrides").select("*").execute()
+    except APIError as exc:
+        report_error(log, "kb_calibration_fetch_failed", exc)
+        return []
+
+    canonical_by_id = {
+        str(row["id"]): row for row in _fetch_canonical_properties() if row.get("id")
+    }
+    records: list[dict[str, Any]] = []
+    for override in response.data or []:
+        if override.get("is_outlier"):
+            continue
+        prop_id = str(override.get("property_id") or "")
+        canonical = canonical_by_id.get(prop_id)
+        if not canonical:
+            continue
+        market = _infer_market_city(canonical)
+        if not market:
+            continue
+        records.append(
+            {
+                "market_city": market,
+                "override": override,
+                "canonical": canonical,
+            }
+        )
+    return records
+
+
+def _ai_baseline_for_calibration(
+    canonical: dict[str, Any],
+    spec: dict[str, Any],
+) -> float | None:
+    ai_key = spec["ai_key"]
+    raw = canonical.get(ai_key)
+    if raw is not None:
+        try:
+            value = float(raw)
+            if value > 0 or spec["field"] != "rent":
+                return value
+        except (TypeError, ValueError):
+            pass
+    if spec["field"] == "rent":
+        value = get_ai_baseline_rent(canonical)
+        return value if value > 0 else None
+    if spec["field"] == "maint_percent":
+        value = get_ai_baseline_maint(canonical)
+        return value if value > 0 else None
+    return None
+
+
+def _build_market_calibration_aggregates(
+    records: list[dict[str, Any]],
+) -> dict[str, dict[str, dict[str, Any]]]:
+    """market_city -> field -> aggregate stats for calibration prompt text."""
+    buckets: dict[str, dict[str, dict[str, list[float]]]] = {}
+
+    for record in records:
+        market = str(record["market_city"])
+        canonical = record["canonical"]
+        override = record["override"]
+        market_bucket = buckets.setdefault(market, {})
+
+        for spec in CALIBRATION_FIELD_SPECS:
+            user_raw = override.get(spec["user_key"])
+            if user_raw is None:
+                continue
+            try:
+                user_val = float(user_raw)
+            except (TypeError, ValueError):
+                continue
+            if spec["field"] == "rent" and user_val <= 0:
+                continue
+
+            ai_val = _ai_baseline_for_calibration(canonical, spec)
+            if ai_val is None:
+                continue
+
+            field_bucket = market_bucket.setdefault(
+                spec["field"],
+                {"ai": [], "user": [], "delta": [], "delta_pct": []},
+            )
+            field_bucket["ai"].append(ai_val)
+            field_bucket["user"].append(user_val)
+            delta = user_val - ai_val
+            field_bucket["delta"].append(delta)
+            if spec["is_money"] and ai_val > 0:
+                field_bucket["delta_pct"].append(delta / ai_val * 100.0)
+
+    aggregates: dict[str, dict[str, dict[str, Any]]] = {}
+    for market, fields in buckets.items():
+        market_stats: dict[str, dict[str, Any]] = {}
+        for field_name, samples in fields.items():
+            n = len(samples["user"])
+            if n < ASSUMPTION_CALIBRATION_MIN_SAMPLES:
+                continue
+            median_ai = _safe_median(samples["ai"])
+            median_user = _safe_median(samples["user"])
+            median_delta = _safe_median(samples["delta"])
+            if median_ai is None or median_user is None or median_delta is None:
+                continue
+            stat: dict[str, Any] = {
+                "n": n,
+                "median_ai": round(median_ai, 2),
+                "median_user": round(median_user, 2),
+                "median_delta": round(median_delta, 2),
+            }
+            if samples["delta_pct"]:
+                median_delta_pct = _safe_median(samples["delta_pct"])
+                if median_delta_pct is not None:
+                    stat["median_delta_pct"] = round(median_delta_pct, 1)
+            market_stats[field_name] = stat
+        if market_stats:
+            aggregates[market] = market_stats
+    return aggregates
+
+
+def _format_calibration_field_line(
+    spec: dict[str, Any],
+    stats: dict[str, Any],
+) -> str:
+    n = int(stats["n"])
+    label = spec["label"]
+    if spec["is_money"]:
+        median_ai = float(stats["median_ai"])
+        median_user = float(stats["median_user"])
+        pct = float(stats.get("median_delta_pct", 0.0))
+        if abs(pct) < 0.5:
+            return (
+                f"- {label}: users typically near AI "
+                f"(n={n}, AI median ${median_ai:,.0f} → user ${median_user:,.0f})"
+            )
+        return (
+            f"- {label}: users typically set {pct:+.0f}% vs AI "
+            f"(n={n}, AI median ${median_ai:,.0f} → user ${median_user:,.0f})"
+        )
+
+    median_delta = float(stats["median_delta"])
+    if abs(median_delta) < 0.05:
+        return f"- {label}: users typically near AI default (n={n})"
+    return f"- {label}: users typically {median_delta:+.1f} pp vs AI default (n={n})"
+
+
+def _calibration_guidance_for_market(
+    market: str,
+    field_stats: dict[str, dict[str, Any]],
+) -> list[str]:
+    tips: list[str] = []
+    vacancy = field_stats.get("vacancy_rate")
+    if vacancy and int(vacancy["n"]) >= ASSUMPTION_CALIBRATION_MIN_SAMPLES:
+        target = float(vacancy["median_user"])
+        lo = max(1.0, target - 0.5)
+        hi = min(20.0, target + 0.5)
+        tips.append(
+            f"When underwriting {market} SFRs, prefer vacancy {lo:.0f}–{hi:.0f}% "
+            "unless listing evidence suggests otherwise."
+        )
+    mgmt = field_stats.get("management_fee")
+    if mgmt and int(mgmt["n"]) >= ASSUMPTION_CALIBRATION_MIN_SAMPLES:
+        target = float(mgmt["median_user"])
+        tips.append(
+            f"For {market}, investors often assume ~{target:.0f}% management fee "
+            "when research is ambiguous."
+        )
+    rent = field_stats.get("rent")
+    if rent and int(rent["n"]) >= ASSUMPTION_CALIBRATION_MIN_SAMPLES:
+        pct = float(rent.get("median_delta_pct", 0.0))
+        if abs(pct) >= 1.0:
+            direction = "above" if pct > 0 else "below"
+            tips.append(
+                f"Calibrated rent in {market} tends {direction} AI estimates "
+                f"(median {pct:+.0f}% across {rent['n']} overrides)."
+            )
+    return tips
+
+
+def get_assumption_learning_context(
+    market_city: str | None = None,
+    user_id: str | None = None,
+) -> str:
+    """
+    Market-level aggregate override calibration for LLM synthesis prompts.
+
+    Privacy: no user IDs or addresses — metro aggregates only.
+    """
+    _ = user_id  # reserved for future per-user weighting; aggregates are global today
+    records = _fetch_calibration_records()
+    if not records:
+        return ""
+
+    aggregates = _build_market_calibration_aggregates(records)
+    if not aggregates:
+        return ""
+
+    preferred = str(market_city or "").strip()
+    ranked_others = sorted(
+        (m for m in aggregates if m != preferred),
+        key=lambda m: sum(int(v["n"]) for v in aggregates[m].values()),
+        reverse=True,
+    )
+    selected: list[str] = []
+    if preferred and preferred in aggregates:
+        selected.append(preferred)
+    for market in ranked_others:
+        if len(selected) >= 3:
+            break
+        selected.append(market)
+
+    lines = ["\n--- ASSUMPTION CALIBRATION (human overrides, aggregated) ---"]
+    guidance: list[str] = []
+    for market in selected:
+        field_stats = aggregates[market]
+        field_lines = [
+            _format_calibration_field_line(spec, field_stats[spec["field"]])
+            for spec in CALIBRATION_FIELD_SPECS
+            if spec["field"] in field_stats
+        ]
+        if not field_lines:
+            continue
+        lines.append(f"{market}:")
+        lines.extend(field_lines)
+        if market == preferred:
+            guidance.extend(_calibration_guidance_for_market(market, field_stats))
+
+    if len(lines) <= 1:
+        return ""
+
+    lines.extend(guidance)
+    text = "\n".join(lines) + "\n"
+    if len(text) > ASSUMPTION_CALIBRATION_MAX_CHARS:
+        text = text[: ASSUMPTION_CALIBRATION_MAX_CHARS - 4].rstrip() + "...\n"
+    return text
+
+
+def _override_learning_context(user_id: str | None) -> str:
+    """Summarize this user's override patterns for LLM prompt context."""
+    telemetry = get_telemetry_stats(user_id)
+    sample = int(telemetry.get("sample_count") or 0)
+    if sample < 1:
+        return ""
+
+    lines = ["\n--- USER OVERRIDE LEARNING (this investor) ---"]
+    mae = telemetry.get("mae_rent")
+    if mae is not None and sample >= 1:
+        lines.append(
+            f"Rent adjustments vs AI baseline: avg absolute delta ${float(mae):,.0f} "
+            f"across {sample} saved override(s)."
+        )
+    outlier_count = int(telemetry.get("outlier_count") or 0)
+    if outlier_count:
+        lines.append(
+            f"{outlier_count} rent override(s) flagged as outliers (>50% from AI) — "
+            "treat as property-specific judgment, not market norm."
+        )
+
+    uid = _resolve_user_id(user_id)
+    if uid:
+        overrides = _fetch_user_overrides_map(uid)
+        canonical_by_id = {
+            str(row["id"]): row for row in _fetch_canonical_properties() if row.get("id")
+        }
+        rent_deltas: list[float] = []
+        for prop_id, override in overrides.items():
+            if override.get("is_outlier"):
+                continue
+            canonical = canonical_by_id.get(prop_id)
+            if not canonical:
+                continue
+            ai_rent = canonical.get("original_ai_rent")
+            user_rent = override.get("rent")
+            if ai_rent is None or user_rent is None:
+                continue
+            try:
+                ai_val = float(ai_rent)
+                user_val = float(user_rent)
+                if ai_val > 0:
+                    rent_deltas.append((user_val - ai_val) / ai_val * 100.0)
+            except (TypeError, ValueError):
+                continue
+        if len(rent_deltas) >= 3:
+            avg_pct = sum(rent_deltas) / len(rent_deltas)
+            direction = "above" if avg_pct > 1 else "below" if avg_pct < -1 else "near"
+            lines.append(
+                f"This investor typically sets rent {direction} AI baseline "
+                f"(avg {avg_pct:+.1f}% across {len(rent_deltas)} properties)."
+            )
+
+    notes_samples: list[str] = []
+    if uid:
+        for override in overrides.values():
+            note = str(override.get("override_notes") or "").strip()
+            if note and len(note) >= 12:
+                notes_samples.append(note[:120])
+            if len(notes_samples) >= 3:
+                break
+    if notes_samples:
+        lines.append("Recent override rationale snippets:")
+        for note in notes_samples:
+            lines.append(f'- "{note}"')
+
+    return "\n".join(lines) + "\n"
+
+
 def get_kb_context(user_id: str | None = None) -> str:
     """Pull recent examples and scanned addresses for the LLM (scoped to user)."""
     rows = _fetch_properties(user_id)
@@ -1977,6 +2337,8 @@ def get_kb_context(user_id: str | None = None) -> str:
             f"Address: {item['address']} | Market: {market} | "
             f"Predicted: {item.get('predicted_value')}\n"
         )
+
+    context += _override_learning_context(user_id)
 
     scanned = [str(item["address"]) for item in rows if item.get("address")]
     if scanned:
@@ -2163,6 +2525,8 @@ __all__ = [
     "archive_stale_properties",
     "ACTIVE_PROPERTY_ARCHIVE_DAYS",
     "get_kb_context",
+    "enrich_property_for_ui",
+    "get_assumption_learning_context",
     "get_market_pulse",
     "get_telemetry_stats",
 ]

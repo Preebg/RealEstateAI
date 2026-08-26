@@ -11,7 +11,7 @@ from engine import (
     safe_float,
 )
 from finance import analyze_investment
-from knowledge_base import lookup_property, save_harvest_property
+from knowledge_base import enrich_property_for_ui, lookup_property, save_harvest_property
 from services.deferred_analysis import build_deferred_task_queue
 
 
@@ -58,7 +58,7 @@ def start_property_analysis(
             # Catalog rows are already underwritten. Skip get_final_analysis (geocode +
             # Gemini cash-flow recheck) so Individual Search does not sit on "still
             # computing" after the listing is already on screen.
-            property_data = dict(cached)
+            property_data = enrich_property_for_ui(dict(cached))
             property_data["from_kb"] = True
             property_data["address"] = cleaned
             queue = build_deferred_task_queue(property_data, guest_mode=guest_mode)
@@ -90,6 +90,7 @@ def start_property_analysis(
                 _attach_saved_catalog_id(final_result, saved)
             except Exception:  # noqa: BLE001 — keep the on-screen analysis
                 pass
+        enrich_property_for_ui(final_result)
         queue = build_deferred_task_queue(final_result, guest_mode=guest_mode)
         return {
             "property_data": final_result,

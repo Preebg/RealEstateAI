@@ -44,6 +44,7 @@ from rent_comps_analysis import (
 from data_provenance import attach_data_provenance
 from knowledge_base import (
     backfill_property_rent,
+    get_assumption_learning_context,
     get_kb_context,
     lookup_property,
     normalize_address_key,
@@ -4032,6 +4033,7 @@ def _synthesis_prompt(
     user_id: str | None = None,
 ) -> str:
     kb_context = get_kb_context(user_id)
+    calibration_context = get_assumption_learning_context(market_city, user_id=user_id)
     research_payload = dict(research)
     listing_description = str(research_payload.pop("listing_description", "") or "").strip()
     discovery_model = str(research.get("discovery_model", "") or "").strip()
@@ -4064,6 +4066,7 @@ LISTING DESCRIPTION (agent/public remarks — paraphrase for summary; NEVER copy
 
 CONTEXT FROM DATABASE:
 {kb_context}
+{calibration_context}
 
 RESEARCH DATA (verified extraction):
 {json.dumps(research_payload, indent=2)}
@@ -4092,6 +4095,13 @@ RENT (critical):
   (total building gross monthly rent). Do NOT substitute a single-family Rent Zestimate.
 - For duplex/triplex/multifamily, rent must reflect ALL units combined.
 - If listing_rent_notes mention annual income, divide by 12 for monthly rent.
+
+ASSUMPTION CALIBRATION RULES:
+- Use ASSUMPTION CALIBRATION data above to adjust default vacancy, management fee, and rent
+  estimates when research is ambiguous.
+- Always state your key assumptions (rent, vacancy, management fee) in the summary.
+- Never treat AI defaults or market defaults as ground truth when calibration shows
+  systematic human corrections for this metro.
 
 Return ONLY JSON with these keys:
 {{

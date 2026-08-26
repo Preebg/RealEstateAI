@@ -407,3 +407,70 @@ def confidence_badge_color(score: float) -> str:
     if score >= 0.40:
         return "#c45c00"
     return "#a31d1d"
+
+
+def build_assumption_sources(property_data: dict[str, Any]) -> dict[str, dict[str, str]]:
+    """
+    Human-readable provenance for underwriting-critical assumptions.
+
+    Derived from comps, market defaults, and listing research — no new scrapers.
+    """
+    sources: dict[str, dict[str, str]] = {}
+
+    rent_comps = property_data.get("rent_comps_analysis")
+    if isinstance(rent_comps, dict):
+        comp_count = int(rent_comps.get("comp_count") or 0)
+        median_rent = _safe_float(rent_comps.get("median_monthly_rent"))
+        if comp_count >= 2 and median_rent > 0:
+            sources["rent"] = {
+                "source": "rent_comps",
+                "detail": f"{comp_count} comps, median ${median_rent:,.0f}/mo",
+            }
+
+    if "rent" not in sources:
+        stated = _safe_float(property_data.get("stated_gross_monthly_rent"))
+        if stated > 0:
+            sources["rent"] = {
+                "source": "listing_rent",
+                "detail": f"Stated listing rent ${stated:,.0f}/mo",
+            }
+
+    if "rent" not in sources:
+        price = _safe_float(property_data.get("price") or property_data.get("predicted_value"))
+        ai_rent = _safe_float(property_data.get("original_ai_rent") or property_data.get("rent"))
+        if price > 0 and ai_rent > 0 and abs(ai_rent - price * 0.01) / max(ai_rent, 1) < 0.05:
+            sources["rent"] = {
+                "source": "one_percent_rule",
+                "detail": f"1% rule on ${price:,.0f} list price",
+            }
+        elif ai_rent > 0:
+            sources["rent"] = {
+                "source": "ai_synthesis",
+                "detail": "AI synthesis from listing and market signals",
+            }
+
+    market_city = str(property_data.get("market_city") or "").strip()
+    vacancy = _safe_float(property_data.get("ai_vacancy_rate"))
+    mgmt = _safe_float(property_data.get("ai_management_fee"))
+    if vacancy > 0:
+        detail = f"{market_city} default {vacancy:g}%" if market_city else f"Market default {vacancy:g}%"
+        sources["vacancy_rate"] = {"source": "market_default", "detail": detail}
+    if mgmt > 0:
+        detail = f"{market_city} default {mgmt:g}%" if market_city else f"Market default {mgmt:g}%"
+        sources["management_fee"] = {"source": "market_default", "detail": detail}
+
+    maint = _safe_float(property_data.get("original_ai_maint") or property_data.get("maint_percent"))
+    if maint > 0:
+        year = property_data.get("year_built")
+        if year:
+            sources["maint_percent"] = {
+                "source": "age_adjusted",
+                "detail": f"{maint:g}% CapEx reserve (built {year})",
+            }
+        else:
+            sources["maint_percent"] = {
+                "source": "ai_synthesis",
+                "detail": f"{maint:g}% maintenance reserve",
+            }
+
+    return sources

@@ -527,9 +527,11 @@ Schema lives in `docker/postgres/init/` and is applied on first Postgres volume 
 | `/auth/google/callback` | Google OAuth | PKCE callback; Worker proxies code exchange to FastAPI first, Worker-local secret only as fallback |
 | `/legal/:doc` | Anyone | Terms / privacy (DB-backed with code defaults) |
 | `/` Home | Signed-in | Portfolio map + filter/sort (price, cash flow, cash-on-cash, year built, views); Property of the Day modal |
-| `/search` | Signed-in | Individual address analysis; records unique in-app views |
+| `/search` | Signed-in | Individual address analysis; editable assumptions with AI baseline transparency; auto-saves overrides; records unique in-app views |
 | `/compare` | Signed-in | Side-by-side underwriting + client-side PDF |
-| `/share/:token` | Guest | Read-only share (no login) |
+| `/share/:token` | Guest | Read-only share (no login); AI vs displayed assumptions visible, no save |
+
+**Assumption transparency & calibration:** On Individual Search, users see AI-proposed rent, vacancy, maintenance, and management-fee baselines alongside their adjustments (with confidence/source hints). Overrides persist to `user_property_overrides` and feed market-level calibration aggregates injected into future LLM synthesis prompts — no model fine-tuning.
 | `/validation` | Admin | Backtesting upload |
 | `/activity` | Admin | Preview-account telemetry; add / permanently purge demo usernames |
 | `/usage` | Admin | Signed-in usage analytics (audience filter, summaries, CSV export) |

@@ -23,6 +23,59 @@ export type Assumptions = {
   management_fee_pct: number
 }
 
+export type AssumptionMeta = {
+  aiValue: number
+  userValue: number
+  changed: boolean
+  confidence?: number
+  confidenceLabel?: string
+  source?: string
+  rationale?: string
+}
+
+export type CriticalAssumptionKey =
+  | 'monthly_rent'
+  | 'vacancy_reserve_pct'
+  | 'maint_percent'
+  | 'management_fee_pct'
+
+export const CRITICAL_ASSUMPTION_KEYS: readonly CriticalAssumptionKey[] = [
+  'monthly_rent',
+  'vacancy_reserve_pct',
+  'maint_percent',
+  'management_fee_pct',
+] as const
+
+const ASSUMPTION_FIELD_MAP: Record<
+  CriticalAssumptionKey,
+  { aiKey: string; provenanceKey: string; sourceKey: string; isMoney: boolean }
+> = {
+  monthly_rent: {
+    aiKey: 'original_ai_rent',
+    provenanceKey: 'rent',
+    sourceKey: 'rent',
+    isMoney: true,
+  },
+  vacancy_reserve_pct: {
+    aiKey: 'ai_vacancy_rate',
+    provenanceKey: 'vacancy_rate',
+    sourceKey: 'vacancy_rate',
+    isMoney: false,
+  },
+  maint_percent: {
+    aiKey: 'original_ai_maint',
+    provenanceKey: 'maint_percent',
+    sourceKey: 'maint_percent',
+    isMoney: false,
+  },
+  management_fee_pct: {
+    aiKey: 'ai_management_fee',
+    provenanceKey: 'management_fee',
+    sourceKey: 'management_fee',
+    isMoney: false,
+  },
+}
+
 export const ASSUMPTION_SLIDERS = [
   ['monthly_rent', 'Monthly rent', 0, 20000, 50],
   ['down_payment_pct', 'Down payment %', 0, 100, 1],
@@ -36,6 +89,151 @@ export const ASSUMPTION_SLIDERS = [
   ['vacancy_reserve_pct', 'Vacancy %', 0, 30, 0.5],
   ['management_fee_pct', 'Mgmt fee %', 0, 20, 0.5],
 ] as const
+
+export type AssumptionSliderConfig = (typeof ASSUMPTION_SLIDERS)[number]
+
+export type FinancingAssumptionKey = Exclude<AssumptionSliderConfig[0], CriticalAssumptionKey>
+
+export const FINANCING_ASSUMPTION_KEYS = ASSUMPTION_SLIDERS.map(([key]) => key).filter(
+  (key): key is FinancingAssumptionKey =>
+    !CRITICAL_ASSUMPTION_KEYS.includes(key as CriticalAssumptionKey),
+)
+
+export const CRITICAL_ASSUMPTION_SLIDERS = CRITICAL_ASSUMPTION_KEYS.map((key) =>
+  ASSUMPTION_SLIDERS.find(([k]) => k === key)!,
+)
+
+export const FINANCING_ASSUMPTION_SLIDERS = ASSUMPTION_SLIDERS.filter(
+  ([key]) => !CRITICAL_ASSUMPTION_KEYS.includes(key as CriticalAssumptionKey),
+)
+
+export function confidenceLabel(score: number): string {
+  if (score >= 0.8) return 'High'
+  if (score >= 0.6) return 'Medium'
+  if (score >= 0.4) return 'Low'
+  return 'Very Low'
+}
+
+export function aiBaselineFromProperty(
+  property: Record<string, unknown>,
+  key: CriticalAssumptionKey,
+): number {
+  const map = ASSUMPTION_FIELD_MAP[key]
+  const raw = property[map.aiKey]
+  const parsed = num(raw, NaN)
+  if (Number.isFinite(parsed)) return parsed
+  if (key === 'monthly_rent') {
+    return num(property.rent ?? property.estimated_rent, 0)
+  }
+  if (key === 'vacancy_reserve_pct') return 5
+  if (key === 'management_fee_pct') return 10
+  return num(property.maint_percent, 1)
+}
+
+export function assumptionMetaFromProperty(
+  property: Record<string, unknown>,
+  assumptions: Assumptions,
+): Record<CriticalAssumptionKey, AssumptionMeta> {
+  const confidenceScores =
+    property.confidence_score && typeof property.confidence_score === 'object'
+      ? (property.confidence_score as Record<string, number>)
+      : {}
+  const assumptionSources =
+    property.assumption_sources && typeof property.assumption_sources === 'object'
+      ? (property.assumption_sources as Record<string, { source?: string; detail?: string }>)
+      : {}
+
+  const meta = {} as Record<CriticalAssumptionKey, AssumptionMeta>
+  for (const key of CRITICAL_ASSUMPTION_KEYS) {
+    const map = ASSUMPTION_FIELD_MAP[key]
+    const aiValue = aiBaselineFromProperty(property, key)
+    const userValue = assumptions[key]
+    const changed = Math.abs(userValue - aiValue) > 0.01
+    const confidence = confidenceScores[map.provenanceKey]
+    const sourceInfo = assumptionSources[map.sourceKey]
+    meta[key] = {
+      aiValue,
+      userValue,
+      changed,
+      confidence: Number.isFinite(confidence) ? confidence : undefined,
+      confidenceLabel: Number.isFinite(confidence) ? confidenceLabel(confidence) : undefined,
+      source: sourceInfo?.source,
+      rationale: sourceInfo?.detail,
+    }
+  }
+  return meta
+}
+
+export function hasCriticalAssumptionChanges(
+  meta: Record<CriticalAssumptionKey, AssumptionMeta>,
+): boolean {
+  return CRITICAL_ASSUMPTION_KEYS.some((key) => meta[key].changed)
+}
+
+export function formatAssumptionDelta(
+  key: CriticalAssumptionKey,
+  meta: AssumptionMeta,
+): string | null {
+  if (!meta.changed) return null
+  const delta = meta.userValue - meta.aiValue
+  if (key === 'monthly_rent') {
+    const sign = delta >= 0 ? '+' : '−'
+    return `You: ${sign}${money(Math.abs(delta))} vs AI`
+  }
+  const sign = delta >= 0 ? '+' : '−'
+  return `You: ${sign}${Math.abs(delta).toFixed(1)} pp ${key.includes('vacancy') ? 'vacancy' : key.includes('maint') ? 'maint' : 'mgmt'}`
+}
+
+export function assumptionPersistSignature(
+  assumptions: Assumptions,
+  overrideNotes: string,
+): string {
+  return [
+    assumptions.monthly_rent,
+    assumptions.maint_percent,
+    assumptions.vacancy_reserve_pct,
+    assumptions.management_fee_pct,
+    overrideNotes.trim(),
+  ].join('|')
+}
+
+export function buildOverridePayload(
+  property: Record<string, unknown>,
+  assumptions: Assumptions,
+  overrideNotes: string,
+): { body: Record<string, unknown>; hasChanges: boolean } {
+  const meta = assumptionMetaFromProperty(property, assumptions)
+  const body: Record<string, unknown> = {
+    override_notes: overrideNotes.trim(),
+    is_outlier: false,
+  }
+  let hasChanges = false
+
+  if (meta.monthly_rent.changed) {
+    body.rent = assumptions.monthly_rent
+    hasChanges = true
+    const aiRent = meta.monthly_rent.aiValue
+    if (aiRent > 0) {
+      const deviation = (Math.abs(assumptions.monthly_rent - aiRent) / aiRent) * 100
+      if (deviation > 50) body.is_outlier = true
+    }
+  }
+  if (meta.maint_percent.changed) {
+    body.maint_percent = assumptions.maint_percent
+    hasChanges = true
+  }
+  if (meta.vacancy_reserve_pct.changed) {
+    body.vacancy_rate = assumptions.vacancy_reserve_pct
+    hasChanges = true
+  }
+  if (meta.management_fee_pct.changed) {
+    body.management_fee = assumptions.management_fee_pct
+    hasChanges = true
+  }
+
+  if (overrideNotes.trim()) hasChanges = true
+  return { body, hasChanges }
+}
 
 export function num(v: unknown, fallback = 0): number {
   const n = Number(v)

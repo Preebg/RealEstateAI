@@ -4616,6 +4616,8 @@ class TestDiscoveryScraper(unittest.TestCase):
         self.assertEqual(result["image_urls"], list(self._EXPECTED_DETAIL_IMAGES))
 
     def test_synthesis_prompt_separates_listing_description(self):
+        from unittest.mock import patch
+
         from engine import _synthesis_prompt
 
         research = {
@@ -4623,13 +4625,18 @@ class TestDiscoveryScraper(unittest.TestCase):
             "listing_description": "Gorgeous turnkey rental with granite counters.",
             "stated_gross_monthly_rent": 1850,
         }
-        with patch("engine.get_kb_context", return_value=""):
+        with patch("engine.get_kb_context", return_value=""), patch(
+            "engine.get_assumption_learning_context",
+            return_value="",
+        ):
             prompt = _synthesis_prompt(research, "Rochester")
         self.assertIn("LISTING DESCRIPTION", prompt)
         self.assertIn("Gorgeous turnkey rental", prompt)
         self.assertNotIn('"listing_description"', prompt)
 
     def test_synthesis_prompt_scraper_block_with_metadata_and_rules(self):
+        from unittest.mock import patch
+
         from engine import _synthesis_prompt
 
         research = {
@@ -4642,7 +4649,10 @@ class TestDiscoveryScraper(unittest.TestCase):
             "vacancy_rate": 6.0,
             "management_fee": 10.0,
         }
-        with patch("engine.get_kb_context", return_value=""):
+        with patch("engine.get_kb_context", return_value=""), patch(
+            "engine.get_assumption_learning_context",
+            return_value="",
+        ):
             prompt = _synthesis_prompt(research, "Rochester")
         self.assertIn("LISTING DESCRIPTION (scraper", prompt)
         self.assertIn("Turnkey duplex with long-term tenants.", prompt)
@@ -4653,6 +4663,124 @@ class TestDiscoveryScraper(unittest.TestCase):
         self.assertIn("SUMMARY RULES:", prompt)
         self.assertIn("Never paste sentences from the listing description.", prompt)
         self.assertNotIn('"listing_description"', prompt)
+
+    def test_synthesis_prompt_includes_calibration_block(self):
+        from unittest.mock import patch
+
+        from engine import _synthesis_prompt
+
+        research = {"price": 210000, "stated_gross_monthly_rent": 1850}
+        calibration = (
+            "\n--- ASSUMPTION CALIBRATION (human overrides, aggregated) ---\n"
+            "Rochester:\n"
+            "- rent: users typically set +8% vs AI (n=12, AI median $1,500 → user $1,620)\n"
+        )
+        with patch("engine.get_kb_context", return_value=""), patch(
+            "engine.get_assumption_learning_context",
+            return_value=calibration,
+        ):
+            prompt = _synthesis_prompt(research, "Rochester")
+        self.assertIn("ASSUMPTION CALIBRATION", prompt)
+        self.assertIn("ASSUMPTION CALIBRATION RULES", prompt)
+        self.assertIn("Never treat AI defaults", prompt)
+        self.assertIn("users typically set +8% vs AI", prompt)
+
+
+class TestAssumptionLearningContext(unittest.TestCase):
+    def test_returns_empty_with_insufficient_samples(self):
+        from unittest.mock import patch
+
+        from knowledge_base import get_assumption_learning_context
+
+        with patch("knowledge_base._fetch_calibration_records", return_value=[]):
+            self.assertEqual(get_assumption_learning_context("Rochester"), "")
+
+        records = [
+            {
+                "market_city": "Rochester",
+                "override": {"rent": 1600, "is_outlier": False},
+                "canonical": {
+                    "original_ai_rent": 1500,
+                    "ai_vacancy_rate": 6,
+                    "market_city": "Rochester",
+                },
+            }
+            for _ in range(2)
+        ]
+        with patch("knowledge_base._fetch_calibration_records", return_value=records):
+            self.assertEqual(get_assumption_learning_context("Rochester"), "")
+
+    def test_returns_formatted_block_with_mocked_overrides(self):
+        from unittest.mock import patch
+
+        from knowledge_base import get_assumption_learning_context
+
+        records = [
+            {
+                "market_city": "Rochester",
+                "override": {"rent": 1620 + i * 10, "vacancy_rate": 7.5, "is_outlier": False},
+                "canonical": {
+                    "original_ai_rent": 1500,
+                    "ai_vacancy_rate": 6.0,
+                    "market_city": "Rochester",
+                },
+            }
+            for i in range(4)
+        ]
+        with patch("knowledge_base._fetch_calibration_records", return_value=records):
+            text = get_assumption_learning_context("Rochester")
+
+        self.assertIn("ASSUMPTION CALIBRATION", text)
+        self.assertIn("Rochester:", text)
+        self.assertIn("rent:", text)
+        self.assertIn("vacancy:", text)
+        self.assertNotIn("@", text)
+        self.assertNotIn("Main St", text)
+
+    def test_merge_preserves_original_ai_rent_when_user_rent_differs(self):
+        from knowledge_base import _merge_with_user_override
+
+        canonical = {
+            "original_ai_rent": 1500,
+            "rent": 1500,
+            "ai_vacancy_rate": 5.0,
+        }
+        merged = _merge_with_user_override(
+            canonical,
+            {"rent": 1800, "is_outlier": False, "override_notes": ""},
+        )
+        self.assertEqual(merged["rent"], 1800)
+        self.assertEqual(merged["original_ai_rent"], 1500)
+
+    def test_save_override_partial_fields(self):
+        from unittest.mock import MagicMock, patch
+
+        from knowledge_base import save_user_property_override
+
+        property_id = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        user_id = "7f35bc1e-9de5-484d-8f73-27fd3da733eb"
+        mock_response = MagicMock(data=[{"id": "ov1"}])
+        mock_table = MagicMock()
+        mock_table.upsert.return_value.execute.return_value = mock_response
+        mock_client = MagicMock()
+        mock_client.table.return_value = mock_table
+
+        with patch("knowledge_base.get_client", return_value=mock_client), patch(
+            "knowledge_base.resolve_canonical_property_id",
+            return_value=property_id,
+        ):
+            result = save_user_property_override(
+                user_id,
+                property_id,
+                {"rent": 1750.0, "override_notes": "Comp-backed"},
+                address="1 Test St",
+            )
+
+        self.assertIsNotNone(result)
+        payload = mock_table.upsert.call_args.args[0]
+        self.assertEqual(payload["rent"], 1750.0)
+        self.assertNotIn("vacancy_rate", payload)
+        self.assertNotIn("maint_percent", payload)
 
 
 class TestConfigSecrets(unittest.TestCase):
