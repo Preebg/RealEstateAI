@@ -9,6 +9,11 @@ scripts/*
 !scripts/run_harvester.cmd
 !scripts/run_harvester.ps1
 !scripts/setup_task.ps1
+!scripts/setup_idle_guard.ps1
+!scripts/wake_stack.cmd
+!scripts/stack_idle_guard.cmd
+!scripts/run_wake_proxy.cmd
+!scripts/wake_proxy.py
 !scripts/migrate_supabase_to_local.py
 supabase/
 # Turnkey email digest (deferred — requires domain + Resend)

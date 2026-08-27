@@ -1,0 +1,19 @@
+# Optional dev overlay — hot reload + always-on containers:
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+
+services:
+  postgres:
+    restart: unless-stopped
+  postgrest:
+    restart: unless-stopped
+  rest-gateway:
+    restart: unless-stopped
+  api:
+    restart: unless-stopped
+    volumes:
+      - ./:/app
+    command: >
+      uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
+      --reload-exclude __pycache__
+      --reload-exclude "*.pyc"
+      --reload-exclude .git

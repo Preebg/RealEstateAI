@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import threading
 import uuid
-from concurrent.futures import ThreadPoolExecutor
+from api.thread_pool import get_pool
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
@@ -17,7 +17,7 @@ from services.deferred_analysis import (
     finance_task_signature,
 )
 
-_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="capeigen-job")
+
 _lock = threading.RLock()
 _jobs: dict[str, AnalysisJob] = {}
 
@@ -161,7 +161,7 @@ def _run_deferred_queue_inner(job_id: str) -> None:
 
 
 def schedule_deferred_work(job_id: str) -> None:
-    _executor.submit(_run_deferred_queue, job_id)
+    get_pool("capeigen-job").submit(_run_deferred_queue, job_id)
 
 
 def seed_job_from_analysis(

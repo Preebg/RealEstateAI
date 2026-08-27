@@ -47,7 +47,18 @@ python harvester.py
 
 You should see `Harvest data backend: local-postgres`.
 
-Scheduled Task Scheduler runs must use `scripts\run_harvester.cmd` with **no arguments**, as **SYSTEM**. That wrapper starts Docker Desktop Service (LocalSystem) and `docker desktop start`, brings up `postgres` / `postgrest` / `rest-gateway`, and waits for `http://127.0.0.1:3001/healthz` before launching Python. In the object-name box type `SYSTEM` (Check Names → `NT AUTHORITY\SYSTEM`).
+Scheduled Task Scheduler runs must use `scripts\run_harvester.cmd` with **no arguments**, as **SYSTEM**. That wrapper starts Docker Desktop Service (LocalSystem) and `docker desktop start`, brings up the stack via `scripts\wake_stack.cmd`, and waits for `http://127.0.0.1:3001/healthz` before launching Python. After each harvest it stops the stack unless `STACK_ALWAYS_ON=1` is set in `.env`. In the object-name box type `SYSTEM` (Check Names → `NT AUTHORITY\SYSTEM`).
+
+### Energy / on-demand stack
+
+| Piece | Role |
+|-------|------|
+| `scripts/run_wake_proxy.cmd` | Always-on (~negligible CPU). Caddy `/api/*` proxies here; wakes Docker on first request. |
+| `scripts/stack_idle_guard.cmd` | Stops the stack after `STACK_IDLE_MINUTES` (default 30) with no API traffic. Register via `scripts/setup_idle_guard.ps1`. |
+| `STACK_ALWAYS_ON=1` | Keep containers running (dev machines). |
+| `STACK_STOP_DOCKER=0` | Stop containers when idle but leave Docker Desktop running. |
+
+For local dev with hot reload: `docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build`
 
 ## Copy hosted Supabase catalog into local Postgres
 

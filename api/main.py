@@ -10,6 +10,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from api.deps import data_client_for_request, user_from_token
+from api.stack_activity import touch_stack_activity
 from api.routes import (
     account,
     analysis,
@@ -60,6 +61,14 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def record_stack_activity(request: Request, call_next):  # type: ignore[no-untyped-def]
+    path = request.url.path
+    if path.startswith("/api/") and path != "/api/health":
+        touch_stack_activity()
+    return await call_next(request)
 
 
 @app.middleware("http")

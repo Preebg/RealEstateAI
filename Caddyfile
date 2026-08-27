@@ -3,10 +3,13 @@
 #
 # Cloudflare Tunnel should point: capeigen.preebg.dev → http://localhost:80
 # Build the SPA first:  cd web && npm ci && npm run build
+#
+# /api/* goes through the always-on wake proxy (scripts/run_wake_proxy.cmd),
+# which starts Docker only when a request arrives.
 
 :80 {
 	handle /api/* {
-		reverse_proxy 127.0.0.1:8000
+		reverse_proxy 127.0.0.1:8088
 	}
 
 	handle {

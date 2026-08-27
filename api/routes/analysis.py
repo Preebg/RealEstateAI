@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
+from api.thread_pool import get_pool
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
@@ -31,7 +31,6 @@ from services.property_analysis_flow import (
 )
 
 router = APIRouter(tags=["analysis"])
-_start_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="analysis-start")
 
 
 def _authorize_job(job_id: str, user_id: str | None) -> Any:
@@ -81,7 +80,7 @@ def start_analysis(
         guest_mode=False,
     )
     job.status = "running"
-    _start_executor.submit(_run_start, job.job_id, address, False, user_id)
+    get_pool("analysis-start").submit(_run_start, job.job_id, address, False, user_id)
 
     return AnalysisStartResponse(
         job_id=job.job_id,

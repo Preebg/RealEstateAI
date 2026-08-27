@@ -2,6 +2,14 @@ import { supabase } from './supabase'
 
 const API_BASE = (import.meta.env.VITE_API_URL as string | undefined)?.replace(/\/$/, '') || ''
 
+const COLD_START_RETRY_MS = 2500
+const COLD_START_MAX_ATTEMPTS = 6
+const RETRYABLE_STATUS = new Set([502, 503, 504])
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
 async function authHeader(): Promise<HeadersInit> {
   const { data } = await supabase.auth.getSession()
   const token = data.session?.access_token
@@ -61,19 +69,39 @@ export async function apiFetch<T>(
   Object.entries(auth).forEach(([k, v]) => headers.set(k, v))
 
   const url = `${API_BASE}${path}`
-  const res = await fetch(url, { ...init, headers })
-  if (!res.ok) {
-    let detail: unknown = res.statusText
+  let lastError: unknown
+
+  for (let attempt = 1; attempt <= COLD_START_MAX_ATTEMPTS; attempt += 1) {
     try {
-      const err = (await readJsonOrThrow(res)) as { detail?: unknown }
-      detail = err?.detail ?? err
-    } catch (e) {
-      if (e instanceof Error && e.message.includes('API')) throw e
+      const res = await fetch(url, { ...init, headers })
+      if (!res.ok && RETRYABLE_STATUS.has(res.status) && attempt < COLD_START_MAX_ATTEMPTS) {
+        await sleep(COLD_START_RETRY_MS)
+        continue
+      }
+      if (!res.ok) {
+        let detail: unknown = res.statusText
+        try {
+          const err = (await readJsonOrThrow(res)) as { detail?: unknown }
+          detail = err?.detail ?? err
+        } catch (e) {
+          if (e instanceof Error && e.message.includes('API')) throw e
+        }
+        throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail))
+      }
+      if (res.status === 204) return undefined as T
+      return (await readJsonOrThrow(res)) as T
+    } catch (error) {
+      lastError = error
+      const retryable =
+        attempt < COLD_START_MAX_ATTEMPTS &&
+        (error instanceof TypeError ||
+          (error instanceof Error && error.message.includes('Failed to fetch')))
+      if (!retryable) throw error
+      await sleep(COLD_START_RETRY_MS)
     }
-    throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail))
   }
-  if (res.status === 204) return undefined as T
-  return (await readJsonOrThrow(res)) as T
+
+  throw lastError instanceof Error ? lastError : new Error('API request failed')
 }
 
 export type AnalysisJob = {
