@@ -98,7 +98,7 @@ docker compose up -d postgres postgrest rest-gateway
 
 ## Host Caddy (public API)
 
-Existing root `Caddyfile` already proxies `/api/*` → `:8000`. Keep Postgres/PostgREST bound to localhost (compose ports). Do not publish `:5432` / `:3001` on the public internet.
+Existing root `Caddyfile` proxies `/api*` → wake proxy `:8088` → FastAPI `:8000`. Keep Postgres/PostgREST bound to localhost (compose ports). Do not publish `:5432` / `:3001` on the public internet.
 
 The Pages SPA must call this origin: set `VITE_API_URL` to the Cloudflare Tunnel hostname (no trailing slash) and redeploy. Confirm with:
 

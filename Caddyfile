@@ -8,7 +8,9 @@
 # which starts Docker only when a request arrives.
 
 :80 {
-	handle /api/* {
+	# /api/* matches only one segment (e.g. /api/health). Nested routes like
+	# /api/legal/acceptance need /api* or they hit file_server (GET → SPA, POST → 405).
+	handle /api* {
 		reverse_proxy 127.0.0.1:8088
 	}
 

@@ -7,7 +7,7 @@
    - **Root directory:** `web`
    - **Build command:** `npm run build`
    - **Deploy command:** `npm run deploy`
-   - Node 20 is pinned in `web/.nvmrc`.
+   - Node 22 is pinned in `web/.nvmrc` (Wrangler 4.x requires Node ≥ 22).
 
    `npm run deploy` runs `wrangler deploy --keep-vars` so dashboard secrets are not wiped. Do not leave the default `npx wrangler deploy` — that downloads Wrangler on every build and does not keep dashboard vars.
 3. Set environment variables for **Production** (and Preview if you use branch deploys). Mark `VITE_*` as available at **build time**. Mark function secrets as available to **Functions** (runtime):
