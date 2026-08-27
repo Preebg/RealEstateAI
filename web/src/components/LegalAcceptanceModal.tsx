@@ -33,13 +33,24 @@ export function LegalAcceptanceModal() {
         if (!cancelled) setStatus(next)
       } catch (err) {
         if (!cancelled) {
-          setError(err instanceof Error ? err.message : 'Could not check legal acceptance')
-          // Fail closed: require acceptance if status cannot be loaded.
-          setStatus({
-            needs_acceptance: true,
-            privacy_effective_date: '',
-            terms_effective_date: '',
-          })
+          const message =
+            err instanceof Error ? err.message : 'Could not check legal acceptance'
+          setError(message)
+          // Fail closed only when the API responded but acceptance is required.
+          // Route/config errors (stale API image, proxy) should not show a broken form.
+          const apiMisconfigured =
+            /unknown legal document|method not allowed|api is not configured|html instead of json/i.test(
+              message,
+            )
+          setStatus(
+            apiMisconfigured
+              ? { needs_acceptance: false, privacy_effective_date: '', terms_effective_date: '' }
+              : {
+                  needs_acceptance: true,
+                  privacy_effective_date: '',
+                  terms_effective_date: '',
+                },
+          )
         }
       } finally {
         if (!cancelled) setLoading(false)
@@ -51,7 +62,8 @@ export function LegalAcceptanceModal() {
     }
   }, [userId])
 
-  if (!userId || loading || !status?.needs_acceptance) return null
+  if (!userId || loading) return null
+  if (!status?.needs_acceptance && !error) return null
 
   const privacyLabel = formatLegalEffectiveDate(status.privacy_effective_date)
   const termsLabel = formatLegalEffectiveDate(status.terms_effective_date)
@@ -86,16 +98,28 @@ export function LegalAcceptanceModal() {
           <div>
             <p className="text-xs font-semibold uppercase tracking-wide text-primary">Legal update</p>
             <h2 id="legal-update-title" className="mt-1 font-display text-2xl font-semibold tracking-tight">
-              Updated Terms & Privacy Policy
+              {status?.needs_acceptance ? 'Updated Terms & Privacy Policy' : 'Legal check unavailable'}
             </h2>
             <p className="mt-3 text-sm leading-relaxed text-muted">
-              Our Privacy Policy and Terms of Service have changed
-              {effectiveBits ? ` (effective ${effectiveBits})` : ''}. Please review the updated
-              documents and agree before continuing to use CapEigen.
+              {status?.needs_acceptance ? (
+                <>
+                  Our Privacy Policy and Terms of Service have changed
+                  {effectiveBits ? ` (effective ${effectiveBits})` : ''}. Please review the updated
+                  documents and agree before continuing to use CapEigen.
+                </>
+              ) : (
+                <>
+                  The app could not verify your legal acceptance with the API. If you run the harvest
+                  machine, rebuild the API container:{' '}
+                  <code className="text-xs">docker compose up --build -d api</code>, then refresh.
+                </>
+              )}
             </p>
           </div>
 
           <div className="flex flex-wrap gap-x-5 gap-y-2 text-sm">
+            {status?.needs_acceptance && (
+              <>
             <Link
               className="font-medium text-primary underline"
               to="/legal/privacy"
@@ -112,8 +136,11 @@ export function LegalAcceptanceModal() {
             >
               Read Terms of Service
             </Link>
+              </>
+            )}
           </div>
 
+          {status?.needs_acceptance && (
           <label className="flex items-start gap-2 text-sm text-text">
             <input
               type="checkbox"
@@ -133,9 +160,11 @@ export function LegalAcceptanceModal() {
               .
             </span>
           </label>
+          )}
 
           {error && <p className="text-sm text-red-600 dark:text-red-300">{error}</p>}
 
+          {status?.needs_acceptance ? (
           <button
             type="button"
             disabled={!accepted || busy}
@@ -144,6 +173,15 @@ export function LegalAcceptanceModal() {
           >
             {busy ? 'Saving…' : 'Agree and continue'}
           </button>
+          ) : (
+          <button
+            type="button"
+            onClick={() => window.location.reload()}
+            className="w-full rounded-lg bg-primary py-3 text-sm font-semibold text-white hover:bg-primary-hover"
+          >
+            Retry
+          </button>
+          )}
         </div>
       </div>
     </div>
