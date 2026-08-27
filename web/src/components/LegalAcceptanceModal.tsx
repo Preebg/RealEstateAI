@@ -65,8 +65,8 @@ export function LegalAcceptanceModal() {
   if (!userId || loading) return null
   if (!status?.needs_acceptance && !error) return null
 
-  const privacyLabel = formatLegalEffectiveDate(status.privacy_effective_date)
-  const termsLabel = formatLegalEffectiveDate(status.terms_effective_date)
+  const privacyLabel = formatLegalEffectiveDate(status?.privacy_effective_date ?? '')
+  const termsLabel = formatLegalEffectiveDate(status?.terms_effective_date ?? '')
   const effectiveBits = [privacyLabel && `Privacy ${privacyLabel}`, termsLabel && `Terms ${termsLabel}`]
     .filter(Boolean)
     .join(' · ')
