@@ -16,6 +16,7 @@ import { GuestSharePage } from './pages/GuestSharePage'
 import { ActivityPage } from './pages/ActivityPage'
 import { UsagePage } from './pages/UsagePage'
 import { LegalAdminPage } from './pages/LegalAdminPage'
+import { ArchivedPropertiesPage } from './pages/ArchivedPropertiesPage'
 
 const HomePage = lazy(() =>
   import('./pages/HomePage').then((m) => ({ default: m.HomePage })),
@@ -104,6 +105,7 @@ export default function App() {
               <Route path="validation" element={<ValidationPage />} />
               <Route path="activity" element={<ActivityPage />} />
               <Route path="usage" element={<UsagePage />} />
+              <Route path="archived" element={<ArchivedPropertiesPage />} />
               <Route path="legal-admin" element={<LegalAdminPage />} />
             </Route>
           </Route>

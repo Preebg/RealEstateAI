@@ -2024,6 +2024,79 @@ class TestScannedAddressDetection(unittest.TestCase):
             "archive_stale_properties", {"p_age_days": 30}
         )
         invalidate_mock.assert_called_once()
+
+    def test_list_archived_properties_paginates_and_filters(self):
+        from unittest.mock import MagicMock, patch
+
+        from knowledge_base import (
+            ARCHIVED_PROPERTY_LIST_SELECT,
+            list_archived_properties,
+        )
+
+        mock_client = MagicMock()
+        mock_table = mock_client.table.return_value
+        count_chain = MagicMock()
+        list_chain = MagicMock()
+        mock_table.select.side_effect = [count_chain, list_chain]
+        count_chain.or_.return_value = count_chain
+        count_chain.execute.return_value = MagicMock(data=[], count=12)
+        list_chain.order.return_value.range.return_value.or_.return_value.execute.return_value = (
+            MagicMock(
+                data=[
+                    {
+                        "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+                        "address": "1 Main St",
+                        "archived_at": "2026-01-01T00:00:00Z",
+                    }
+                ]
+            )
+        )
+
+        with patch("knowledge_base._archived_data_client", return_value=mock_client):
+            rows, total = list_archived_properties(limit=25, offset=0, q="Main")
+
+        self.assertEqual(total, 12)
+        self.assertEqual(len(rows), 1)
+        mock_client.table.assert_called_with("archived_properties")
+        self.assertEqual(
+            mock_table.select.call_args_list[1].args[0],
+            ARCHIVED_PROPERTY_LIST_SELECT,
+        )
+        count_chain.or_.assert_called_once()
+        self.assertIn("address.ilike.", count_chain.or_.call_args.args[0])
+
+    def test_fetch_archived_dataset_rows_marks_source(self):
+        from unittest.mock import MagicMock, patch
+
+        from knowledge_base import fetch_archived_dataset_rows
+
+        mock_client = MagicMock()
+        mock_table = mock_client.table.return_value
+        archived_exec = MagicMock(
+            data=[{"id": "1", "address": "A", "price": 100, "timestamp": "2025-01-01"}]
+        )
+        active_exec = MagicMock(
+            data=[{"id": "2", "address": "B", "price": 200, "timestamp": "2026-01-01"}]
+        )
+        select_chain = mock_table.select.return_value
+        order_chain = select_chain.order.return_value
+        order_chain.range.side_effect = [
+            MagicMock(execute=MagicMock(return_value=archived_exec)),
+            MagicMock(execute=MagicMock(return_value=active_exec)),
+        ]
+
+        with patch("knowledge_base._archived_data_client", return_value=mock_client):
+            rows = fetch_archived_dataset_rows(include_active=True)
+
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["dataset_source"], "archived")
+        self.assertEqual(rows[1]["dataset_source"], "active")
+        self.assertIsNone(rows[1].get("archived_at"))
+        self.assertEqual(
+            [call.args[0] for call in mock_client.table.call_args_list],
+            ["archived_properties", "properties"],
+        )
+
     def test_prefers_valid_property_id_over_stale_cache(self):
         from unittest.mock import patch
 

@@ -104,6 +104,57 @@ export async function apiFetch<T>(
   throw lastError instanceof Error ? lastError : new Error('API request failed')
 }
 
+/** Authenticated binary/text download (CSV, PDF, etc.) that triggers a browser save. */
+export async function apiDownload(path: string, filename: string): Promise<void> {
+  const headers = new Headers()
+  const auth = await authHeader()
+  Object.entries(auth).forEach(([k, v]) => headers.set(k, v))
+
+  const url = `${API_BASE}${path}`
+  let lastError: unknown
+
+  for (let attempt = 1; attempt <= COLD_START_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      const res = await fetch(url, { headers })
+      if (!res.ok && RETRYABLE_STATUS.has(res.status) && attempt < COLD_START_MAX_ATTEMPTS) {
+        await sleep(COLD_START_RETRY_MS)
+        continue
+      }
+      if (!res.ok) {
+        let detail: unknown = res.statusText
+        try {
+          const err = (await readJsonOrThrow(res)) as { detail?: unknown }
+          detail = err?.detail ?? err
+        } catch (e) {
+          if (e instanceof Error && e.message.includes('API')) throw e
+        }
+        throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail))
+      }
+      const blob = await res.blob()
+      const disposition = res.headers.get('Content-Disposition') || ''
+      const match = /filename="([^"]+)"/i.exec(disposition)
+      const downloadName = match?.[1] || filename
+      const objectUrl = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = objectUrl
+      link.download = downloadName
+      link.click()
+      URL.revokeObjectURL(objectUrl)
+      return
+    } catch (error) {
+      lastError = error
+      const retryable =
+        attempt < COLD_START_MAX_ATTEMPTS &&
+        (error instanceof TypeError ||
+          (error instanceof Error && error.message.includes('Failed to fetch')))
+      if (!retryable) throw error
+      await sleep(COLD_START_RETRY_MS)
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error('Download failed')
+}
+
 export type AnalysisJob = {
   job_id: string
   status: string

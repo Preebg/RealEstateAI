@@ -74,6 +74,53 @@ ACTIVE_PROPERTY_LIST_COLUMNS = (
 
 ACTIVE_PROPERTY_LIST_SELECT = ",".join(ACTIVE_PROPERTY_LIST_COLUMNS)
 
+# Browse columns for the admin archived-properties UI (excludes heavy jsonb payloads).
+ARCHIVED_PROPERTY_LIST_COLUMNS = ACTIVE_PROPERTY_LIST_COLUMNS + ("archived_at", "strategy_tag")
+ARCHIVED_PROPERTY_LIST_SELECT = ",".join(ARCHIVED_PROPERTY_LIST_COLUMNS)
+
+# Slim feature set for training / model-building CSV exports.
+_DATASET_CORE_COLUMNS = (
+    "id",
+    "address",
+    "zip_code",
+    "state_code",
+    "market_city",
+    "price",
+    "predicted_value",
+    "year_built",
+    "square_footage",
+    "rent",
+    "original_ai_rent",
+    "tax_rate",
+    "hoa",
+    "insurance",
+    "maint_percent",
+    "original_ai_maint",
+    "location_score",
+    "quantum_risk_score",
+    "appreciation_forecast",
+    "forecast_rate",
+    "forecast_growth",
+    "ai_vacancy_rate",
+    "ai_management_fee",
+    "monthly_net_cash_flow",
+    "property_label",
+    "property_category",
+    "property_condition",
+    "strategy_tag",
+    "listing_status",
+    "days_on_market",
+    "latitude",
+    "longitude",
+    "is_turnkey",
+    "from_kb",
+    "timestamp",
+)
+ARCHIVED_DATASET_EXPORT_COLUMNS = _DATASET_CORE_COLUMNS + ("archived_at",)
+ARCHIVED_DATASET_EXPORT_SELECT = ",".join(ARCHIVED_DATASET_EXPORT_COLUMNS)
+ACTIVE_DATASET_EXPORT_SELECT = ",".join(_DATASET_CORE_COLUMNS)
+
+
 def is_valid_uuid(value: str | None) -> bool:
     """Return True when value is a well-formed UUID (Supabase auth user id)."""
     if not value or not str(value).strip():
@@ -294,6 +341,144 @@ def archive_stale_properties(
         invalidate_kb_cache()
         log.info("archive_stale_properties_success", moved=count, age_days=age_days)
     return count
+
+
+def _archived_data_client():
+    """Prefer service role for archive reads; fall back to the request DB client."""
+    from authenticate import get_service_client
+
+    return get_service_client() or get_client()
+
+
+def _archived_search_or_filter(needle: str) -> str:
+    """PostgREST ``or`` filter for address / market search (quoted ilike pattern)."""
+    cleaned = re.sub(r"[,%*()]", " ", needle).strip()
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    if not cleaned:
+        return ""
+    pattern = f'%{cleaned}%'
+    quoted = '"' + pattern.replace('"', "") + '"'
+    return (
+        f"address.ilike.{quoted},"
+        f"market_city.ilike.{quoted},"
+        f"zip_code.ilike.{quoted},"
+        f"state_code.ilike.{quoted}"
+    )
+
+
+def list_archived_properties(
+    *,
+    limit: int = 50,
+    offset: int = 0,
+    q: str | None = None,
+) -> tuple[list[dict[str, Any]], int]:
+    """
+    Paginated browse of ``archived_properties`` for the admin archive UI.
+
+    Returns ``(rows, total_count)``. Search ``q`` matches address / city / zip / state.
+    """
+    client = _archived_data_client()
+    if client is None:
+        return [], 0
+
+    limit = max(1, min(int(limit), 200))
+    offset = max(0, int(offset))
+    needle = (q or "").strip()
+
+    try:
+        count_query = client.table("archived_properties").select("id", count="exact")
+        list_query = (
+            client.table("archived_properties")
+            .select(ARCHIVED_PROPERTY_LIST_SELECT)
+            .order("archived_at", desc=True)
+            .range(offset, offset + limit - 1)
+        )
+        or_filter = _archived_search_or_filter(needle) if needle else ""
+        if or_filter:
+            count_query = count_query.or_(or_filter)
+            list_query = list_query.or_(or_filter)
+
+        count_response = count_query.execute()
+        list_response = list_query.execute()
+    except APIError as exc:
+        report_error(log, "list_archived_properties_failed", exc, q=needle or None)
+        raise
+
+    total = int(count_response.count or 0) if count_response.count is not None else 0
+    rows = list(list_response.data or [])
+    if not total and rows and not needle:
+        # Some PostgREST setups omit count; fall back to a best-effort length signal.
+        total = offset + len(rows)
+    return rows, total
+
+
+def fetch_archived_dataset_rows(
+    *,
+    include_active: bool = False,
+    q: str | None = None,
+    max_rows: int = 50_000,
+) -> list[dict[str, Any]]:
+    """
+    Load archived (and optionally active) property rows for dataset CSV export.
+
+    Heavy jsonb payloads (images, comps, sources) are excluded so the file stays
+    usable for offline model training.
+    """
+    client = _archived_data_client()
+    if client is None:
+        return []
+
+    page_size = 500
+    max_rows = max(1, min(int(max_rows), 100_000))
+    needle = (q or "").strip()
+    rows: list[dict[str, Any]] = []
+
+    def _page(table: str, *, mark_source: str, select: str) -> None:
+        nonlocal rows
+        offset = 0
+        while len(rows) < max_rows:
+            end = offset + page_size - 1
+            try:
+                query = (
+                    client.table(table)
+                    .select(select)
+                    .order("timestamp", desc=True)
+                    .range(offset, end)
+                )
+                or_filter = _archived_search_or_filter(needle) if needle else ""
+                if or_filter:
+                    query = query.or_(or_filter)
+                response = query.execute()
+            except APIError as exc:
+                report_error(
+                    log,
+                    "fetch_archived_dataset_failed",
+                    exc,
+                    table=table,
+                    q=needle or None,
+                )
+                raise
+            batch = response.data or []
+            for item in batch:
+                row = dict(item)
+                row["dataset_source"] = mark_source
+                if mark_source == "active":
+                    row.setdefault("archived_at", None)
+                rows.append(row)
+                if len(rows) >= max_rows:
+                    break
+            if len(batch) < page_size:
+                break
+            offset += page_size
+
+    _page(
+        "archived_properties",
+        mark_source="archived",
+        select=ARCHIVED_DATASET_EXPORT_SELECT,
+    )
+    if include_active and len(rows) < max_rows:
+        _page("properties", mark_source="active", select=ACTIVE_DATASET_EXPORT_SELECT)
+    return rows
 
 
 def _fetch_user_overrides_map(user_id: str) -> dict[str, dict[str, Any]]:
@@ -2523,7 +2708,11 @@ __all__ = [
     "delete_unreliable_property",
     "purge_unreliable_one_year_roi_properties",
     "archive_stale_properties",
+    "list_archived_properties",
+    "fetch_archived_dataset_rows",
     "ACTIVE_PROPERTY_ARCHIVE_DAYS",
+    "ARCHIVED_PROPERTY_LIST_COLUMNS",
+    "ARCHIVED_DATASET_EXPORT_COLUMNS",
     "get_kb_context",
     "enrich_property_for_ui",
     "get_assumption_learning_context",

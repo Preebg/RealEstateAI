@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { NavLink, Outlet, useNavigate } from 'react-router-dom'
-import { Map, Search, GitCompare, FlaskConical, Users, BarChart3, ScrollText, LogOut, Menu, X } from 'lucide-react'
+import { Map, Search, GitCompare, FlaskConical, Users, BarChart3, ScrollText, Archive, LogOut, Menu, X } from 'lucide-react'
 import { useAuthStore } from '../lib/authStore'
 import { isAdminUser } from '../lib/admin'
 import { trackPreviewEvent } from '../lib/previewActivity'
@@ -25,6 +25,7 @@ const nav: Array<{
 const adminNav: typeof nav = [
   { to: '/activity', label: 'Demo accounts', icon: Users },
   { to: '/usage', label: 'Site usage', icon: BarChart3 },
+  { to: '/archived', label: 'Archived Properties', icon: Archive },
   { to: '/legal-admin', label: 'Legal', icon: ScrollText },
   { to: '/validation', label: 'Model Validation', icon: FlaskConical },
 ]

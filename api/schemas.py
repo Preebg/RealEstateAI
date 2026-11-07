@@ -269,3 +269,11 @@ class ValidationMetricsResponse(BaseModel):
     rent_rmse: float | None
     report_text: str
     calibration_png_base64: str | None = None
+
+
+class ArchivedPropertiesListResponse(BaseModel):
+    properties: list[dict[str, Any]]
+    total: int
+    limit: int
+    offset: int
+    q: str | None = None

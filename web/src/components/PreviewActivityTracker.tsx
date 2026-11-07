@@ -13,6 +13,7 @@ export function PreviewActivityTracker() {
       location.pathname.startsWith('/login') ||
       location.pathname.startsWith('/legal') ||
       location.pathname.startsWith('/usage') ||
+      location.pathname.startsWith('/archived') ||
       location.pathname.startsWith('/legal-admin') ||
       location.pathname.startsWith('/activity') ||
       location.pathname.startsWith('/validation')

@@ -14,6 +14,7 @@ from api.stack_activity import touch_stack_activity
 from api.routes import (
     account,
     analysis,
+    archive,
     auth_demo,
     auth_google,
     compare_pdf,
@@ -111,6 +112,7 @@ app.include_router(analysis.router)
 app.include_router(guest.router)
 app.include_router(compare_pdf.router)
 app.include_router(validation.router)
+app.include_router(archive.router)
 
 
 @app.get("/")
