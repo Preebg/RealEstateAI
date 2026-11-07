@@ -2466,18 +2466,23 @@ class TestHeadlessDbClient(unittest.TestCase):
             "SUPABASE_AUTH_URL": "",
         }
         with patch.dict(os.environ, env, clear=False):
-            with patch("authenticate.get_authenticated_client", return_value=None):
+            # Prevent local .env from re-filling blank DATABASE_REST_URL.
+            with patch(
+                "authenticate.load_local_secrets_into_environ", return_value=False
+            ):
                 with patch(
-                    "authenticate.create_client", return_value=mock_service
-                ) as create:
-                    # Reload helpers so optional URL getters see cleared local URL.
-                    import authenticate as auth_mod
+                    "authenticate.get_authenticated_client", return_value=None
+                ):
+                    with patch(
+                        "authenticate.create_client", return_value=mock_service
+                    ) as create:
+                        import authenticate as auth_mod
 
-                    client = auth_mod.get_db_client()
-                    self.assertIs(client, mock_service)
-                    create.assert_called_once_with(
-                        "https://example.supabase.co", "service-role-key"
-                    )
+                        client = auth_mod.get_db_client()
+                        self.assertIs(client, mock_service)
+                        create.assert_called_once_with(
+                            "https://example.supabase.co", "service-role-key"
+                        )
 
     def test_prefers_authenticated_client_when_bound(self):
         from unittest.mock import MagicMock, patch
@@ -4550,19 +4555,27 @@ class TestDiscoveryScraper(unittest.TestCase):
                         return_value=[],
                     ):
                         with patch(
-                            "harvester.get_harvest_complete_addresses",
-                            return_value=[],
+                            "harvester.archive_stale_properties",
+                            return_value=0,
                         ):
-                            with patch("harvester.get_kb_raw_data", return_value={}):
+                            with patch(
+                                "harvester.get_harvest_complete_addresses",
+                                return_value=[],
+                            ):
                                 with patch(
-                                    "harvester._research_and_schedule_synthesis",
-                                    new_callable=AsyncMock,
+                                    "harvester.get_kb_raw_data", return_value={}
                                 ):
-                                    from harvester import run_harvester_pipeline_async
+                                    with patch(
+                                        "harvester._research_and_schedule_synthesis",
+                                        new_callable=AsyncMock,
+                                    ):
+                                        from harvester import (
+                                            run_harvester_pipeline_async,
+                                        )
 
-                                    report = asyncio.run(
-                                        run_harvester_pipeline_async(admin_uid)
-                                    )
+                                        report = asyncio.run(
+                                            run_harvester_pipeline_async(admin_uid)
+                                        )
 
         mock_scraper.assert_called_once()
         self.assertEqual(report["discovered"], 1)
@@ -4596,19 +4609,27 @@ class TestDiscoveryScraper(unittest.TestCase):
                         return_value=[],
                     ):
                         with patch(
-                            "harvester.get_harvest_complete_addresses",
-                            return_value=[],
+                            "harvester.archive_stale_properties",
+                            return_value=0,
                         ):
-                            with patch("harvester.get_kb_raw_data", return_value={}):
+                            with patch(
+                                "harvester.get_harvest_complete_addresses",
+                                return_value=[],
+                            ):
                                 with patch(
-                                    "harvester._research_and_schedule_synthesis",
-                                    new_callable=AsyncMock,
+                                    "harvester.get_kb_raw_data", return_value={}
                                 ):
-                                    from harvester import run_harvester_pipeline_async
+                                    with patch(
+                                        "harvester._research_and_schedule_synthesis",
+                                        new_callable=AsyncMock,
+                                    ):
+                                        from harvester import (
+                                            run_harvester_pipeline_async,
+                                        )
 
-                                    report = asyncio.run(
-                                        run_harvester_pipeline_async(admin_uid)
-                                    )
+                                        report = asyncio.run(
+                                            run_harvester_pipeline_async(admin_uid)
+                                        )
 
         mock_scraper.assert_called_once()
         mock_gemini.assert_called_once()

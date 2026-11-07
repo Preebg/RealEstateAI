@@ -325,7 +325,8 @@ def archive_stale_properties(
         response = client.rpc(
             "archive_stale_properties", {"p_age_days": age_days}
         ).execute()
-    except APIError as exc:
+    except Exception as exc:
+        # Network / gateway failures (httpx.ConnectError, etc.) must not abort harvest.
         report_error(log, "archive_stale_properties_failed", exc)
         return 0
 
