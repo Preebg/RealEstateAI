@@ -5,7 +5,7 @@ import os
 import re
 from datetime import datetime, timedelta, timezone
 from statistics import median
-from typing import Any
+from typing import Any, Iterator
 from uuid import UUID
 
 from postgrest.exceptions import APIError
@@ -413,37 +413,41 @@ def list_archived_properties(
     return rows, total
 
 
-def fetch_archived_dataset_rows(
+def iter_archived_dataset_rows(
     *,
     include_active: bool = False,
     q: str | None = None,
-    max_rows: int = 50_000,
-) -> list[dict[str, Any]]:
+    max_rows: int = 20_000,
+    page_size: int = 500,
+) -> Iterator[dict[str, Any]]:
     """
-    Load archived (and optionally active) property rows for dataset CSV export.
+    Yield archived (and optionally active) property rows for dataset CSV export.
 
-    Heavy jsonb payloads (images, comps, sources) are excluded so the file stays
-    usable for offline model training.
+    Heavy jsonb payloads are excluded. Uses indexed ``archived_at`` ordering for
+    the archive table so exports stay fast on the harvest machine.
     """
     client = _archived_data_client()
     if client is None:
-        return []
+        return
 
-    page_size = 500
-    max_rows = max(1, min(int(max_rows), 100_000))
+    page_size = max(50, min(int(page_size), 1000))
+    max_rows = max(1, min(int(max_rows), 50_000))
     needle = (q or "").strip()
-    rows: list[dict[str, Any]] = []
+    emitted = 0
 
-    def _page(table: str, *, mark_source: str, select: str) -> None:
-        nonlocal rows
+    def _page(
+        table: str, *, mark_source: str, select: str, order_col: str
+    ) -> Iterator[dict[str, Any]]:
+        nonlocal emitted
         offset = 0
-        while len(rows) < max_rows:
+        prev_first_id: str | None = None
+        while emitted < max_rows:
             end = offset + page_size - 1
             try:
                 query = (
                     client.table(table)
                     .select(select)
-                    .order("timestamp", desc=True)
+                    .order(order_col, desc=True)
                     .range(offset, end)
                 )
                 or_filter = _archived_search_or_filter(needle) if needle else ""
@@ -460,26 +464,61 @@ def fetch_archived_dataset_rows(
                 )
                 raise
             batch = response.data or []
+            if not batch:
+                break
+            first_id = str(batch[0].get("id") or "")
+            if first_id and first_id == prev_first_id:
+                # Range/offset ignored by gateway — stop instead of looping forever.
+                log.warning(
+                    "archived_dataset_page_stuck",
+                    table=table,
+                    offset=offset,
+                    first_id=first_id,
+                )
+                break
+            prev_first_id = first_id
             for item in batch:
                 row = dict(item)
                 row["dataset_source"] = mark_source
                 if mark_source == "active":
                     row.setdefault("archived_at", None)
-                rows.append(row)
-                if len(rows) >= max_rows:
-                    break
+                yield row
+                emitted += 1
+                if emitted >= max_rows:
+                    return
             if len(batch) < page_size:
                 break
             offset += page_size
 
-    _page(
+    yield from _page(
         "archived_properties",
         mark_source="archived",
         select=ARCHIVED_DATASET_EXPORT_SELECT,
+        order_col="archived_at",
     )
-    if include_active and len(rows) < max_rows:
-        _page("properties", mark_source="active", select=ACTIVE_DATASET_EXPORT_SELECT)
-    return rows
+    if include_active and emitted < max_rows:
+        yield from _page(
+            "properties",
+            mark_source="active",
+            select=ACTIVE_DATASET_EXPORT_SELECT,
+            order_col="timestamp",
+        )
+
+
+def fetch_archived_dataset_rows(
+    *,
+    include_active: bool = False,
+    q: str | None = None,
+    max_rows: int = 20_000,
+) -> list[dict[str, Any]]:
+    """Load archived/active dataset rows into a list (tests / small exports)."""
+    return list(
+        iter_archived_dataset_rows(
+            include_active=include_active,
+            q=q,
+            max_rows=max_rows,
+        )
+    )
 
 
 def _fetch_user_overrides_map(user_id: str) -> dict[str, dict[str, Any]]:
@@ -2711,6 +2750,7 @@ __all__ = [
     "archive_stale_properties",
     "list_archived_properties",
     "fetch_archived_dataset_rows",
+    "iter_archived_dataset_rows",
     "ACTIVE_PROPERTY_ARCHIVE_DAYS",
     "ARCHIVED_PROPERTY_LIST_COLUMNS",
     "ARCHIVED_DATASET_EXPORT_COLUMNS",

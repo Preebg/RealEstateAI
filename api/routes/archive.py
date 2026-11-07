@@ -6,7 +6,7 @@ import csv
 import io
 import json
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Iterator
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
@@ -14,7 +14,7 @@ from postgrest.exceptions import APIError
 
 from api.deps import AdminUser
 from api.schemas import ArchivedPropertiesListResponse
-from knowledge_base import fetch_archived_dataset_rows, list_archived_properties
+from knowledge_base import iter_archived_dataset_rows, list_archived_properties
 
 router = APIRouter(tags=["archive"])
 
@@ -69,6 +69,36 @@ def _cell(value: Any) -> str:
     return str(value)
 
 
+def _csv_stream(
+    *,
+    include_active: bool,
+    q: str | None,
+) -> Iterator[str]:
+    """Yield CSV text in chunks so the browser starts receiving data immediately."""
+    buffer = io.StringIO()
+    writer = csv.DictWriter(
+        buffer,
+        fieldnames=_EXPORT_FIELDNAMES,
+        extrasaction="ignore",
+        lineterminator="\n",
+    )
+    writer.writeheader()
+    yield buffer.getvalue()
+    buffer.seek(0)
+    buffer.truncate(0)
+
+    for row in iter_archived_dataset_rows(
+        include_active=include_active,
+        q=q,
+    ):
+        writer.writerow({key: _cell(row.get(key)) for key in _EXPORT_FIELDNAMES})
+        chunk = buffer.getvalue()
+        if chunk:
+            yield chunk
+            buffer.seek(0)
+            buffer.truncate(0)
+
+
 @router.get("/api/admin/archived-properties", response_model=ArchivedPropertiesListResponse)
 def admin_list_archived_properties(
     _admin: AdminUser,
@@ -101,35 +131,14 @@ def admin_export_archived_dataset(
     ),
     q: str = Query("", max_length=200),
 ) -> StreamingResponse:
-    try:
-        rows = fetch_archived_dataset_rows(
-            include_active=include_active,
-            q=q or None,
-        )
-    except APIError as exc:
-        raise HTTPException(
-            status_code=502,
-            detail="Could not export archived dataset from the database.",
-        ) from exc
-
-    buffer = io.StringIO()
-    writer = csv.DictWriter(
-        buffer,
-        fieldnames=_EXPORT_FIELDNAMES,
-        extrasaction="ignore",
-        lineterminator="\n",
-    )
-    writer.writeheader()
-    for row in rows:
-        writer.writerow({key: _cell(row.get(key)) for key in _EXPORT_FIELDNAMES})
-
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d")
     scope = "archived-plus-active" if include_active else "archived"
     filename = f"capeigen-dataset-{scope}-{stamp}.csv"
-    payload = buffer.getvalue().encode("utf-8")
-
     return StreamingResponse(
-        iter([payload]),
+        _csv_stream(include_active=include_active, q=q or None),
         media_type="text/csv; charset=utf-8",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-store",
+        },
     )

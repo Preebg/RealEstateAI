@@ -140,7 +140,8 @@ export function ArchivedPropertiesPage() {
           <h1 className="font-display text-3xl font-semibold">Archived properties</h1>
           <p className="mt-1 max-w-2xl text-muted">
             Harvested listings older than 30 days move here. Browse the archive and download a
-            feature CSV for offline model training.
+            feature CSV for offline model training. Full archive is usually a few thousand rows
+            (~1–3 MB) and should download in under a minute.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -158,10 +159,16 @@ export function ArchivedPropertiesPage() {
             disabled={exporting}
             className="rounded-lg bg-primary px-3 py-1.5 text-sm font-semibold text-white hover:bg-primary-hover disabled:opacity-60"
           >
-            {exporting ? 'Preparing…' : 'Download dataset CSV'}
+            {exporting ? 'Downloading…' : 'Download dataset CSV'}
           </button>
         </div>
       </header>
+      {exporting && (
+        <p className="text-sm text-muted">
+          Building CSV from Postgres (expect ~1–3 MB). This aborts after 90 seconds if the API
+          does not respond — refresh and confirm the harvest API is running if it stalls.
+        </p>
+      )}
 
       <form
         className="flex flex-wrap gap-2"

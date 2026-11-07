@@ -2101,7 +2101,15 @@ class TestScannedAddressDetection(unittest.TestCase):
         mock_client = MagicMock()
         mock_table = mock_client.table.return_value
         archived_exec = MagicMock(
-            data=[{"id": "1", "address": "A", "price": 100, "timestamp": "2025-01-01"}]
+            data=[
+                {
+                    "id": "1",
+                    "address": "A",
+                    "price": 100,
+                    "timestamp": "2025-01-01",
+                    "archived_at": "2025-02-01",
+                }
+            ]
         )
         active_exec = MagicMock(
             data=[{"id": "2", "address": "B", "price": 200, "timestamp": "2026-01-01"}]
@@ -2123,6 +2131,10 @@ class TestScannedAddressDetection(unittest.TestCase):
         self.assertEqual(
             [call.args[0] for call in mock_client.table.call_args_list],
             ["archived_properties", "properties"],
+        )
+        self.assertEqual(
+            [call.args[0] for call in select_chain.order.call_args_list],
+            ["archived_at", "timestamp"],
         )
 
     def test_prefers_valid_property_id_over_stale_cache(self):

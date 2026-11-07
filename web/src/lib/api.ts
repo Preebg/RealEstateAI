@@ -104,6 +104,9 @@ export async function apiFetch<T>(
   throw lastError instanceof Error ? lastError : new Error('API request failed')
 }
 
+const DOWNLOAD_TIMEOUT_MS = 90_000
+const DOWNLOAD_MAX_ATTEMPTS = 3
+
 /** Authenticated binary/text download (CSV, PDF, etc.) that triggers a browser save. */
 export async function apiDownload(path: string, filename: string): Promise<void> {
   const headers = new Headers()
@@ -113,10 +116,12 @@ export async function apiDownload(path: string, filename: string): Promise<void>
   const url = `${API_BASE}${path}`
   let lastError: unknown
 
-  for (let attempt = 1; attempt <= COLD_START_MAX_ATTEMPTS; attempt += 1) {
+  for (let attempt = 1; attempt <= DOWNLOAD_MAX_ATTEMPTS; attempt += 1) {
+    const controller = new AbortController()
+    const timer = window.setTimeout(() => controller.abort(), DOWNLOAD_TIMEOUT_MS)
     try {
-      const res = await fetch(url, { headers })
-      if (!res.ok && RETRYABLE_STATUS.has(res.status) && attempt < COLD_START_MAX_ATTEMPTS) {
+      const res = await fetch(url, { headers, signal: controller.signal })
+      if (!res.ok && RETRYABLE_STATUS.has(res.status) && attempt < DOWNLOAD_MAX_ATTEMPTS) {
         await sleep(COLD_START_RETRY_MS)
         continue
       }
@@ -143,12 +148,19 @@ export async function apiDownload(path: string, filename: string): Promise<void>
       return
     } catch (error) {
       lastError = error
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        throw new Error(
+          'Download timed out after 90s. The archive CSV should be well under 5 MB — check that the harvest API is up (docker compose up --build -d api), then try again.',
+        )
+      }
       const retryable =
-        attempt < COLD_START_MAX_ATTEMPTS &&
+        attempt < DOWNLOAD_MAX_ATTEMPTS &&
         (error instanceof TypeError ||
           (error instanceof Error && error.message.includes('Failed to fetch')))
       if (!retryable) throw error
       await sleep(COLD_START_RETRY_MS)
+    } finally {
+      window.clearTimeout(timer)
     }
   }
 
