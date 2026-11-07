@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { apiDownload, apiFetch } from '../lib/api'
+import { apiFetch } from '../lib/api'
 
 type ArchivedProperty = {
   id?: string
@@ -16,10 +16,25 @@ type ArchivedProperty = {
   quantum_risk_score?: number | null
   square_footage?: number | null
   year_built?: number | null
+  tax_rate?: number | null
+  hoa?: number | null
+  insurance?: number | null
+  maint_percent?: number | null
+  original_ai_maint?: number | null
+  appreciation_forecast?: number | null
+  forecast_rate?: number | null
+  forecast_growth?: number | null
+  ai_vacancy_rate?: number | null
+  ai_management_fee?: number | null
   property_label?: string | null
   property_category?: string | null
+  property_condition?: string | null
   strategy_tag?: string | null
   listing_status?: string | null
+  days_on_market?: number | null
+  latitude?: number | null
+  longitude?: number | null
+  from_kb?: boolean | null
   timestamp?: string | null
   archived_at?: string | null
 }
@@ -32,7 +47,51 @@ type ArchivedListResponse = {
   q?: string | null
 }
 
+type PortfolioResponse = {
+  properties?: ArchivedProperty[]
+}
+
 const PAGE_SIZE = 50
+const EXPORT_PAGE_SIZE = 200
+
+const CSV_COLUMNS = [
+  'dataset_source',
+  'id',
+  'address',
+  'zip_code',
+  'state_code',
+  'market_city',
+  'price',
+  'predicted_value',
+  'year_built',
+  'square_footage',
+  'rent',
+  'original_ai_rent',
+  'tax_rate',
+  'hoa',
+  'insurance',
+  'maint_percent',
+  'original_ai_maint',
+  'location_score',
+  'quantum_risk_score',
+  'appreciation_forecast',
+  'forecast_rate',
+  'forecast_growth',
+  'ai_vacancy_rate',
+  'ai_management_fee',
+  'monthly_net_cash_flow',
+  'property_label',
+  'property_category',
+  'property_condition',
+  'strategy_tag',
+  'listing_status',
+  'days_on_market',
+  'latitude',
+  'longitude',
+  'from_kb',
+  'timestamp',
+  'archived_at',
+] as const
 
 function formatWhen(iso?: string | null) {
   if (!iso) return '—'
@@ -57,6 +116,98 @@ function formatNumber(value?: number | null, digits = 0) {
   })
 }
 
+function csvEscape(value: string): string {
+  if (/[",\n]/.test(value)) return `"${value.replace(/"/g, '""')}"`
+  return value
+}
+
+function cellValue(row: Record<string, unknown>, key: string): string {
+  const value = row[key]
+  if (value == null) return ''
+  if (typeof value === 'boolean') return value ? 'true' : 'false'
+  if (typeof value === 'object') return JSON.stringify(value)
+  return String(value)
+}
+
+function downloadCsv(filename: string, rows: Record<string, unknown>[]) {
+  const lines = [
+    CSV_COLUMNS.join(','),
+    ...rows.map((row) =>
+      CSV_COLUMNS.map((col) => csvEscape(cellValue(row, col))).join(','),
+    ),
+  ]
+  const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = filename
+  link.click()
+  URL.revokeObjectURL(url)
+}
+
+const PAGE_FETCH_TIMEOUT_MS = 45_000
+
+async function apiFetchPage<T>(path: string): Promise<T> {
+  const controller = new AbortController()
+  const timer = window.setTimeout(() => controller.abort(), PAGE_FETCH_TIMEOUT_MS)
+  try {
+    return await apiFetch<T>(path, { signal: controller.signal })
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      throw new Error(
+        `Archive page timed out after ${PAGE_FETCH_TIMEOUT_MS / 1000}s. Confirm the harvest API is awake, then retry.`,
+      )
+    }
+    throw error
+  } finally {
+    window.clearTimeout(timer)
+  }
+}
+
+async function fetchAllArchived(
+  query: string,
+  onProgress: (loaded: number, total: number) => void,
+): Promise<Record<string, unknown>[]> {
+  const out: Record<string, unknown>[] = []
+  let offset = 0
+  let total = Number.POSITIVE_INFINITY
+
+  while (offset < total) {
+    const params = new URLSearchParams({
+      limit: String(EXPORT_PAGE_SIZE),
+      offset: String(offset),
+    })
+    if (query.trim()) params.set('q', query.trim())
+    const res = await apiFetchPage<ArchivedListResponse>(
+      `/api/admin/archived-properties?${params.toString()}`,
+    )
+    const batch = res.properties || []
+    total = typeof res.total === 'number' ? res.total : offset + batch.length
+    for (const item of batch) {
+      out.push({ ...item, dataset_source: 'archived' })
+    }
+    offset += EXPORT_PAGE_SIZE
+    onProgress(Math.min(out.length, total), total)
+    if (batch.length === 0) break
+    // Guard against a gateway that ignores offset and repeats page 1.
+    if (batch.length < EXPORT_PAGE_SIZE) break
+    if (out.length >= total) break
+  }
+  return out
+}
+
+async function fetchActiveCatalog(
+  onProgress: (message: string) => void,
+): Promise<Record<string, unknown>[]> {
+  onProgress('Loading live catalog…')
+  const res = await apiFetchPage<PortfolioResponse>('/api/portfolio')
+  return (res.properties || []).map((item) => ({
+    ...item,
+    dataset_source: 'active',
+    archived_at: null,
+  }))
+}
+
 export function ArchivedPropertiesPage() {
   const [rows, setRows] = useState<ArchivedProperty[]>([])
   const [total, setTotal] = useState(0)
@@ -67,6 +218,7 @@ export function ArchivedPropertiesPage() {
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(true)
   const [exporting, setExporting] = useState(false)
+  const [exportProgress, setExportProgress] = useState<string | null>(null)
 
   async function load(nextPage = page, nextQuery = query) {
     setBusy(true)
@@ -117,17 +269,30 @@ export function ArchivedPropertiesPage() {
   async function downloadDataset() {
     setExporting(true)
     setError(null)
-    const params = new URLSearchParams()
-    if (includeActive) params.set('include_active', 'true')
-    if (query.trim()) params.set('q', query.trim())
-    const qs = params.toString()
+    setExportProgress('Starting export…')
     try {
-      await apiDownload(
-        `/api/admin/archived-properties/export${qs ? `?${qs}` : ''}`,
-        `capeigen-dataset-${includeActive ? 'full' : 'archived'}.csv`,
+      const archived = await fetchAllArchived(query, (loaded, expected) => {
+        setExportProgress(`Fetched ${loaded.toLocaleString()} / ${expected.toLocaleString()} archived rows…`)
+      })
+      let combined = archived
+      if (includeActive) {
+        const active = await fetchActiveCatalog(setExportProgress)
+        combined = [...archived, ...active]
+        setExportProgress(
+          `Building CSV (${combined.length.toLocaleString()} rows: ${archived.length} archived + ${active.length} active)…`,
+        )
+      } else {
+        setExportProgress(`Building CSV (${combined.length.toLocaleString()} rows)…`)
+      }
+      const stamp = new Date().toISOString().slice(0, 10).replace(/-/g, '')
+      downloadCsv(
+        `capeigen-dataset-${includeActive ? 'full' : 'archived'}-${stamp}.csv`,
+        combined,
       )
+      setExportProgress(null)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not download dataset')
+      setExportProgress(null)
     } finally {
       setExporting(false)
     }
@@ -139,9 +304,8 @@ export function ArchivedPropertiesPage() {
         <div>
           <h1 className="font-display text-3xl font-semibold">Archived properties</h1>
           <p className="mt-1 max-w-2xl text-muted">
-            Harvested listings older than 30 days move here. Browse the archive and download a
-            feature CSV for offline model training. Full archive is usually a few thousand rows
-            (~1–3 MB) and should download in under a minute.
+            Harvested listings older than 30 days move here. Download builds the CSV in your
+            browser from small paged API reads (usually ~1–3 MB total).
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -156,19 +320,14 @@ export function ArchivedPropertiesPage() {
           <button
             type="button"
             onClick={() => void downloadDataset()}
-            disabled={exporting}
+            disabled={exporting || busy}
             className="rounded-lg bg-primary px-3 py-1.5 text-sm font-semibold text-white hover:bg-primary-hover disabled:opacity-60"
           >
             {exporting ? 'Downloading…' : 'Download dataset CSV'}
           </button>
         </div>
       </header>
-      {exporting && (
-        <p className="text-sm text-muted">
-          Building CSV from Postgres (expect ~1–3 MB). This aborts after 90 seconds if the API
-          does not respond — refresh and confirm the harvest API is running if it stalls.
-        </p>
-      )}
+      {exportProgress && <p className="text-sm text-muted">{exportProgress}</p>}
 
       <form
         className="flex flex-wrap gap-2"
