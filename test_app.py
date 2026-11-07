@@ -1234,6 +1234,37 @@ class TestDiscoveryParsing(unittest.TestCase):
         self.assertEqual(len(listings), 1)
         self.assertIn("zillow.com", listings[0]["listing_url"])
 
+    def test_recovers_listings_from_chain_of_thought_prose(self):
+        from engine import _build_listings_from_raw
+
+        prose = """
+Let's start searching.*Okay, I have some promising results from the search.
+`3712 Mantua Ave, Philadelphia, PA 19104` - $245,000 (Snippet says "Modern kitchen")
+`2448 N Opal St, Philadelphia, PA 19132` - $149,900. (Snippet: "4 beds, 1 bath")
+Wait, I'll search for "Bensalem, PA" homes under $250,000.
+site:zillow.com "Philadelphia" "For sale" "under $250,000"
+`2108 Monroeville Rd, Monroeville, PA 15146` - $145,000. (House. 2 bds)
+"""
+        grounding_urls = [
+            "https://www.zillow.com/philadelphia-pa/",
+            "https://www.redfin.com/city/16839/PA/Philadelphia",
+        ]
+        listings = _build_listings_from_raw(
+            prose,
+            250_000,
+            grounding_urls=grounding_urls,
+        )
+        addresses = {item["address"] for item in listings}
+        self.assertIn("3712 Mantua Ave, Philadelphia, PA 19104", addresses)
+        self.assertIn("2448 N Opal St, Philadelphia, PA 19132", addresses)
+        self.assertIn("2108 Monroeville Rd, Monroeville, PA 15146", addresses)
+        by_address = {item["address"]: item for item in listings}
+        self.assertEqual(by_address["3712 Mantua Ave, Philadelphia, PA 19104"]["list_price"], 245000.0)
+        self.assertEqual(by_address["2448 N Opal St, Philadelphia, PA 19132"]["list_price"], 149900.0)
+        self.assertEqual(by_address["2108 Monroeville Rd, Monroeville, PA 15146"]["city"], "Pittsburgh")
+        self.assertTrue(all("Wait," not in item["address"] for item in listings))
+        self.assertTrue(all("site:zillow" not in item["address"].lower() for item in listings))
+
 
 class TestOneYearROI(unittest.TestCase):
     def test_unreliable_roi_threshold(self):

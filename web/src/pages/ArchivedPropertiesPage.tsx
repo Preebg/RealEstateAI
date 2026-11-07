@@ -86,7 +86,16 @@ export function ArchivedPropertiesPage() {
       setPage(nextPage)
       setQuery(nextQuery)
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not load archived properties')
+      const message = err instanceof Error ? err.message : 'Could not load archived properties'
+      const looksMissing =
+        /not found/i.test(message) ||
+        message.trim() === '404' ||
+        /failed to fetch/i.test(message)
+      setError(
+        looksMissing
+          ? `${message}. The archived-properties API may not be running on the harvest machine yet — rebuild/restart the API container (docker compose up --build -d api). Your data is still in Postgres; this is a routing/deploy issue, not a wipe.`
+          : message,
+      )
     } finally {
       setBusy(false)
     }

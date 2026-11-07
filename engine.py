@@ -292,6 +292,39 @@ _DISCOVERY_STATE_FULL_NAMES: frozenset[str] = frozenset(
 )
 _US_ZIP_RE = re.compile(r"\b\d{5}(?:-\d{4})?\b")
 _STREET_NUMBER_RE = re.compile(r"(?:^|\s)(\d{1,6}[A-Za-z]?)\s+\S+")
+_STREET_SUFFIX_RE = (
+    r"(?:St|Street|Ave|Avenue|Rd|Road|Dr|Drive|Ln|Lane|Blvd|Boulevard|Way|Ct|Court|"
+    r"Pl|Place|Ter|Terrace|Cir|Circle|Pkwy|Parkway|Hwy|Highway|Ext|Extension)\.?"
+)
+_EMBEDDED_STREET_ADDRESS_RE = re.compile(
+    rf"""
+    (?P<address>
+        \d{{1,6}}[A-Za-z]?
+        \s+
+        [A-Za-z0-9][A-Za-z0-9.'\-/]*(?:\s+[A-Za-z0-9][A-Za-z0-9.'\-/]*){{0,6}}
+        \s+{_STREET_SUFFIX_RE}
+        \s*,\s*
+        [A-Za-z][A-Za-z.\-']*(?:\s+[A-Za-z][A-Za-z.\-']*){{0,4}}
+        \s*,\s*
+        [A-Za-z]{{2}}
+        \s+
+        \d{{5}}(?:-\d{{4}})?
+    )
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+_PRICE_IN_TEXT_RE = re.compile(
+    r"\$\s*(\d{1,3}(?:,\d{3})+(?:\.\d{1,2})?|\d{4,7}(?:\.\d{1,2})?)",
+)
+_DISCOVERY_NARRATIVE_RE = re.compile(
+    r"(?i)^(?:"
+    r"wait\b|let'?s\b|actually\b|search\b|snippet\b|prompt\b|okay\b|no,|"
+    r"current count|one more|looking at|i'?ll\b|i will\b|i see\b|i have\b|"
+    r"i need\b|i should\b|site:|`site:|homes for sale|houses for sale|"
+    r"philadelphia metro|pittsburgh metro|philly\b|monroeville:|norristown:|"
+    r"exclude|strictly under|return only|json array"
+    r")"
+)
 # Grounded discovery needs more search calls than the SDK default (10 AFC).
 DISCOVERY_MAX_REMOTE_CALLS = 25
 DISCOVERY_FALLBACK_MAX_REMOTE_CALLS = 8
@@ -1515,6 +1548,7 @@ _PLACE_TO_MARKET: dict[str, str] = {
 def _strip_discovery_address_artifacts(text: str) -> str:
     """Remove JSON/escape backslashes and stray punctuation from discovery text."""
     cleaned = str(text or "").strip()
+    cleaned = cleaned.strip("`\"'")
     cleaned = cleaned.replace("\\,", ",")
     cleaned = re.sub(r"\\(?=[A-Za-z])", "", cleaned)
     cleaned = re.sub(r"([A-Za-z])\\+", r"\1", cleaned)
@@ -1522,7 +1556,42 @@ def _strip_discovery_address_artifacts(text: str) -> str:
     cleaned = re.sub(r"\s+,", ",", cleaned)
     cleaned = re.sub(r",\s+", ", ", cleaned)
     cleaned = re.sub(r"\s{2,}", " ", cleaned)
-    return cleaned.strip(" ,;")
+    cleaned = cleaned.strip(" ,;`'\"")
+    # Keep only through the ZIP when prose trails the address (price notes, thoughts).
+    zip_matches = list(_US_ZIP_RE.finditer(cleaned))
+    if zip_matches:
+        cleaned = cleaned[: zip_matches[-1].end()].strip(" ,;`'\"-")
+    return cleaned
+
+
+def _extract_price_from_text(text: str) -> float:
+    """Pull the first dollar amount from free-form discovery text."""
+    match = _PRICE_IN_TEXT_RE.search(str(text or ""))
+    if not match:
+        return 0.0
+    return safe_float(match.group(1))
+
+
+def _extract_embedded_street_address(text: str) -> str:
+    """Extract ``123 Main St, City, ST 12345`` from prose / backticks / notes."""
+    match = _EMBEDDED_STREET_ADDRESS_RE.search(str(text or ""))
+    if not match:
+        return ""
+    return _strip_discovery_address_artifacts(match.group("address"))
+
+
+def _looks_like_discovery_narrative(text: str) -> bool:
+    """True for search plans / chain-of-thought lines that are not listings."""
+    cleaned = str(text or "").strip()
+    if not cleaned:
+        return True
+    if _DISCOVERY_NARRATIVE_RE.search(cleaned):
+        return True
+    if "site:zillow" in cleaned.lower() or "under $250" in cleaned.lower():
+        return True
+    if cleaned.count("`") >= 2 and not _EMBEDDED_STREET_ADDRESS_RE.search(cleaned):
+        return True
+    return False
 
 
 def _title_place_name(name: str) -> str:
@@ -2284,11 +2353,13 @@ def _filter_verified_discovery_listings(
 
         if not is_plausible_discovery_address(address):
             reject_counts["address"] += 1
-            _log.info(
-                "discovery_rejected_address",
-                address=address[:80],
-                reason="implausible",
-            )
+            # Narrative / search-plan lines are expected noise — keep logs quiet.
+            if not _looks_like_discovery_narrative(raw_address):
+                _log.info(
+                    "discovery_rejected_address",
+                    address=address[:80],
+                    reason="implausible",
+                )
             continue
         listing_status = str(item.get("listing_status", "")).strip()
         if listing_status and is_inactive_listing_status(listing_status):
@@ -2299,6 +2370,10 @@ def _filter_verified_discovery_listings(
                 reason=f"inactive_status:{listing_status}",
             )
             continue
+        if list_price <= 0:
+            recovered = _extract_price_from_text(raw_address)
+            if recovered > 0:
+                list_price = recovered
         if list_price <= 0 or list_price > max_price:
             reject_counts["price"] += 1
             _log.info(
@@ -2364,6 +2439,13 @@ def _normalize_discovery_item(item: Any) -> dict[str, Any] | None:
     if not address:
         return None
 
+    price_from_text = _extract_price_from_text(address)
+    embedded = _extract_embedded_street_address(address)
+    if embedded:
+        address = embedded
+    else:
+        address = _strip_discovery_address_artifacts(address)
+
     repaired_address = _repair_discovery_address(address)
     if repaired_address != address:
         _log.info(
@@ -2372,6 +2454,9 @@ def _normalize_discovery_item(item: Any) -> dict[str, Any] | None:
             to_address=repaired_address[:80],
         )
         address = repaired_address
+
+    if not is_plausible_discovery_address(address):
+        return None
 
     city = _infer_discovery_city(
         address,
@@ -2383,6 +2468,8 @@ def _normalize_discovery_item(item: Any) -> dict[str, Any] | None:
     list_price = safe_float(
         item.get("list_price", item.get("price", item.get("asking_price", 0)))
     )
+    if list_price <= 0 and price_from_text > 0:
+        list_price = price_from_text
     listing_url = str(
         item.get("listing_url")
         or item.get("source_url")
@@ -2410,15 +2497,54 @@ def _normalize_discovery_item(item: Any) -> dict[str, Any] | None:
 
 
 def _parse_discovery_fallback(text: str) -> list[dict[str, Any]]:
-    """Parse plain-text address lines when JSON discovery fails."""
+    """
+    Recover listings from prose when the model skips JSON.
+
+    Gemini sometimes returns search chain-of-thought with embedded addresses and
+    prices. Extract only real ``street, city, ST ZIP`` hits and ignore narrative.
+    """
     results: list[dict[str, Any]] = []
-    for line in text.splitlines():
-        line = line.strip().lstrip("-•*0123456789.) ")
-        if len(line) < 10 or "," not in line:
+    seen: set[str] = set()
+
+    def _append(address: str, price: float) -> None:
+        city = _infer_discovery_city(address, "")
+        if not city or not is_plausible_discovery_address(address):
+            return
+        key = address.lower()
+        if key in seen:
+            return
+        seen.add(key)
+        results.append(
+            {
+                "address": address,
+                "city": city,
+                "list_price": price,
+                "listing_url": "",
+            }
+        )
+
+    # Whole-response scan first (catches addresses buried in paragraphs).
+    for match in _EMBEDDED_STREET_ADDRESS_RE.finditer(str(text or "")):
+        address = _strip_discovery_address_artifacts(match.group("address"))
+        tail = str(text or "")[match.end() : match.end() + 80]
+        price = _extract_price_from_text(tail) or _extract_price_from_text(
+            str(text or "")[max(0, match.start() - 20) : match.end() + 80]
+        )
+        _append(address, price)
+
+    # Line scan for cleaner bullet lists.
+    for raw_line in str(text or "").splitlines():
+        line = raw_line.strip().lstrip("-•*0123456789.) ")
+        if len(line) < 12 or "," not in line:
             continue
-        city = _infer_discovery_city(line, "")
-        if city:
-            results.append({"address": line, "city": city, "list_price": 0.0, "listing_url": ""})
+        if _looks_like_discovery_narrative(line):
+            continue
+        address = _extract_embedded_street_address(line)
+        if not address:
+            continue
+        price = _extract_price_from_text(line)
+        _append(address, price)
+
     return results
 
 
@@ -2737,7 +2863,13 @@ Use Google Search to find {scope}.
 Each listing price must be strictly under ${max_price:,.0f}.
 {priority_note}
 
-Return ONLY a JSON array (no markdown, no commentary). Example:
+CRITICAL OUTPUT FORMAT:
+- Reply with ONLY a JSON array. First character must be `[` and last must be `]`.
+- Do NOT write search plans, reasoning, thoughts, bullet notes, or markdown.
+- Do NOT wrap the JSON in code fences.
+- If you need to search, do it with tools silently, then emit JSON only.
+
+Example JSON shape:
 [
   {{
     "address": "123 Main St, Henrietta, NY 14623",
