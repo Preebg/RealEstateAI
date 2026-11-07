@@ -14,8 +14,6 @@ from google.genai import errors
 
 import engine
 from app_logging import configure_logging, report_error
-from discovery.normalize import listing_dict_to_scraped, scraped_to_research_dict
-from discovery.orchestrator import run_scraper_discovery_async
 from config_secrets import (
     load_local_secrets_into_environ,
     normalize_secret_value,
@@ -48,21 +46,6 @@ INVESTMENT_PARAMS = {
 _active_discovery_model = engine.DISCOVERY_MODEL
 _active_research_model = engine.RESEARCH_MODEL
 _active_synthesis_model = engine.SYNTHESIS_MODEL
-
-def resolve_discovery_backend() -> str:
-    """Return ``gemini`` (default) or ``scraper`` from DISCOVERY_BACKEND."""
-    raw = os.getenv("DISCOVERY_BACKEND")
-    if raw is not None and raw.strip():
-        backend = raw.strip().lower()
-        if backend in ("gemini", "scraper"):
-            return backend
-    legacy = os.getenv("HARVESTER_USE_SCRAPER", "").strip().lower()
-    if legacy in ("1", "true", "yes", "on"):
-        return "scraper"
-    if legacy in ("0", "false", "no", "off"):
-        return "gemini"
-    return "gemini"
-
 
 @dataclass
 class _SynthesisJob:
@@ -229,7 +212,7 @@ def _probe_local_rest_gateway(data_url: str) -> None:
 
 
 def _validate_harvest_network() -> bool:
-    """Confirm data API (and scraper hosts) resolve on this machine."""
+    """Confirm the data API resolves on this machine."""
     from authenticate import get_data_base_url, using_local_database
 
     try:
@@ -247,19 +230,6 @@ def _validate_harvest_network() -> bool:
         log.error("harvest_dns_failed", error=str(exc))
         print(f"Network configuration error: {exc}")
         return False
-
-    if resolve_discovery_backend() == "scraper":
-        for host, label in (
-            ("www.redfin.com", "Redfin scraper"),
-            ("www.realtor.com", "Realtor scraper"),
-            ("www.zillow.com", "Zillow scraper"),
-        ):
-            try:
-                resolve_hostname(host, label=label)
-            except OSError as exc:
-                log.error("harvest_dns_failed", error=str(exc), host=host)
-                print(f"Network configuration error: {exc}")
-                return False
 
     return True
 
@@ -350,23 +320,15 @@ async def _research_listing_with_fallback(
     rate_limiter: engine.ModelRateLimiter,
     session: engine.GenaiSession,
 ) -> dict[str, Any]:
-    """Stage 2 research — local scraper payload or gemma research fallback."""
+    """Stage 2 research via Gemini search grounding, then property-value enrichment."""
     _ = model_state  # research model is fixed; state kept for pipeline symmetry
-    if listing.get("discovery_model") == "scraper":
-        scraped = listing_dict_to_scraped(listing)
-        if scraped is None:
-            raise RuntimeError(f"Missing scraper payload for {address}")
-        research = scraped_to_research_dict(scraped, market_city=market_city)
-        research = engine._normalize_research_payload(address, research)
-        print(f"  [research] SCRAPER {address} — skipped Gemini research")
-    else:
-        research = await engine.research_property_async(
-            address,
-            discovery=listing,
-            model=engine.RESEARCH_MODEL,
-            rate_limiter=rate_limiter,
-            session=session,
-        )
+    research = await engine.research_property_async(
+        address,
+        discovery=listing,
+        model=engine.RESEARCH_MODEL,
+        rate_limiter=rate_limiter,
+        session=session,
+    )
     return await _run_property_value_stage(
         address,
         research,
@@ -844,10 +806,7 @@ async def run_harvester_pipeline_async(admin_user_id: str) -> dict[str, Any]:
     Execute the full accuracy workflow harvester once per run.
     """
     global _active_discovery_model, _active_research_model, _active_synthesis_model
-    discovery_backend = resolve_discovery_backend()
-    _active_discovery_model = (
-        "scraper" if discovery_backend == "scraper" else engine.DISCOVERY_MODEL
-    )
+    _active_discovery_model = engine.DISCOVERY_MODEL
     _active_research_model = engine.RESEARCH_MODEL
     _active_synthesis_model = engine.SYNTHESIS_MODEL
 
@@ -919,47 +878,22 @@ async def run_harvester_pipeline_async(admin_user_id: str) -> dict[str, Any]:
     print("=" * 60)
 
     print(
-        f"[discovery] Stage 1 START — "
-        f"{'live multi-portal search (Redfin, Realtor, Zillow)' if discovery_backend == 'scraper' else 'hot-market LLM search'} "
-        f"(Supabase KB skip list; ≤{engine.MAX_DISCOVERY_LISTINGS} listings under "
+        f"[discovery] Stage 1 START — hot-market LLM search with grounding "
+        f"(KB skip list; ≤{engine.MAX_DISCOVERY_LISTINGS} listings under "
         f"${engine.MAX_DISCOVERY_PRICE:,})...",
         flush=True,
     )
 
-    if discovery_backend == "scraper":
-        listings = await run_scraper_discovery_async(
-            admin_user_id=admin_user_id,
+    def _run_discovery() -> list[dict[str, Any]]:
+        return engine.discover_hot_market_listings(
             exclude_addresses=scanned_addresses,
-            enrich=True,
-            persist=False,
         )
-        if not listings:
-            print(
-                "[discovery] Scraper returned 0 listings (portal 403/bot blocks are common). "
-                "Falling back to Gemini hot-market search...",
-                flush=True,
-            )
-            listings = await asyncio.to_thread(
-                lambda: engine.discover_hot_market_listings(
-                    exclude_addresses=scanned_addresses,
-                )
-            )
-            if listings:
-                used_model = str(listings[0].get("discovery_model", "")).strip()
-                if used_model:
-                    _active_discovery_model = used_model
-    else:
 
-        def _run_discovery() -> list[dict[str, Any]]:
-            return engine.discover_hot_market_listings(
-                exclude_addresses=scanned_addresses,
-            )
-
-        listings = await asyncio.to_thread(_run_discovery)
-        if listings:
-            used_model = str(listings[0].get("discovery_model", "")).strip()
-            if used_model:
-                _active_discovery_model = used_model
+    listings = await asyncio.to_thread(_run_discovery)
+    if listings:
+        used_model = str(listings[0].get("discovery_model", "")).strip()
+        if used_model:
+            _active_discovery_model = used_model
     if scanned_keys:
         listings = [
             listing
@@ -974,18 +908,7 @@ async def run_harvester_pipeline_async(admin_user_id: str) -> dict[str, Any]:
     )
 
     if not listings:
-        if discovery_backend == "scraper":
-            if complete_keys:
-                print(
-                    "No new listings to harvest — live search found only addresses "
-                    f"already in Supabase ({len(complete_keys)} complete)."
-                )
-            else:
-                print(
-                    "Live scraper search returned no listings under the price cap. Exiting."
-                )
-        else:
-            print("No listings discovered. Exiting.")
+        print("No listings discovered. Exiting.")
         return report
 
     print(

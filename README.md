@@ -129,7 +129,6 @@ flowchart TB
         PGR[PostgREST :3001]
         AUTH[Supabase Auth]
         GEM[Google GenAI]
-        DISC["discovery/<br/>HTTP + parsers"]
     end
 
     SPA -->|Bearer JWT / JSON| API
@@ -142,7 +141,6 @@ flowchart TB
     ENG --> KB
     KB --> PGR --> PG
     POP --> PGR
-    ENG --> DISC
     API -.->|validate JWT| AUTH
 ```
 
@@ -565,9 +563,8 @@ RealEstateAI/
 ├── property_popularity.py    # In-app views + Property of the Day
 ├── comps_analysis.py         # Sale comps
 ├── rent_comps_analysis.py    # Rental comps + rent uplift
-├── harvester.py              # Batch discovery CLI (harvest machine)
+├── harvester.py              # Batch discovery CLI (Gemini search grounding)
 ├── authenticate.py           # Auth vs data URL split (Supabase Auth / local PostgREST)
-├── discovery/                # Listing source adapters & parsers
 ├── services/                 # property_analysis_flow, deferred_analysis
 ├── validation/               # Backtesting helpers
 ├── scripts/                  # e.g. migrate_supabase_to_local.py

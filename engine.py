@@ -4036,28 +4036,8 @@ def _synthesis_prompt(
     calibration_context = get_assumption_learning_context(market_city, user_id=user_id)
     research_payload = dict(research)
     listing_description = str(research_payload.pop("listing_description", "") or "").strip()
-    discovery_model = str(research.get("discovery_model", "") or "").strip()
     description_block = ""
-    if listing_description and discovery_model == "scraper":
-        days_on_market = research.get("days_on_market")
-        view_count = research.get("view_count")
-        listing_status = research.get("listing_status")
-        description_block = f"""
-LISTING DESCRIPTION (scraper — for context only, do NOT quote or copy verbatim):
-{listing_description[:4000]}
-LISTING METADATA:
-- days_on_market: {days_on_market}
-- view_count: {view_count}
-- listing_status: {listing_status}
-SUMMARY RULES:
-- Write an original 3–4 sentence investment summary in your own words.
-- Incorporate condition cues, renovation language, tenant/rent mentions, and DOM/views
-  when relevant (e.g. long DOM may imply negotiation room).
-- Never paste sentences from the listing description.
-- Use provided vacancy_rate and management_fee from market defaults; do not override unless
-  description strongly implies professional management or vacancy issues.
-"""
-    elif listing_description:
+    if listing_description:
         description_block = f"""
 LISTING DESCRIPTION (agent/public remarks — paraphrase for summary; NEVER copy verbatim):
 {listing_description}
