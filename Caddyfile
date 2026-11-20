@@ -1,23 +1,23 @@
-# CapEigen reverse proxy — run from the repo root on the host machine:
+# CapEigen API reverse proxy — run from the repo root on the host machine:
 #   caddy run --config Caddyfile
 #
-# Cloudflare Tunnel should point: capeigen.preebg.dev → http://localhost:80
-# Build the SPA first:  cd web && npm ci && npm run build
+# Public SPA is served by the Cloudflare Worker (capeigen.preebg.dev).
+# Cloudflare Tunnel should point only the API hostname here:
+#   api.capeigen.preebg.dev → http://localhost:80
 #
 # /api/* goes through the always-on wake proxy (scripts/run_wake_proxy.cmd),
 # which starts Docker only when a request arrives.
+# Do NOT serve the SPA from this host — marketing pages must work when
+# Caddy/Docker are offline.
 
 :80 {
 	# /api/* matches only one segment (e.g. /api/health). Nested routes like
-	# /api/legal/acceptance need /api* or they hit file_server (GET → SPA, POST → 405).
+	# /api/legal/acceptance need /api* or they hit the catch-all.
 	handle /api* {
 		reverse_proxy 127.0.0.1:8088
 	}
 
 	handle {
-		root * ./web/dist
-		encode gzip
-		try_files {path} /index.html
-		file_server
+		respond "CapEigen API origin. Use https://capeigen.preebg.dev for the app." 404
 	}
 }

@@ -2,44 +2,25 @@ import { useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { ArrowLeft } from 'lucide-react'
 import { clsx } from 'clsx'
-import { apiFetch } from '../lib/api'
 import { bundledLegalDocument, type BundledLegalDocument } from '../lib/legalDefaults'
 import { ThemeToggle } from '../components/ThemeToggle'
 import { LegalDocumentPreview } from '../components/LegalMarkdown'
 
 type LegalDocument = BundledLegalDocument
 
+/**
+ * Public legal pages use bundled copy only so they never hit the harvest
+ * gateway (Caddy/tunnel). Admin edits still live behind the signed-in editor.
+ */
 export function LegalPage() {
   const { doc } = useParams()
   const slug = doc === 'privacy' ? 'privacy' : 'terms'
   const [legalDoc, setLegalDoc] = useState<LegalDocument>(() => bundledLegalDocument(slug))
 
   useEffect(() => {
-    let cancelled = false
-    // Bundled copy first so /legal works with the API offline; refresh if API answers.
-    const fallback = bundledLegalDocument(slug)
-    setLegalDoc(fallback)
-    window.document.title = `${fallback.title} · CapEigen`
-
-    async function load() {
-      try {
-        const payload = await apiFetch<LegalDocument>(`/api/legal/${slug}`, {
-          skipAuth: true,
-          maxAttempts: 1,
-          timeoutMs: 3500,
-        })
-        if (!cancelled && payload?.body) {
-          setLegalDoc(payload)
-          window.document.title = `${payload.title} · CapEigen`
-        }
-      } catch {
-        // Keep bundled defaults — marketing legal pages must not depend on FastAPI.
-      }
-    }
-    void load()
-    return () => {
-      cancelled = true
-    }
+    const next = bundledLegalDocument(slug)
+    setLegalDoc(next)
+    window.document.title = `${next.title} · CapEigen`
   }, [slug])
 
   const title = legalDoc.title

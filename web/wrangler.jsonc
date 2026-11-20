@@ -2,14 +2,26 @@
   "name": "capeigen",
   "main": "./worker.js",
   "compatibility_date": "2026-08-15",
+  "workers_dev": true,
+  "preview_urls": true,
   "vars": {
     "API_URL": "https://capeigen.preebg.dev"
   },
+  // Worker sits in front of the tunnel origin so the SPA is served from
+  // Cloudflare ASSETS even when Caddy/Docker on the harvest machine are off.
+  // /api/* (except auth, handled above) is forwarded to the tunnel via fetch().
+  "routes": [
+    {
+      "pattern": "capeigen.preebg.dev/*",
+      "zone_name": "preebg.dev"
+    }
+  ],
   "assets": {
     "directory": "./dist",
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/api/auth/*"]
+    // Always run the Worker first so non-API paths never depend on Caddy.
+    "run_worker_first": true
   },
   "observability": {
     "enabled": true

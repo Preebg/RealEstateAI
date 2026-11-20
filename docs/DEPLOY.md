@@ -16,7 +16,7 @@
    |---|---|---|
    | `VITE_SUPABASE_URL` | Build + Functions | Auth project URL |
    | `VITE_SUPABASE_ANON_KEY` | Build + Functions | Browser-safe anon key |
-   | `VITE_API_URL` | Build + Functions | Public HTTPS origin of harvest-machine FastAPI (Cloudflare Tunnel / Caddy). Example: `https://capeigen.preebg.dev` |
+   | `VITE_API_URL` | Build + Functions | Same product host as the Worker (SPA + `/api` proxy). Example: `https://capeigen.preebg.dev`. The Worker serves the SPA from Cloudflare; only `/api/*` is forwarded to the tunnel → Caddy when the harvest stack is up. |
    | `VITE_GOOGLE_CLIENT_ID` | Build + Functions | Google Web client ID (public) |
    | `GOOGLE_WEB_CLIENT_ID` | Functions | Same as `VITE_GOOGLE_CLIENT_ID` |
    | `GOOGLE_WEB_CLIENT_SECRET` | Functions (secret) | Google Web client secret |
@@ -41,9 +41,15 @@ SPA client routes use Wrangler `not_found_handling: "single-page-application"`. 
 4. Confirm `GET /api/health` returns `{"status":"ok",...}` (`data_backend` is `local-postgres` or `supabase`).
 5. Restart the API after adding the Pages origin to `CORS_ORIGINS`. Preview `*.pages.dev` URLs are already allowed by the origin regex in `api/main.py`.
 
+## Offline marketing (no Caddy / Docker)
+
+`capeigen.preebg.dev/*` is a **Worker route** in front of the Cloudflare Tunnel origin. The Worker serves the SPA from ASSETS without calling the harvest machine. `/api/*` (except Worker-handled `/api/auth/*`) is `fetch()`’d to the tunnel → Caddy. When Caddy/Docker are down, landing/login/legal still load; login attempts show the contact-owner modal after a failed `/api/health` check.
+
+Host Caddy (`Caddyfile`) is **API-only** — do not rely on it for the SPA.
+
 ## Cutover notes
 
-1. Deploy Pages + API and verify Google login, preview-username login, and Individual Search.
-2. Point the product domain at Cloudflare Pages (or keep `*.pages.dev`).
+1. Deploy the Worker (`cd web && npm run build && npm run deploy`) + API and verify Google login, preview-username login, and Individual Search.
+2. Confirm `capeigen.preebg.dev` has a Worker route (see `web/wrangler.jsonc`) while DNS still points at the tunnel for API pass-through.
 3. Disconnect the Netlify site after the new origin works so you are not maintaining two frontends.
 4. CapEigen is FastAPI (`api/`) + React (`web/`) only.

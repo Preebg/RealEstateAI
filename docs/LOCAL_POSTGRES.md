@@ -98,9 +98,9 @@ docker compose up -d postgres postgrest rest-gateway
 
 ## Host Caddy (public API)
 
-Existing root `Caddyfile` proxies `/api*` → wake proxy `:8088` → FastAPI `:8000`. Keep Postgres/PostgREST bound to localhost (compose ports). Do not publish `:5432` / `:3001` on the public internet.
+Existing root `Caddyfile` is **API-only**: `/api*` → wake proxy `:8088` → FastAPI `:8000`. The public SPA is served by the Cloudflare Worker in front of the tunnel (see `web/wrangler.jsonc`); Caddy must not be required for marketing pages. Keep Postgres/PostgREST bound to localhost (compose ports). Do not publish `:5432` / `:3001` on the public internet.
 
-The Pages SPA must call this origin: set `VITE_API_URL` to the Cloudflare Tunnel hostname (no trailing slash) and redeploy. Confirm with:
+Set `VITE_API_URL` to the product hostname (no trailing slash) and redeploy so `/api/*` goes through the Worker → tunnel. Confirm with:
 
 ```powershell
 curl https://capeigen.preebg.dev/api/health
