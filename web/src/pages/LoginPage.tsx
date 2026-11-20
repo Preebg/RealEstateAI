@@ -15,6 +15,8 @@ import {
 } from '../lib/idleSession'
 import { recordLegalAcceptanceQuietly } from '../lib/legalAcceptance'
 import { ThemeToggle } from '../components/ThemeToggle'
+import { ServerUnavailableModal } from '../components/ServerUnavailableModal'
+import { useBackendLoginGate } from '../hooks/useBackendLoginGate'
 
 export function LoginPage() {
   const { session, loading } = useAuthStore()
@@ -39,6 +41,7 @@ export function LoginPage() {
   )
   const [idleNotice, setIdleNotice] = useState(() => consumeIdleLogoutNotice())
   const googleConfigured = Boolean(getGoogleClientId())
+  const { unavailableOpen, dismissUnavailable, ensureOnline } = useBackendLoginGate()
 
   useEffect(() => {
     if (searchParams.get('mode') === 'signup') setMode('signup')
@@ -66,6 +69,8 @@ export function LoginPage() {
     setInfo(null)
     setBusy(true)
     try {
+      if (!(await ensureOnline())) return
+
       if (mode === 'signin') {
         const { error: err } = await supabase.auth.signInWithPassword({ email, password })
         if (err) throw err
@@ -114,6 +119,7 @@ export function LoginPage() {
     setInfo(null)
     setBusy(true)
     try {
+      if (!(await ensureOnline())) return
       if (!previewAccepted) {
         throw new Error('Accept the Terms and Privacy Policy to continue.')
       }
@@ -133,6 +139,10 @@ export function LoginPage() {
     setBusy(true)
     warmHomeChunk()
     try {
+      if (!(await ensureOnline())) {
+        setBusy(false)
+        return
+      }
       await startGoogleOAuthRedirect()
     } catch (err) {
       setBusy(false)
@@ -142,6 +152,7 @@ export function LoginPage() {
 
   return (
     <div className="relative min-h-screen">
+      <ServerUnavailableModal open={unavailableOpen} onClose={dismissUnavailable} />
       {idleNotice && (
         <div
           className="fixed inset-x-0 top-0 z-20 border-b border-amber-200 bg-amber-50 px-4 py-3 text-center text-sm text-amber-950 shadow-sm"

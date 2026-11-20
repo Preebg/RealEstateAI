@@ -3,51 +3,37 @@ import { Link, useParams } from 'react-router-dom'
 import { ArrowLeft } from 'lucide-react'
 import { clsx } from 'clsx'
 import { apiFetch } from '../lib/api'
+import { bundledLegalDocument, type BundledLegalDocument } from '../lib/legalDefaults'
 import { ThemeToggle } from '../components/ThemeToggle'
 import { LegalDocumentPreview } from '../components/LegalMarkdown'
 
-type LegalDocument = {
-  title: string
-  body: string
-  effective_date?: string
-}
-
-const FALLBACK: Record<string, LegalDocument> = {
-  terms: {
-    title: 'Terms of Service',
-    body: 'Terms of Service could not be loaded. Please try again shortly.',
-  },
-  privacy: {
-    title: 'Privacy Policy',
-    body: 'Privacy Policy could not be loaded. Please try again shortly.',
-  },
-}
+type LegalDocument = BundledLegalDocument
 
 export function LegalPage() {
   const { doc } = useParams()
   const slug = doc === 'privacy' ? 'privacy' : 'terms'
-  const [legalDoc, setLegalDoc] = useState<LegalDocument | null>(null)
-  const [error, setError] = useState<string | null>(null)
-  const [loading, setLoading] = useState(true)
+  const [legalDoc, setLegalDoc] = useState<LegalDocument>(() => bundledLegalDocument(slug))
 
   useEffect(() => {
     let cancelled = false
+    // Bundled copy first so /legal works with the API offline; refresh if API answers.
+    const fallback = bundledLegalDocument(slug)
+    setLegalDoc(fallback)
+    window.document.title = `${fallback.title} · CapEigen`
+
     async function load() {
-      setLoading(true)
-      setError(null)
       try {
-        const payload = await apiFetch<LegalDocument>(`/api/legal/${slug}`)
-        if (!cancelled) {
+        const payload = await apiFetch<LegalDocument>(`/api/legal/${slug}`, {
+          skipAuth: true,
+          maxAttempts: 1,
+          timeoutMs: 3500,
+        })
+        if (!cancelled && payload?.body) {
           setLegalDoc(payload)
           window.document.title = `${payload.title} · CapEigen`
         }
-      } catch (err) {
-        if (!cancelled) {
-          setLegalDoc(FALLBACK[slug])
-          setError(err instanceof Error ? err.message : 'Could not load legal document')
-        }
-      } finally {
-        if (!cancelled) setLoading(false)
+      } catch {
+        // Keep bundled defaults — marketing legal pages must not depend on FastAPI.
       }
     }
     void load()
@@ -56,7 +42,7 @@ export function LegalPage() {
     }
   }, [slug])
 
-  const title = legalDoc?.title || (slug === 'privacy' ? 'Privacy Policy' : 'Terms of Service')
+  const title = legalDoc.title
 
   return (
     <div className="min-h-screen overflow-x-hidden bg-bg text-text">
@@ -117,22 +103,12 @@ export function LegalPage() {
             </Link>
           </nav>
 
-          {error && (
-            <p className="mt-6 rounded-lg border border-red-500/30 bg-red-500/5 px-4 py-3 text-sm text-red-700 dark:text-red-300">
-              {error}
-            </p>
-          )}
-
-          {loading && !legalDoc ? (
-            <p className="mt-10 text-sm text-muted">Loading…</p>
-          ) : (
-            <LegalDocumentPreview
-              className="mt-10"
-              title={title}
-              effectiveDate={legalDoc?.effective_date}
-              body={legalDoc?.body || ''}
-            />
-          )}
+          <LegalDocumentPreview
+            className="mt-10"
+            title={title}
+            effectiveDate={legalDoc.effective_date}
+            body={legalDoc.body}
+          />
         </div>
       </main>
 

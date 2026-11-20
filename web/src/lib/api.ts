@@ -57,24 +57,50 @@ async function readJsonOrThrow(res: Response): Promise<unknown> {
   }
 }
 
+export type ApiFetchOptions = RequestInit & {
+  /** Override cold-start retry budget (default COLD_START_MAX_ATTEMPTS). */
+  maxAttempts?: number
+  /** Abort the request after this many ms (per attempt). */
+  timeoutMs?: number
+  /** Skip attaching the Supabase bearer token (public marketing/legal pages). */
+  skipAuth?: boolean
+}
+
 export async function apiFetch<T>(
   path: string,
-  init: RequestInit = {},
+  init: ApiFetchOptions = {},
 ): Promise<T> {
-  const headers = new Headers(init.headers)
-  if (!headers.has('Content-Type') && init.body && !(init.body instanceof FormData)) {
+  const { maxAttempts = COLD_START_MAX_ATTEMPTS, timeoutMs, skipAuth, ...requestInit } = init
+  const headers = new Headers(requestInit.headers)
+  if (
+    !headers.has('Content-Type') &&
+    requestInit.body &&
+    !(requestInit.body instanceof FormData)
+  ) {
     headers.set('Content-Type', 'application/json')
   }
-  const auth = await authHeader()
-  Object.entries(auth).forEach(([k, v]) => headers.set(k, v))
+  if (!skipAuth) {
+    const auth = await authHeader()
+    Object.entries(auth).forEach(([k, v]) => headers.set(k, v))
+  }
 
   const url = `${API_BASE}${path}`
   let lastError: unknown
+  const attempts = Math.max(1, maxAttempts)
 
-  for (let attempt = 1; attempt <= COLD_START_MAX_ATTEMPTS; attempt += 1) {
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    const controller = timeoutMs != null ? new AbortController() : null
+    const timer =
+      controller && timeoutMs != null
+        ? window.setTimeout(() => controller.abort(), timeoutMs)
+        : null
     try {
-      const res = await fetch(url, { ...init, headers })
-      if (!res.ok && RETRYABLE_STATUS.has(res.status) && attempt < COLD_START_MAX_ATTEMPTS) {
+      const res = await fetch(url, {
+        ...requestInit,
+        headers,
+        signal: controller?.signal ?? requestInit.signal,
+      })
+      if (!res.ok && RETRYABLE_STATUS.has(res.status) && attempt < attempts) {
         await sleep(COLD_START_RETRY_MS)
         continue
       }
@@ -93,11 +119,14 @@ export async function apiFetch<T>(
     } catch (error) {
       lastError = error
       const retryable =
-        attempt < COLD_START_MAX_ATTEMPTS &&
+        attempt < attempts &&
         (error instanceof TypeError ||
-          (error instanceof Error && error.message.includes('Failed to fetch')))
+          (error instanceof Error &&
+            (error.message.includes('Failed to fetch') || error.name === 'AbortError')))
       if (!retryable) throw error
       await sleep(COLD_START_RETRY_MS)
+    } finally {
+      if (timer != null) window.clearTimeout(timer)
     }
   }
 

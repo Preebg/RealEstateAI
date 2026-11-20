@@ -26,6 +26,8 @@ import { signInWithPreviewUsername } from '../lib/demoLogin'
 import { prefetchHome, prefetchHomeChunk } from '../lib/prefetchHome'
 import { recordLegalAcceptanceQuietly } from '../lib/legalAcceptance'
 import { ThemeToggle } from '../components/ThemeToggle'
+import { ServerUnavailableModal } from '../components/ServerUnavailableModal'
+import { useBackendLoginGate } from '../hooks/useBackendLoginGate'
 
 const WHY = [
   {
@@ -270,12 +272,14 @@ function DemoLoginForm({ className }: { className?: string }) {
   const [accepted, setAccepted] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const { unavailableOpen, dismissUnavailable, ensureOnline } = useBackendLoginGate()
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault()
     setError(null)
     setBusy(true)
     try {
+      if (!(await ensureOnline())) return
       if (!accepted) throw new Error('Accept the Terms and Privacy Policy to continue.')
       prefetchHomeChunk()
       await signInWithPreviewUsername(username)
@@ -290,6 +294,8 @@ function DemoLoginForm({ className }: { className?: string }) {
   }
 
   return (
+    <>
+    <ServerUnavailableModal open={unavailableOpen} onClose={dismissUnavailable} />
     <form
       onSubmit={(e) => void onSubmit(e)}
       className={clsx(
@@ -344,6 +350,7 @@ function DemoLoginForm({ className }: { className?: string }) {
         {busy ? 'Signing in…' : 'Continue with username'}
       </button>
     </form>
+    </>
   )
 }
 

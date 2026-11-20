@@ -10,12 +10,18 @@ import {
 } from '../lib/googleOAuth'
 import { trackPreviewEvent } from '../lib/previewActivity'
 import { prefetchHome, prefetchHomeChunk } from '../lib/prefetchHome'
+import {
+  isBackendOnline,
+  SERVER_UNAVAILABLE_MESSAGE,
+} from '../lib/serverAvailability'
+import { ServerUnavailableModal } from '../components/ServerUnavailableModal'
 
 export function GoogleCallbackPage() {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const [error, setError] = useState<string | null>(null)
   const [status, setStatus] = useState('Completing Google sign-in…')
+  const [unavailableOpen, setUnavailableOpen] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -25,6 +31,12 @@ export function GoogleCallbackPage() {
       try {
         const linking = consumeGoogleOAuthLinkMode()
         if (linking) setStatus('Linking Google account…')
+
+        if (!linking && !(await isBackendOnline())) {
+          if (!cancelled) setUnavailableOpen(true)
+          return
+        }
+
         const parts = readGoogleOAuthCallback()
         const idToken = await exchangeGoogleAuthCode(parts)
 
@@ -67,6 +79,18 @@ export function GoogleCallbackPage() {
       cancelled = true
     }
   }, [navigate, queryClient])
+
+  if (unavailableOpen) {
+    return (
+      <div className="relative min-h-screen">
+        <ServerUnavailableModal
+          open
+          message={SERVER_UNAVAILABLE_MESSAGE}
+          onClose={() => navigate('/login', { replace: true })}
+        />
+      </div>
+    )
+  }
 
   if (error) {
     return (
